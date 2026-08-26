@@ -1,0 +1,35 @@
+# Секреты и локальные настройки
+.env
+.env.local
+*.pem
+
+# Рабочие артефакты
+logs/
+output/
+tmp/
+.playwright-cli/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+.venv/
+node_modules/
+
+# Песочница и токены QA-прогонов
+test/browser-vault/
+test/browser-token
+test/browser-fixture-token
+
+# Чужие референсы интерфейса — держим только локально
+design/linear-refs/
+
+# macOS
+.DS_Store
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/
+build/
+
+# Туннель содержит адрес личного VPS — в репозитории только шаблон
+launchd/com.lori.tunnel.plist

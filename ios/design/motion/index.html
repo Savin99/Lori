@@ -1,0 +1,918 @@
+<title>Движение в чате Lori</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  /* Палитра взята из LoriPalette приложения — один в один, чтобы выбор был
+     о движении, а не о цвете. Страница нарочно в одной теме: показывать
+     кремовое приложение на тёмном фоне значит показывать не его. */
+  :root {
+    --canvas: #f5f4e9;
+    --ink: #1f1f1c;
+    --muted: #707069;
+    --line: rgba(0, 0, 0, .12);
+    --bubble: #eae9e0;
+    --lime: #5c7800;
+    --lime-soft: #e3ebba;
+    --card: rgba(255, 255, 255, .78);
+    --card-solid: #fffef9;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    --serif: Georgia, "Iowan Old Style", "Times New Roman", serif;
+    --step: 1.5rem;
+  }
+
+  * { box-sizing: border-box; }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.55;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 1180px;
+    margin: 0 auto;
+    padding: clamp(28px, 5vw, 64px) clamp(18px, 4vw, 40px) 140px;
+  }
+
+  header h1 {
+    font-family: var(--serif);
+    font-size: clamp(30px, 5vw, 44px);
+    line-height: 1.1;
+    letter-spacing: -.02em;
+    margin: 0 0 10px;
+    text-wrap: balance;
+  }
+
+  header p {
+    margin: 0;
+    max-width: 62ch;
+    color: var(--muted);
+  }
+
+  header .how {
+    margin-top: 18px;
+    padding: 14px 16px;
+    border: 1px solid var(--line);
+    border-radius: 16px;
+    background: var(--card);
+    color: var(--ink);
+    font-size: 14.5px;
+    max-width: 62ch;
+  }
+
+  section { margin-top: clamp(40px, 7vw, 74px); }
+
+  .eyebrow {
+    display: flex;
+    align-items: baseline;
+    gap: 10px;
+    font-size: 12px;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-bottom: 6px;
+  }
+
+  .eyebrow b {
+    font-weight: 600;
+    color: var(--lime);
+    letter-spacing: .09em;
+  }
+
+  section h2 {
+    font-family: var(--serif);
+    font-size: clamp(21px, 3vw, 27px);
+    margin: 0 0 6px;
+    letter-spacing: -.015em;
+  }
+
+  section .lead {
+    margin: 0 0 6px;
+    color: var(--muted);
+    max-width: 68ch;
+    font-size: 15px;
+  }
+
+  .caveat {
+    display: inline-block;
+    margin: 8px 0 0;
+    padding: 5px 11px;
+    border-radius: 999px;
+    background: var(--bubble);
+    color: var(--ink);
+    font-size: 13px;
+  }
+
+  .variants {
+    margin-top: var(--step);
+    display: grid;
+    gap: 18px;
+    grid-template-columns: repeat(auto-fit, minmax(288px, 1fr));
+  }
+
+  .variant {
+    border: 1px solid var(--line);
+    border-radius: 22px;
+    background: var(--card);
+    padding: 16px 16px 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .variant.picked { border-color: var(--lime); box-shadow: inset 0 0 0 1px var(--lime); }
+
+  .variant header { display: flex; align-items: center; gap: 10px; }
+
+  .tag {
+    width: 26px;
+    height: 26px;
+    flex: none;
+    display: grid;
+    place-items: center;
+    border-radius: 9px;
+    background: var(--lime-soft);
+    color: var(--lime);
+    font-weight: 700;
+    font-size: 14px;
+  }
+
+  .variant h3 { margin: 0; font-size: 16px; font-weight: 600; }
+  .variant .note { margin: 0; color: var(--muted); font-size: 13.5px; }
+
+  /* Кадр телефона: ширина как у ленты чата на iPhone. */
+  .frame {
+    background: var(--canvas);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 16px 14px;
+    min-height: 188px;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 10px;
+    overflow: hidden;
+    position: relative;
+  }
+
+  .row { display: flex; gap: 8px; align-items: center; }
+  .right { justify-content: flex-end; }
+
+  .said {
+    background: var(--bubble);
+    border-radius: 20px;
+    padding: 9px 15px;
+    font-size: 14.5px;
+    max-width: 78%;
+  }
+
+  /* ── Пилюля вложения ─────────────────────────────────────────── */
+  .pill {
+    display: flex;
+    align-items: center;
+    gap: 11px;
+    padding: 10px 16px 10px 11px;
+    border-radius: 999px;
+    background: var(--card-solid);
+    border: 1px solid var(--line);
+    position: relative;
+    overflow: hidden;
+    width: 100%;
+  }
+
+  .pill .icon {
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 11px;
+    background: var(--lime-soft);
+    display: grid;
+    place-items: center;
+    position: relative;
+  }
+
+  .pill .name { font-size: 14.5px; font-weight: 600; }
+  .pill .sub { font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums; }
+  .pill .text { display: flex; flex-direction: column; line-height: 1.3; min-width: 0; }
+  .pill .text > * { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+
+  /* Эквалайзер */
+  .eq { display: flex; align-items: flex-end; gap: 2.5px; height: 16px; }
+  .eq i {
+    display: block;
+    width: 2.5px;
+    height: 100%;
+    border-radius: 2px;
+    background: var(--lime);
+    transform-origin: bottom;
+    animation: eq 1.05s ease-in-out infinite;
+  }
+  .eq i:nth-child(2) { animation-delay: .14s; }
+  .eq i:nth-child(3) { animation-delay: .28s; }
+  .eq i:nth-child(4) { animation-delay: .42s; }
+  @keyframes eq {
+    0%, 100% { transform: scaleY(.28); }
+    50% { transform: scaleY(1); }
+  }
+
+  /* Тонкая линия прогресса по низу пилюли */
+  .hairline-progress {
+    position: absolute;
+    left: 0;
+    bottom: 0;
+    height: 2px;
+    width: 100%;
+    background: var(--lime-soft);
+  }
+  .hairline-progress i {
+    display: block;
+    height: 100%;
+    width: 30%;
+    background: var(--lime);
+    animation: fill 7s linear infinite;
+  }
+  @keyframes fill {
+    0% { width: 6%; }
+    70% { width: 100%; }
+    100% { width: 100%; }
+  }
+
+  /* Кольцо */
+  @property --ring {
+    syntax: "<percentage>";
+    inherits: false;
+    initial-value: 8%;
+  }
+  .ring {
+    position: relative;
+    width: 34px;
+    height: 34px;
+    flex: none;
+    border-radius: 50%;
+    background:
+      conic-gradient(var(--lime) var(--ring), var(--lime-soft) 0) border-box;
+    display: grid;
+    place-items: center;
+    animation: ring 7s linear infinite;
+  }
+  .ring::after {
+    content: "";
+    width: 26px;
+    height: 26px;
+    border-radius: 50%;
+    background: var(--card-solid);
+    display: block;
+    position: absolute;
+  }
+  .ring span {
+    position: relative;
+    font-size: 10.5px;
+    font-weight: 700;
+    color: var(--lime);
+    font-variant-numeric: tabular-nums;
+  }
+  @keyframes ring {
+    0% { --ring: 6%; }
+    70% { --ring: 100%; }
+    100% { --ring: 100%; }
+  }
+
+  /* Заливка пилюли */
+  .flood::before {
+    content: "";
+    position: absolute;
+    inset: 0;
+    background: var(--lime-soft);
+    transform-origin: left;
+    transform: scaleX(.06);
+    animation: flood 7s cubic-bezier(.32, .72, .3, 1) infinite;
+  }
+  .flood > * { position: relative; }
+  @keyframes flood {
+    0% { transform: scaleX(.06); }
+    70% { transform: scaleX(1); }
+    100% { transform: scaleX(1); }
+  }
+
+  /* ── Обработка ───────────────────────────────────────────────── */
+  .steps { display: flex; flex-direction: column; gap: 9px; width: 100%; }
+  .step {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 14px;
+    color: var(--muted);
+    opacity: .45;
+    animation: stepIn 7.5s linear infinite;
+  }
+  .step:nth-child(1) { animation-delay: 0s; }
+  .step:nth-child(2) { animation-delay: 2.5s; }
+  .step:nth-child(3) { animation-delay: 5s; }
+  @keyframes stepIn {
+    0%, 2% { opacity: .45; color: var(--muted); }
+    4%, 33% { opacity: 1; color: var(--ink); }
+    35%, 100% { opacity: .8; color: var(--muted); }
+  }
+  .step .dot {
+    width: 16px;
+    height: 16px;
+    flex: none;
+    border-radius: 50%;
+    border: 1.5px solid var(--line);
+    display: grid;
+    place-items: center;
+  }
+  .step .dot svg { opacity: 0; animation: tick 7.5s linear infinite; }
+  .step:nth-child(1) .dot svg { animation-delay: 0s; }
+  .step:nth-child(2) .dot svg { animation-delay: 2.5s; }
+  .step:nth-child(3) .dot svg { animation-delay: 5s; }
+  @keyframes tick {
+    0%, 32% { opacity: 0; transform: scale(.6); }
+    36%, 100% { opacity: 1; transform: scale(1); }
+  }
+
+  /* Бегущий блеск по слову — приём, снятый с живых Claude и Grok */
+  .shimmer {
+    font-size: 15px;
+    font-weight: 500;
+    background: linear-gradient(90deg, var(--muted) 30%, var(--ink) 50%, var(--muted) 70%);
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+    animation: sweep 1.9s linear infinite;
+  }
+  @keyframes sweep {
+    0% { background-position: 120% 0; }
+    100% { background-position: -20% 0; }
+  }
+  .word-cycle { position: relative; height: 22px; overflow: hidden; }
+  .word-cycle span {
+    position: absolute;
+    left: 0;
+    top: 0;
+    animation: words 7.5s linear infinite, sweep 1.9s linear infinite;
+    opacity: 0;
+    background: linear-gradient(90deg, var(--muted) 30%, var(--ink) 50%, var(--muted) 70%);
+    background-size: 220% 100%;
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+  .word-cycle span:nth-child(2) { animation-delay: 2.5s; }
+  .word-cycle span:nth-child(3) { animation-delay: 5s; }
+  @keyframes words {
+    0% { opacity: 0; transform: translateY(60%); }
+    4%, 30% { opacity: 1; transform: translateY(0); }
+    34%, 100% { opacity: 0; transform: translateY(-60%); }
+  }
+
+  .big-ring {
+    width: 74px;
+    height: 74px;
+    border-radius: 50%;
+    background: conic-gradient(var(--lime) var(--ring), var(--lime-soft) 0);
+    display: grid;
+    place-items: center;
+    position: relative;
+    animation: ring 7s linear infinite;
+    margin: 0 auto;
+  }
+  .big-ring::after {
+    content: "";
+    position: absolute;
+    width: 60px;
+    height: 60px;
+    border-radius: 50%;
+    background: var(--canvas);
+  }
+  .big-ring b {
+    position: relative;
+    font-size: 17px;
+    font-variant-numeric: tabular-nums;
+    color: var(--ink);
+  }
+
+  /* ── Вопрос агента ───────────────────────────────────────────── */
+  .chips { display: flex; flex-wrap: wrap; gap: 7px; }
+  .chip {
+    padding: 7px 13px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--card-solid);
+    font-size: 13.5px;
+  }
+  .chip.on { background: var(--lime); border-color: var(--lime); color: #fff; }
+
+  .sheet {
+    position: absolute;
+    left: 8px;
+    right: 8px;
+    bottom: 8px;
+    background: var(--card-solid);
+    border: 1px solid var(--line);
+    border-radius: 20px;
+    padding: 14px;
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    animation: sheetUp 8s cubic-bezier(.22, .8, .24, 1) infinite;
+  }
+  @keyframes sheetUp {
+    0%, 8% { transform: translateY(115%); opacity: 0; }
+    16%, 78% { transform: translateY(0); opacity: 1; }
+    88%, 100% { transform: translateY(115%); opacity: 0; }
+  }
+  .scrim {
+    position: absolute;
+    inset: 0;
+    background: rgba(31, 31, 28, .16);
+    animation: scrim 8s linear infinite;
+  }
+  @keyframes scrim {
+    0%, 10% { opacity: 0; }
+    18%, 78% { opacity: 1; }
+    88%, 100% { opacity: 0; }
+  }
+
+  .qcard {
+    width: 100%;
+    background: var(--card-solid);
+    border: 1px solid var(--line);
+    border-radius: 18px;
+    padding: 13px;
+    display: flex;
+    flex-direction: column;
+    gap: 9px;
+    animation: qcard 8s ease-in-out infinite;
+  }
+  @keyframes qcard {
+    0%, 6% { transform: translateY(12px) scale(.97); opacity: 0; }
+    14%, 62% { transform: none; opacity: 1; }
+    72%, 100% { transform: translateY(-6px) scale(.99); opacity: .35; }
+  }
+  .answered {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13.5px;
+    color: var(--muted);
+    animation: answered 8s ease-in-out infinite;
+    opacity: 0;
+  }
+  @keyframes answered {
+    0%, 66% { opacity: 0; transform: translateY(6px); }
+    76%, 100% { opacity: 1; transform: none; }
+  }
+
+  .stack { position: relative; width: 100%; height: 132px; }
+  .stack .qcard { position: absolute; left: 0; right: 0; top: 0; animation: none; }
+  .stack .qcard.first { animation: stackOut 8s cubic-bezier(.3, .7, .3, 1) infinite; z-index: 2; }
+  .stack .qcard.second { animation: stackUp 8s cubic-bezier(.3, .7, .3, 1) infinite; z-index: 1; }
+  @keyframes stackOut {
+    0%, 44% { transform: none; opacity: 1; }
+    58%, 100% { transform: translateY(-14px) scale(.94); opacity: 0; }
+  }
+  @keyframes stackUp {
+    0%, 44% { transform: translateY(14px) scale(.94); opacity: .5; }
+    58%, 100% { transform: none; opacity: 1; }
+  }
+
+  /* ── Транскрипт ──────────────────────────────────────────────── */
+  .morph {
+    width: 100%;
+    background: var(--card-solid);
+    border: 1px solid var(--line);
+    overflow: hidden;
+    animation: morph 8s cubic-bezier(.3, .75, .25, 1) infinite;
+    padding: 10px 14px;
+  }
+  @keyframes morph {
+    0%, 22% { border-radius: 999px; max-height: 56px; }
+    38%, 82% { border-radius: 18px; max-height: 200px; }
+    96%, 100% { border-radius: 999px; max-height: 56px; }
+  }
+  .morph .body {
+    font-size: 13.5px;
+    color: var(--ink);
+    margin-top: 10px;
+    animation: bodyIn 8s ease-in-out infinite;
+    opacity: 0;
+  }
+  @keyframes bodyIn {
+    0%, 26% { opacity: 0; }
+    40%, 80% { opacity: 1; }
+    92%, 100% { opacity: 0; }
+  }
+
+  .seg {
+    display: flex;
+    background: var(--bubble);
+    border-radius: 999px;
+    padding: 3px;
+    font-size: 13px;
+    font-weight: 600;
+    width: 100%;
+  }
+  .seg span {
+    flex: 1;
+    text-align: center;
+    padding: 6px 0;
+    border-radius: 999px;
+    color: var(--muted);
+  }
+  .seg span.a { animation: segA 8s steps(1, end) infinite; }
+  .seg span.b { animation: segB 8s steps(1, end) infinite; }
+  @keyframes segA {
+    0%, 49% { background: var(--card-solid); color: var(--ink); }
+    50%, 100% { background: transparent; color: var(--muted); }
+  }
+  @keyframes segB {
+    0%, 49% { background: transparent; color: var(--muted); }
+    50%, 100% { background: var(--card-solid); color: var(--ink); }
+  }
+  .swap { position: relative; height: 74px; overflow: hidden; font-size: 13.5px; }
+  .swap div { position: absolute; inset: 0; }
+  .swap .imp { animation: swapA 8s ease-in-out infinite; }
+  .swap .raw { animation: swapB 8s ease-in-out infinite; opacity: 0; }
+  @keyframes swapA {
+    0%, 44% { opacity: 1; transform: none; }
+    52%, 96% { opacity: 0; transform: translateX(-14px); }
+    100% { opacity: 1; transform: none; }
+  }
+  @keyframes swapB {
+    0%, 44% { opacity: 0; transform: translateX(14px); }
+    52%, 96% { opacity: 1; transform: none; }
+    100% { opacity: 0; transform: translateX(14px); }
+  }
+
+  .preview-lines { display: flex; flex-direction: column; gap: 5px; width: 100%; }
+  .preview-lines i {
+    display: block;
+    height: 7px;
+    border-radius: 4px;
+    background: var(--bubble);
+    animation: lineIn 8s ease-in-out infinite;
+    transform-origin: left;
+  }
+  .preview-lines i:nth-child(1) { width: 92%; animation-delay: 0s; }
+  .preview-lines i:nth-child(2) { width: 78%; animation-delay: .12s; }
+  .preview-lines i:nth-child(3) { width: 54%; animation-delay: .24s; }
+  @keyframes lineIn {
+    0%, 20% { transform: scaleX(0); opacity: 0; }
+    30%, 88% { transform: scaleX(1); opacity: 1; }
+    100% { transform: scaleX(1); opacity: 1; }
+  }
+
+  /* ── Выбор ───────────────────────────────────────────────────── */
+  .choose {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    font-size: 14px;
+    cursor: pointer;
+    user-select: none;
+  }
+  .choose input { accent-color: var(--lime); width: 18px; height: 18px; }
+  .choose:focus-within { outline: 2px solid var(--lime); outline-offset: 4px; border-radius: 8px; }
+
+  .replay {
+    align-self: flex-start;
+    border: 1px solid var(--line);
+    background: var(--card-solid);
+    color: var(--ink);
+    font: inherit;
+    font-size: 13px;
+    padding: 6px 12px;
+    border-radius: 999px;
+    cursor: pointer;
+  }
+  .replay:hover { border-color: var(--lime); color: var(--lime); }
+
+  .bar {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background: var(--card-solid);
+    border-top: 1px solid var(--line);
+    padding: 12px clamp(18px, 4vw, 40px);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 10px 18px;
+    align-items: baseline;
+    font-size: 14px;
+  }
+  .bar b { font-weight: 600; }
+  .bar .pickline { font-variant-numeric: tabular-nums; color: var(--lime); font-weight: 600; }
+  .bar .hint { color: var(--muted); font-size: 13px; }
+
+  @media (prefers-reduced-motion: reduce) {
+    * { animation: none !important; }
+    .sheet, .qcard, .answered, .morph .body, .swap .raw, .preview-lines i { opacity: 1; transform: none; }
+    .morph { max-height: 200px; border-radius: 18px; }
+    .scrim { opacity: 1; }
+  }
+</style>
+
+<div class="wrap">
+  <header>
+    <h1>Движение в чате Lori</h1>
+    <p>
+      Четыре места, где в чате что-то происходит: принесённый файл, работа модели над ним,
+      уточняющий вопрос от Lori и готовый текст. Для каждого — два-три варианта движения
+      в палитре приложения. Всё анимировано по кругу; движение и есть содержание страницы.
+    </p>
+    <div class="how">
+      Отметьте по одному варианту в каждом разделе — внизу соберётся строка вида
+      <b>1Б · 2А · 3В · 4А</b>. Назовите её мне, и я сделаю это в приложении.
+      Ничего страшного, если в разделе не нравится ни один: так и скажите.
+    </div>
+  </header>
+
+  <section id="s1">
+    <div class="eyebrow"><b>Раздел 1</b> <span>файл принесли в чат</span></div>
+    <h2>Пилюля вложения</h2>
+    <p class="lead">
+      Момент сразу после скрепки: файл уже в рабочей папке, расшифровка идёт на телефоне.
+      Смотрите, чем показан прогресс — и насколько это спокойно выглядит рядом с обычным сообщением.
+    </p>
+
+    <div class="variants">
+      <label class="variant" data-section="1" data-variant="А">
+        <header><span class="tag">А</span><h3>Волна и волосок</h3></header>
+        <div class="frame">
+          <div class="row right"><div class="said">вот запись со встречи</div></div>
+          <div class="pill">
+            <span class="icon">
+              <span class="eq"><i></i><i></i><i></i><i></i></span>
+            </span>
+            <span class="text">
+              <span class="name">Планёрка 14:20</span>
+              <span class="sub">Расшифровываю… 3 из 10</span>
+            </span>
+            <span class="hairline-progress"><i></i></span>
+          </div>
+        </div>
+        <p class="note">Живой эквалайзер вместо спиннера, прогресс — волосок по низу пилюли.</p>
+        <span class="choose"><input type="radio" name="s1" value="А"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="1" data-variant="Б">
+        <header><span class="tag">Б</span><h3>Кольцо с процентами</h3></header>
+        <div class="frame">
+          <div class="row right"><div class="said">вот запись со встречи</div></div>
+          <div class="pill">
+            <span class="ring"><span>34%</span></span>
+            <span class="text">
+              <span class="name">Планёрка 14:20</span>
+              <span class="sub">Расшифровываю…</span>
+            </span>
+          </div>
+        </div>
+        <p class="note">Точная доля работы вместо ощущения. Честнее, но цифра тянет взгляд.</p>
+        <span class="choose"><input type="radio" name="s1" value="Б"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="1" data-variant="В">
+        <header><span class="tag">В</span><h3>Пилюля заливается</h3></header>
+        <div class="frame">
+          <div class="row right"><div class="said">вот запись со встречи</div></div>
+          <div class="pill flood">
+            <span class="icon">
+              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#5c7800" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 11v2"/></svg>
+            </span>
+            <span class="text">
+              <span class="name">Планёрка 14:20</span>
+              <span class="sub">Расшифровываю…</span>
+            </span>
+          </div>
+        </div>
+        <p class="note">Сама пилюля и есть прогресс: заливка идёт слева направо. Меньше всего деталей.</p>
+        <span class="choose"><input type="radio" name="s1" value="В"> Выбрать</span>
+      </label>
+    </div>
+  </section>
+
+  <section id="s2">
+    <div class="eyebrow"><b>Раздел 2</b> <span>модель работает</span></div>
+    <h2>Окошко обработки</h2>
+    <p class="lead">
+      Что видно, пока Lori превращает расшифровку в «Важное»: тема, суть, пункты, задачи.
+      Вопрос один — показывать шаги или одно состояние.
+    </p>
+
+    <div class="variants">
+      <label class="variant" data-section="2" data-variant="А">
+        <header><span class="tag">А</span><h3>Шаги с галочками</h3></header>
+        <div class="frame">
+          <div class="steps">
+            <span class="step"><span class="dot"><svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="#5c7800" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5l2.6 2.6L10 3.5"/></svg></span> Слушаю запись</span>
+            <span class="step"><span class="dot"><svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="#5c7800" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5l2.6 2.6L10 3.5"/></svg></span> Разбираю о чём речь</span>
+            <span class="step"><span class="dot"><svg width="9" height="9" viewBox="0 0 12 12" fill="none" stroke="#5c7800" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5l2.6 2.6L10 3.5"/></svg></span> Собираю «Важное»</span>
+          </div>
+        </div>
+        <p class="note">Видно, на чём именно стоим. Занимает три строки и требует честных этапов.</p>
+        <span class="choose"><input type="radio" name="s2" value="А"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="2" data-variant="Б">
+        <header><span class="tag">Б</span><h3>Одно слово с блеском</h3></header>
+        <div class="frame">
+          <div class="word-cycle">
+            <span>Слушаю…</span>
+            <span>Разбираю…</span>
+            <span>Собираю «Важное»…</span>
+          </div>
+        </div>
+        <p class="note">Приём живых чатов: одна строка, по ней бежит блеск, слово меняется. Тише всего.</p>
+        <span class="choose"><input type="radio" name="s2" value="Б"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="2" data-variant="В">
+        <header><span class="tag">В</span><h3>Кольцо на всю карточку</h3></header>
+        <div class="frame">
+          <div class="big-ring"><b>62%</b></div>
+          <p class="note" style="text-align:center;margin:0;">Собираю «Важное»</p>
+        </div>
+        <p class="note">Заметно и понятно, но кольцо на пол-экрана в переписке кричит.</p>
+        <span class="choose"><input type="radio" name="s2" value="В"> Выбрать</span>
+      </label>
+    </div>
+  </section>
+
+  <section id="s3">
+    <div class="eyebrow"><b>Раздел 3</b> <span>Lori спрашивает</span></div>
+    <h2>Уточняющий вопрос</h2>
+    <p class="lead">
+      Когда из записи не ясно главное — например, в какую тему её положить, — Lori спрашивает
+      вариантами, а не проглатывает догадку. Свой ответ можно написать всегда.
+    </p>
+    <p class="caveat">Это не только вид: модели нужен новый инструмент, чтобы задавать вопрос с вариантами. Скажу отдельно, сколько это стоит.</p>
+
+    <div class="variants">
+      <label class="variant" data-section="3" data-variant="А">
+        <header><span class="tag">А</span><h3>Панель снизу</h3></header>
+        <div class="frame">
+          <div class="row right"><div class="said">разберись с записью</div></div>
+          <div class="pill" style="opacity:.6">
+            <span class="icon"><svg width="17" height="17" viewBox="0 0 24 24" fill="none" stroke="#5c7800" stroke-width="2" stroke-linecap="round"><path d="M4 10v4M8 6v12M12 3v18M16 7v10M20 11v2"/></svg></span>
+            <span class="text"><span class="name">Планёрка 14:20</span><span class="sub">Расшифровка готова</span></span>
+          </div>
+          <div class="scrim"></div>
+          <div class="sheet">
+            <b style="font-size:14.5px;">В какую тему положить?</b>
+            <div class="chips">
+              <span class="chip on">Работа</span>
+              <span class="chip">Найм</span>
+              <span class="chip">Новая тема…</span>
+            </div>
+            <span style="font-size:12.5px;color:var(--muted);">или напишите свою в поле ввода</span>
+          </div>
+        </div>
+        <p class="note">Выезжает поверх ленты, отвечать нужно сразу. Прерывает — зато не потеряется.</p>
+        <span class="choose"><input type="radio" name="s3" value="А"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="3" data-variant="Б">
+        <header><span class="tag">Б</span><h3>Карточка в ленте</h3></header>
+        <div class="frame">
+          <div class="row right"><div class="said">разберись с записью</div></div>
+          <div class="qcard">
+            <b style="font-size:14.5px;">В какую тему положить?</b>
+            <div class="chips">
+              <span class="chip on">Работа</span>
+              <span class="chip">Найм</span>
+              <span class="chip">Новая тема…</span>
+            </div>
+          </div>
+          <div class="answered">
+            <svg width="12" height="12" viewBox="0 0 12 12" fill="none" stroke="#5c7800" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 6.5l2.6 2.6L10 3.5"/></svg>
+            Тема: Работа
+          </div>
+        </div>
+        <p class="note">Вопрос живёт в переписке и после ответа сворачивается в строку. Ничего не прерывает.</p>
+        <span class="choose"><input type="radio" name="s3" value="Б"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="3" data-variant="В">
+        <header><span class="tag">В</span><h3>Стопка вопросов</h3></header>
+        <div class="frame">
+          <div class="stack">
+            <div class="qcard first">
+              <b style="font-size:14.5px;">В какую тему положить?</b>
+              <div class="chips"><span class="chip on">Работа</span><span class="chip">Найм</span></div>
+            </div>
+            <div class="qcard second">
+              <b style="font-size:14.5px;">Задачу «оффер до пятницы» поставить?</b>
+              <div class="chips"><span class="chip">Да</span><span class="chip">Нет</span></div>
+            </div>
+          </div>
+        </div>
+        <p class="note">Когда вопросов несколько: ответил — карточка уехала, снизу поднялась следующая.</p>
+        <span class="choose"><input type="radio" name="s3" value="В"> Выбрать</span>
+      </label>
+    </div>
+  </section>
+
+  <section id="s4">
+    <div class="eyebrow"><b>Раздел 4</b> <span>текст готов</span></div>
+    <h2>Карточка транскрипта</h2>
+    <p class="lead">
+      Расшифровка готова — и её надо и показать, и не завалить ею переписку.
+      Здесь же живёт переключатель «Важное ↔ Расшифровка».
+    </p>
+
+    <div class="variants">
+      <label class="variant" data-section="4" data-variant="А">
+        <header><span class="tag">А</span><h3>Пилюля разворачивается</h3></header>
+        <div class="frame">
+          <div class="morph">
+            <div class="row">
+              <span class="icon" style="width:32px;height:32px;border-radius:10px;background:var(--lime-soft);display:grid;place-items:center;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#5c7800" stroke-width="2" stroke-linecap="round"><path d="M6 4h9l3 3v13H6z"/><path d="M9 12h6M9 16h4"/></svg>
+              </span>
+              <span class="text" style="display:flex;flex-direction:column;line-height:1.3;">
+                <span class="name">Расшифровка готова</span>
+                <span class="sub">1 233 знака · 5:46</span>
+              </span>
+            </div>
+            <div class="body">
+              Так, по найму: первый кандидат сильнее в бэкенде, оффер нужен до пятницы,
+              иначе его перехватят — у него ещё две компании в процессе…
+            </div>
+          </div>
+        </div>
+        <p class="note">Одна форма превращается в другую: пилюля становится карточкой с текстом.</p>
+        <span class="choose"><input type="radio" name="s4" value="А"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="4" data-variant="Б">
+        <header><span class="tag">Б</span><h3>Переключатель в карточке</h3></header>
+        <div class="frame">
+          <div style="width:100%;background:var(--card-solid);border:1px solid var(--line);border-radius:18px;padding:12px;display:flex;flex-direction:column;gap:10px;">
+            <div class="seg"><span class="a">Важное</span><span class="b">Расшифровка</span></div>
+            <div class="swap">
+              <div class="imp">
+                <b style="font-size:14px;">Оффер до пятницы</b><br>
+                <span style="color:var(--muted);">Первый кандидат сильнее в бэкенде, оффер нужен до пятницы.</span>
+              </div>
+              <div class="raw" style="color:var(--ink);">
+                Так, по найму: первый кандидат сильнее в бэкенде, оффер нужен до пятницы, иначе перехватят…
+              </div>
+            </div>
+          </div>
+        </div>
+        <p class="note">То же, что в карточке записи, только внутри переписки. Переключение — сдвигом.</p>
+        <span class="choose"><input type="radio" name="s4" value="Б"> Выбрать</span>
+      </label>
+
+      <label class="variant" data-section="4" data-variant="В">
+        <header><span class="tag">В</span><h3>Пилюля и три строки</h3></header>
+        <div class="frame">
+          <div class="pill" style="border-radius:18px;flex-direction:column;align-items:stretch;gap:10px;">
+            <div class="row">
+              <span class="icon"><svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="#5c7800" stroke-width="2" stroke-linecap="round"><path d="M6 4h9l3 3v13H6z"/><path d="M9 12h6M9 16h4"/></svg></span>
+              <span class="text"><span class="name">Расшифровка готова</span><span class="sub">нажмите, чтобы открыть</span></span>
+            </div>
+            <div class="preview-lines"><i></i><i></i><i></i></div>
+          </div>
+        </div>
+        <p class="note">Текст только намечен строками — читать в карточке записи. Самое спокойное.</p>
+        <span class="choose"><input type="radio" name="s4" value="В"> Выбрать</span>
+      </label>
+    </div>
+  </section>
+</div>
+
+<div class="bar">
+  <span><b>Ваш выбор:</b> <span class="pickline" id="pickline">пока ничего</span></span>
+  <span class="hint">Отметьте вариант в каждом разделе и назовите мне строку — например «1А · 2Б · 3Б · 4В».</span>
+</div>
+
+<script>
+  const names = { 1: "1", 2: "2", 3: "3", 4: "4" };
+  const line = document.getElementById("pickline");
+
+  function refresh() {
+    const picks = [];
+    for (const section of [1, 2, 3, 4]) {
+      const chosen = document.querySelector(`input[name="s${section}"]:checked`);
+      if (chosen) picks.push(names[section] + chosen.value);
+    }
+    line.textContent = picks.length ? picks.join(" · ") : "пока ничего";
+
+    document.querySelectorAll(".variant").forEach((variant) => {
+      const input = variant.querySelector("input");
+      variant.classList.toggle("picked", input.checked);
+    });
+  }
+
+  document.querySelectorAll('input[type="radio"]').forEach((input) => {
+    input.addEventListener("change", refresh);
+  });
+  refresh();
+</script>

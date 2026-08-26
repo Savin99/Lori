@@ -1,0 +1,55 @@
+name: LoriLocal
+options:
+  bundleIdPrefix: ru.ilyaqa.lori
+  deploymentTarget:
+    iOS: "18.0"
+settings:
+  base:
+    SWIFT_VERSION: "6.0"
+    DEVELOPMENT_TEAM: ""
+targets:
+  LoriLocal:
+    type: application
+    platform: iOS
+    sources:
+      - path: LoriLocal
+    info:
+      path: LoriLocal/Info.plist
+      properties:
+        CFBundleDisplayName: Lori
+        UILaunchScreen: {}
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        NSMicrophoneUsageDescription: "Lori использует микрофон для локальной записи аудио."
+        NSSpeechRecognitionUsageDescription: "Lori распознаёт записанную речь локально на этом iPhone."
+        NSLocalNetworkUsageDescription: "Lori обращается к языковой модели, поднятой на вашем компьютере в этой же сети, если вы указали её адрес в настройках."
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.ilyaqa.lori.local
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+  LoriLocalTests:
+    type: bundle.unit-test
+    platform: iOS
+    sources:
+      - path: LoriLocalTests
+    dependencies:
+      - target: LoriLocal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.ilyaqa.lori.local.tests
+        GENERATE_INFOPLIST_FILE: YES
+  LoriLocalUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    sources:
+      - path: LoriLocalUITests
+    dependencies:
+      - target: LoriLocal
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: ru.ilyaqa.lori.local.uitests
+        GENERATE_INFOPLIST_FILE: YES

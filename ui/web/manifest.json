@@ -1,0 +1,49 @@
+{
+  "name": "Lori",
+  "short_name": "Lori",
+  "description": "Локальная библиотека аудиозаписей и расшифровок",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#050505",
+  "theme_color": "#050505",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any"
+    }
+  ],
+  "share_target": {
+    "action": "/api/share",
+    "method": "POST",
+    "enctype": "multipart/form-data",
+    "params": {
+      "title": "title",
+      "text": "text",
+      "url": "url",
+      "files": [
+        {
+          "name": "file",
+          "accept": [
+            "audio/*",
+            "video/*",
+            ".m4a",
+            ".mp3",
+            ".wav",
+            ".caf",
+            ".aac",
+            ".mp4",
+            ".mov",
+            ".mkv",
+            ".txt",
+            ".md",
+            ".srt",
+            ".vtt"
+          ]
+        }
+      ]
+    }
+  }
+}

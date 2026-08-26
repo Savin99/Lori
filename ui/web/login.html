@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#252525">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lori">
+  <title>Вход · Lori</title>
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.34.1/dist/tabler-icons.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/login.css">
+</head>
+<body>
+  <main class="login-shell">
+    <header class="login-brand" aria-label="Lori">
+      <i class="ti ti-wave-sine" aria-hidden="true"></i><span>Lori</span>
+    </header>
+    <section class="login-card" aria-labelledby="loginTitle">
+      <p class="login-eyebrow">Локальная библиотека</p>
+      <h1 id="loginTitle">Открыть Lori</h1>
+      <p class="login-copy" id="loginCopy">Введи пароль, чтобы открыть свои расшифровки.</p>
+      <form id="loginForm" novalidate>
+        <label class="login-field">
+          <span>Пароль</span>
+          <span class="login-input-wrap"><i class="ti ti-lock" aria-hidden="true"></i><input id="password" name="password" type="password" autocomplete="current-password" required minlength="8" autofocus></span>
+        </label>
+        <label class="login-field" id="confirmationField" hidden>
+          <span>Повтори пароль</span>
+          <span class="login-input-wrap"><i class="ti ti-lock-check" aria-hidden="true"></i><input id="confirmation" name="confirmation" type="password" autocomplete="new-password" minlength="8"></span>
+        </label>
+        <p class="login-message" id="loginMessage" role="alert" hidden></p>
+        <button class="login-submit" id="submitButton" type="submit">Войти</button>
+      </form>
+      <p class="login-note"><i class="ti ti-shield-check" aria-hidden="true"></i><span>Пароль остаётся только у тебя. На Mac хранится его защищённая проверка, а не сам пароль.</span></p>
+    </section>
+  </main>
+  <script src="/login.js" type="module"></script>
+</body>
+</html>

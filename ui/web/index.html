@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1">
+  <meta name="theme-color" content="#252525">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+  <meta name="apple-mobile-web-app-title" content="Lori">
+  <title>Lori</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="apple-touch-icon" href="/icon.svg">
+  <link rel="icon" href="/icon.svg" type="image/svg+xml">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Newsreader:opsz,wght@6..72,400;6..72,500&display=swap" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.34.1/dist/tabler-icons.min.css" rel="stylesheet">
+  <link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <div class="app-shell">
+    <header class="app-header" id="appHeader">
+      <button class="icon-button" type="button" data-action="open-drawer" aria-label="Открыть папки">
+        <i class="ti ti-folders" aria-hidden="true"></i>
+      </button>
+      <div class="brand"><i class="ti ti-wave-sine" aria-hidden="true"></i><span>Lori</span></div>
+      <button class="icon-button" type="button" data-action="open-search" aria-label="Искать в записях">
+        <i class="ti ti-search" aria-hidden="true"></i>
+      </button>
+    </header>
+
+    <main class="screen" id="screen" aria-live="polite">
+      <div class="load-state" role="status"><i class="ti ti-loader-2 busy__spinner" aria-hidden="true"></i><span>Открываю библиотеку…</span></div>
+    </main>
+
+    <footer class="bottom-bar" id="bottomBar" aria-label="Действия с записями">
+      <button class="add-button" type="button" data-action="open-add" aria-label="Добавить запись">
+        <i class="ti ti-plus" aria-hidden="true"></i>
+      </button>
+    </footer>
+  </div>
+
+  <input id="mediaPicker" class="file-picker" aria-label="Выбрать аудио или видео" type="file" accept="audio/*,video/*,.m4a,.mp3,.wav,.aac,.caf,.aif,.aiff,.ogg,.opus,.webm,.amr,.flac,.mp4,.mov,.mkv,.avi,.mpeg,.mpg">
+  <input id="textPicker" class="file-picker" aria-label="Выбрать текстовый файл" type="file" accept=".md,.txt,.markdown,.vtt,.srt">
+
+  <div class="drawer" id="drawer" hidden>
+    <button class="drawer__scrim" type="button" data-action="close-drawer" aria-label="Закрыть папки"></button>
+    <aside class="drawer__panel" aria-label="Папки">
+      <div class="drawer__top">
+        <button class="drawer__create" type="button" data-action="open-folder-form">
+          <span class="folder-add-icon"><i class="ti ti-folder-plus" aria-hidden="true"></i></span>
+          <span>Создать папку</span>
+        </button>
+      </div>
+      <p class="drawer__label">Папки</p>
+      <nav class="drawer__list" id="folderList"></nav>
+      <div class="drawer__bottom">
+        <label class="folder-search">
+          <i class="ti ti-search" aria-hidden="true"></i>
+          <input id="folderSearch" type="search" placeholder="Поиск папок" autocomplete="off">
+        </label>
+      </div>
+    </aside>
+  </div>
+
+  <div class="overlay" id="overlay" hidden>
+    <button class="overlay__scrim" type="button" data-action="close-overlay" aria-label="Закрыть"></button>
+    <section class="sheet" id="sheet" role="dialog" aria-modal="true"></section>
+  </div>
+
+  <div class="busy" id="busy" hidden aria-live="assertive">
+    <div class="busy__card">
+      <i class="ti ti-loader-2 busy__spinner" aria-hidden="true"></i>
+      <strong id="busyTitle">Обрабатываю запись</strong>
+      <span id="busyText">Это может занять несколько минут.</span>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" hidden></div>
+
+  <script src="/app.js" type="module"></script>
+</body>
+</html>

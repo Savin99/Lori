@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lori.ingest</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ilyaqa/Projects/GigaAM/.venv/bin/python</string>
+    <string>/Users/ilyaqa/Projects/Lori/lori/ingest.py</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ilyaqa/Projects/GigaAM</string>
+
+  <!-- Срабатывает, когда в папке появляется файл; агент обязан её опустошить. -->
+  <key>QueueDirectories</key>
+  <array>
+    <string>/Users/ilyaqa/Library/Mobile Documents/iCloud~md~obsidian/Documents/Obsidian [BRAIN]/Inbox/_audio</string>
+  </array>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>MPLCONFIGDIR</key>
+    <string>/tmp/lori-matplotlib</string>
+    <key>TOKENIZERS_PARALLELISM</key>
+    <string>false</string>
+  </dict>
+
+  <!-- Транскрипция на CPU не должна конкурировать с интерактивной работой. -->
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>Nice</key>
+  <integer>5</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ilyaqa/.local/state/lori/launchd.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ilyaqa/.local/state/lori/launchd.err.log</string>
+</dict>
+</plist>
