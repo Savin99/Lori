@@ -59,6 +59,7 @@
 		CAB89944BAB6611BAD443619 /* WikiSheet.swift in Sources */ = {isa = PBXBuildFile; fileRef = F772C6748FEEE0A6DEAB5FBC /* WikiSheet.swift */; };
 		CE1867025DA40DE3CC63DCD2 /* DigestCardUITests.swift in Sources */ = {isa = PBXBuildFile; fileRef = B79FE9CF52A8466DCB271752 /* DigestCardUITests.swift */; };
 		D91638B54E7E8D11C8451FAD /* AudioCaptureStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 801D6646522ACC8F9B6175AB /* AudioCaptureStore.swift */; };
+		DD6E9BEC5F45E8F903C851D0 /* WhisperKit in Frameworks */ = {isa = PBXBuildFile; productRef = 562608BEDF8255C6752A2BED /* WhisperKit */; };
 		DD9D758BD9C5CDC483C042EF /* DigestService.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6EC586B3B053BBCDCA311A0B /* DigestService.swift */; };
 		E3F8CF6B1F60B49E7D8FD76D /* ConversationArchiveTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E6DA79EFC499633880AEB14C /* ConversationArchiveTests.swift */; };
 		E69181AE35BAE9BCE62024B6 /* DigestServiceTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02350169D46D1DE155D01A4C /* DigestServiceTests.swift */; };
@@ -152,6 +153,17 @@
 		FD27086457AC5990EC03B2A4 /* LoriLocalApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoriLocalApp.swift; sourceTree = "<group>"; };
 		FDBF2423FAF7E483888FB073 /* TranscriptionServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionServiceTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		10A88C161E0A83F7C2A4B82D /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				DD6E9BEC5F45E8F903C851D0 /* WhisperKit in Frameworks */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
 		42F4E4D64E86D39BB6E37C50 = {
@@ -326,6 +338,7 @@
 			buildPhases = (
 				56CF6E82E28A9BB7545154F3 /* Sources */,
 				E6D3B1AE7F2DCB116CF04180 /* Resources */,
+				10A88C161E0A83F7C2A4B82D /* Frameworks */,
 			);
 			buildRules = (
 			);
@@ -333,6 +346,7 @@
 			);
 			name = LoriLocal;
 			packageProductDependencies = (
+				562608BEDF8255C6752A2BED /* WhisperKit */,
 			);
 			productName = LoriLocal;
 			productReference = 66DF60803E8E463A749314D0 /* LoriLocal.app */;
@@ -368,6 +382,9 @@
 			);
 			mainGroup = 42F4E4D64E86D39BB6E37C50;
 			minimizedProjectReferenceProxies = 1;
+			packageReferences = (
+				B7094E184E4729F46A78CAAD /* XCRemoteSwiftPackageReference "argmax-oss-swift" */,
+			);
 			preferredProjectObjectVersion = 77;
 			productRefGroup = A1E5769B80A9E1D1D64D74D4 /* Products */;
 			projectDirPath = "";
@@ -758,6 +775,25 @@
 			defaultConfigurationName = Debug;
 		};
 /* End XCConfigurationList section */
+
+/* Begin XCRemoteSwiftPackageReference section */
+		B7094E184E4729F46A78CAAD /* XCRemoteSwiftPackageReference "argmax-oss-swift" */ = {
+			isa = XCRemoteSwiftPackageReference;
+			repositoryURL = "https://github.com/argmaxinc/argmax-oss-swift.git";
+			requirement = {
+				kind = upToNextMajorVersion;
+				minimumVersion = 1.1.0;
+			};
+		};
+/* End XCRemoteSwiftPackageReference section */
+
+/* Begin XCSwiftPackageProductDependency section */
+		562608BEDF8255C6752A2BED /* WhisperKit */ = {
+			isa = XCSwiftPackageProductDependency;
+			package = B7094E184E4729F46A78CAAD /* XCRemoteSwiftPackageReference "argmax-oss-swift" */;
+			productName = WhisperKit;
+		};
+/* End XCSwiftPackageProductDependency section */
 	};
 	rootObject = C653253017BDD494B78CF0D2 /* Project object */;
 }

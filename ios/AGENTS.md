@@ -147,6 +147,17 @@ The persistent recording bar exists now — `RecordingBanner`, on every sheet.
   45 секунд модель теряла начало: дольше 25 секунд за раз она не рассчитана обрабатывать.
 - **Настоящую длину куска обязательно передавать в энкодер**: из неё строится маска паддинга,
   а внимание в Conformer глобальное. С константной длиной паддинг портил реальные кадры.
+- **Движков расшифровки три, и выбирает человек.** `TranscriptionEngineChoice` (настройки →
+  «Расшифровка») хранится в `UserDefaults` и читается **в момент расшифровки**, а не в `init`
+  сервиса: иначе смена движка не подхватывалась бы без перезапуска. Выбранный движок идёт первым,
+  но список на нём не обрывается — его моделей может не оказаться на устройстве, и человек не
+  должен остаться вовсе без расшифровки. Порядок и резолвинг живут в `TranscriptionEngines`
+  отдельно от сервиса, потому что имя работающего движка показывают ещё и настройки.
+- **Whisper large-v3 turbo идёт через WhisperKit** (`argmaxinc/argmax-oss-swift`) — первая сторонняя
+  зависимость проекта. Модель кладут руками в `Lori/Models`, как и GigaAM: `download: false`
+  в `WhisperKitTranscriber` — единственная защита от того, чтобы приложение утянуло 600 МБ само.
+  Рядом с весами обязаны лежать `tokenizer.json` и `tokenizer_config.json` из `openai/whisper-large-v3`:
+  без них WhisperKit пойдёт за токенизатором в сеть. Подробности и скрипт — в `design/whisper/`.
 - Audio must stay local in the current path; do not add cloud ASR as a fallback without explicit user
   approval. Handing audio to the owner's own Mac over the LAN is also "leaving the device" and needs
   the same explicit approval.

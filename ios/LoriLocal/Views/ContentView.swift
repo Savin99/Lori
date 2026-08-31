@@ -722,6 +722,7 @@ private struct AssistantChatView: View {
     @ObservedObject var transcription: TranscriptionService
     @AppStorage("allowAssistantMutations") private var allowMutations = false
     @AppStorage("deepSeekModel") private var model = DeepSeekModel.fallback.rawValue
+    @AppStorage(TranscriptionEngineChoice.storageKey) private var transcriptionEngine = TranscriptionEngineChoice.fallback.rawValue
     let close: () -> Void
     let openSettings: () -> Void
 
@@ -1970,6 +1971,7 @@ private struct SettingsView: View {
     @State private var result: String?
     @State private var isCheckingKey = false
     @AppStorage("deepSeekModel") private var model = DeepSeekModel.fallback.rawValue
+    @AppStorage(TranscriptionEngineChoice.storageKey) private var transcriptionEngine = TranscriptionEngineChoice.fallback.rawValue
     @AppStorage("allowAssistantMutations") private var allowMutations = false
     @AppStorage("autoProcessTranscripts") private var autoProcess = true
     @AppStorage("loriMemory") private var memoryEnabled = true
@@ -2032,8 +2034,23 @@ private struct SettingsView: View {
                     }
                 }
                 Section("Расшифровка") {
-                    LabeledContent("Движок", value: transcriptionEngineName)
-                    Text("Аудио и расшифровка остаются на этом iPhone. GigaAM расставляет знаки препинания сам; если его моделей нет, работает движок Apple — текст без пунктуации.")
+                    Picker("Движок", selection: $transcriptionEngine) {
+                        ForEach(TranscriptionEngineChoice.allCases) { option in
+                            VStack(alignment: .leading, spacing: 2) {
+                                Text(option.title)
+                                Text(option.detail)
+                                    .font(LoriFont.small)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .tag(option.rawValue)
+                        }
+                    }
+                    .accessibilityIdentifier("transcriptionEnginePicker")
+                    // Выбор и работающий движок — разные вещи: моделей выбранного может
+                    // не оказаться на устройстве, и тогда работает следующий по порядку.
+                    LabeledContent("Работает", value: transcriptionEngineName)
+                        .accessibilityIdentifier("transcriptionEngineName")
+                    Text("Аудио и расшифровка остаются на этом iPhone. GigaAM и Whisper расставляют знаки препинания сами; их модели кладут в «Файлы» → Lori → Models, и без них работает движок Apple — текст без пунктуации.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
                 }
@@ -2076,11 +2093,12 @@ private struct SettingsView: View {
             .navigationTitle("Настройки")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
             .recordingBanner { dismiss() }
-            .task {
+            .task(id: transcriptionEngine) {
                 hasKey = (try? KeychainStore.deepSeekKey()) != nil
-                let gigaAM = GigaAMCoreMLTranscriber()
-                let apple = AppleSpeechTranscriber()
-                transcriptionEngineName = await gigaAM.isAvailable() ? gigaAM.name : apple.name
+                // Пересчитывается на каждую смену выбора: иначе строка «Работает»
+                // осталась бы от прошлого движка и врала бы.
+                let choice = TranscriptionEngineChoice(storedValue: transcriptionEngine)
+                transcriptionEngineName = await TranscriptionEngines.resolve(for: choice).name
             }
             .alert("Lori", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
                 Button("OK", role: .cancel) { result = nil }

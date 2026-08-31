@@ -7,6 +7,7 @@ enum TranscriptionError: LocalizedError, Equatable {
     case localeUnavailable(String)
     case emptyResult
     case engineNotInstalled(String)
+    case modelIncomplete(String, String)
     case permissionDenied
     case assetsUnavailable
 
@@ -20,6 +21,8 @@ enum TranscriptionError: LocalizedError, Equatable {
             "В файле не удалось распознать речь."
         case let .engineNotInstalled(name):
             "Движок «\(name)» пока не установлен в приложении."
+        case let .modelIncomplete(name, missing):
+            "Модель движка «\(name)» неполная: рядом с ней не хватает файла \(missing). Положи его в ту же папку в «Файлы» → Lori → Models."
         case .permissionDenied:
             "Разреши Lori распознавание речи в настройках iPhone."
         case .assetsUnavailable:
@@ -317,6 +320,42 @@ private final class RecognitionCollector: NSObject, SFSpeechRecognitionTaskDeleg
     }
 }
 
+/// Какой движок берётся за файл при выбранной настройке.
+///
+/// Живёт отдельно от `TranscriptionService`: имя работающего движка показывают
+/// настройки, а порядок перебора должен проверяться тестами без сервиса и файлов.
+enum TranscriptionEngines {
+    /// Выбранный движок идёт первым, остальные — следом. Недоступный выбор не должен
+    /// оставлять человека вовсе без расшифровки, поэтому список не обрывается на нём.
+    static func ordered(
+        for choice: TranscriptionEngineChoice,
+        gigaAM: any LocalTranscribing,
+        whisper: any LocalTranscribing,
+        apple: any LocalTranscribing
+    ) -> [any LocalTranscribing] {
+        switch choice {
+        case .automatic, .gigaAM: [gigaAM, whisper, apple]
+        case .whisper: [whisper, gigaAM, apple]
+        case .apple: [apple, gigaAM, whisper]
+        }
+    }
+
+    /// Первый движок из порядка, чьи модели лежат на устройстве.
+    /// Ни один — значит движок Apple: он есть всегда, пусть и без знаков препинания.
+    static func resolve(
+        for choice: TranscriptionEngineChoice = .stored(),
+        gigaAM: any LocalTranscribing = GigaAMCoreMLTranscriber(),
+        whisper: any LocalTranscribing = WhisperKitTranscriber(),
+        apple: any LocalTranscribing = AppleSpeechTranscriber()
+    ) async -> any LocalTranscribing {
+        let candidates = ordered(for: choice, gigaAM: gigaAM, whisper: whisper, apple: apple)
+        for candidate in candidates {
+            if await candidate.isAvailable() { return candidate }
+        }
+        return apple
+    }
+}
+
 /// Состояние расшифровки для интерфейса: какие файлы в работе и чем расшифровываем.
 @MainActor
 final class TranscriptionService: ObservableObject {
@@ -329,15 +368,33 @@ final class TranscriptionService: ObservableObject {
     @Published var lastError: String?
 
     let engine: any LocalTranscribing
+    private let whisper: any LocalTranscribing
     private let fallback: any LocalTranscribing
+    private let choice: @Sendable () -> TranscriptionEngineChoice
 
-    /// GigaAM основной, движок Apple — резерв. Выбор делается по факту наличия моделей.
+    /// Движок Apple — последний рубеж: он есть всегда, пусть и без знаков препинания.
+    /// Остальные зависят от того, лежат ли их модели на устройстве.
     init(
         engine: any LocalTranscribing = GigaAMCoreMLTranscriber(),
-        fallback: any LocalTranscribing = AppleSpeechTranscriber()
+        whisper: any LocalTranscribing = WhisperKitTranscriber(),
+        fallback: any LocalTranscribing = AppleSpeechTranscriber(),
+        choice: @escaping @Sendable () -> TranscriptionEngineChoice = { TranscriptionEngineChoice.stored() }
     ) {
         self.engine = engine
+        self.whisper = whisper
         self.fallback = fallback
+        self.choice = choice
+    }
+
+    /// Движок, который действительно возьмётся за файл. Считается в момент расшифровки,
+    /// а не в `init`: смена настройки обязана подхватываться без перезапуска приложения.
+    func resolvedEngine() async -> any LocalTranscribing {
+        await TranscriptionEngines.resolve(
+            for: choice(),
+            gigaAM: engine,
+            whisper: whisper,
+            apple: fallback
+        )
     }
 
     func isRunning(_ relativePath: String) -> Bool { running.contains(relativePath) }
@@ -371,7 +428,7 @@ final class TranscriptionService: ObservableObject {
         do {
             let url = try workspace.fileURL(for: entry.relativePath)
             let path = entry.relativePath
-            let chosen: any LocalTranscribing = await engine.isAvailable() ? engine : fallback
+            let chosen = await resolvedEngine()
             let transcript = try await chosen.transcribe(audioURL: url) { done, total in
                 guard total > 1 else { return }
                 Task { @MainActor [weak self] in
