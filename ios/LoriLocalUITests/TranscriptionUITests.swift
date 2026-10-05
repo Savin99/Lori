@@ -102,16 +102,24 @@ final class TranscriptionUITests: XCTestCase {
         continueAfterFailure = false
         let app = launch()
 
-        let card = app.descendants(matching: .any).matching(identifier: "recordingCard").firstMatch
+        // Запись с расшифровкой, а не первая попавшаяся: сверху может стоять свежая
+        // запись без текста, и тест пропускался бы, не проверив ничего.
+        let card = quietCard(in: app)
         try XCTSkipUnless(
             card.waitForExistence(timeout: 5),
-            "в рабочей папке нет записей — прогони design/qa/seed-audio.sh"
+            "в рабочей папке нет записей с расшифровкой — прогони design/qa/seed-home.py"
         )
         card.tap()
 
         let share = app.buttons["shareMenu"]
         XCTAssertTrue(share.waitForExistence(timeout: 5), "кнопка «Поделиться» на экране записи")
-        try XCTSkipUnless(share.isEnabled, "у записи нет расшифровки — делиться нечем")
+        // Кнопка включается, когда экран дочитал расшифровку, — это доля секунды
+        // после появления. Проверка сразу же пропускала тест на записи с текстом.
+        let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: share)
+        try XCTSkipUnless(
+            XCTWaiter().wait(for: [enabled], timeout: 5) == .completed,
+            "у записи нет расшифровки — делиться нечем"
+        )
         share.tap()
 
         XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 5), "формат выбирают в меню")
@@ -205,10 +213,14 @@ final class TranscriptionUITests: XCTestCase {
 
         app.buttons["Записать"].tap()
         let pause = app.buttons["Поставить на паузу"]
-        try XCTSkipUnless(
-            pause.waitForExistence(timeout: 5),
-            "запись не началась — вероятно, не выдан доступ к микрофону"
-        )
+        if !pause.waitForExistence(timeout: 5) {
+            // Симулятор без звукового входа запись не начинает. Снимок показывает почему,
+            // а алерт закрывается: тест не должен оставлять за собой ничего на экране.
+            save(XCUIScreen.main.screenshot(), named: "record-not-started")
+            let alert = app.alerts["Lori"]
+            if alert.exists { alert.buttons["OK"].tap() }
+            throw XCTSkip("запись не началась: нет доступа к микрофону или у симулятора нет звукового входа")
+        }
         save(XCUIScreen.main.screenshot(), named: "home-recording")
 
         app.buttons["Настройки"].tap()
@@ -224,19 +236,307 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Записать"].waitForExistence(timeout: 5))
     }
 
-    /// Лист уезжает с анимацией, и в это время кнопка под ним уже «существует»,
-    /// но точки нажатия у неё ещё нет: тап уходит в никуда. Ждём доступности.
+    // MARK: - Главный экран
+
+    /// Карточка: заголовок, описание, время с длительностью. Даты на карточке нет —
+    /// она в заголовке дня над ней.
+    func testHomeCardReadsAsTitleDescriptionAndTime() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = firstCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей — прогони design/qa/seed-home.py")
+        XCTAssertTrue(card.isHittable)
+        XCTAssertNotNil(
+            card.label.range(of: #"\d{2}:\d{2}"#, options: .regularExpression),
+            "на карточке есть время записи: \(card.label)"
+        )
+        XCTAssertFalse(card.label.contains("Сегодня"), "день назван над карточкой, а не на ней")
+        XCTAssertFalse(card.label.contains("вчера,"), "и не «вчера, 09:10»")
+        XCTAssertTrue(app.staticTexts["Сегодня"].exists || app.staticTexts["Вчера"].exists, "записи разложены по дням")
+    }
+
+    /// Удаление всегда переспрашивает — и «Отмена» оставляет запись на месте.
+    func testDeleteAsksForConfirmationFirst() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = firstCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей — прогони design/qa/seed-home.py")
+        let label = card.label
+        let count = cards(in: app).count
+        card.swipeLeft()
+        tap(app.buttons["Удалить"])
+
+        XCTAssertTrue(app.staticTexts["Удалить запись?"].waitForExistence(timeout: 5), "без подтверждения не удаляем")
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Аудио и расшифровка переедут в корзину Lori")).firstMatch.exists,
+            "диалог говорит, куда денется запись"
+        )
+        save(XCUIScreen.main.screenshot(), named: "home-delete-confirm")
+        dismissDialog(in: app)
+
+        XCTAssertTrue(app.staticTexts["Удалить запись?"].waitForNonExistence(timeout: 5))
+        XCTAssertEqual(cards(in: app).count, count, "после «Отмена» запись на месте")
+        XCTAssertTrue(cards(in: app).matching(NSPredicate(format: "label == %@", label)).firstMatch.exists)
+    }
+
+    /// Поле переименования начинается с того заголовка, что виден на карточке, а
+    /// не с имени файла: «Готово» без правки ничего не меняет.
+    func testRenameStartsFromTheVisibleTitle() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = quietCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей — прогони design/qa/seed-home.py")
+        let label = card.label
+        card.swipeLeft()
+        tap(app.buttons["Переименовать"])
+
+        let field = app.alerts["Переименовать"].textFields.firstMatch
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        let value = try XCTUnwrap(field.value as? String)
+        XCTAssertFalse(value.isEmpty)
+        XCTAssertTrue(label.hasPrefix(value), "в поле — видимый заголовок «\(value)», карточка: «\(label)»")
+        XCTAssertFalse(value.hasPrefix("Новая запись"), "не имя файла")
+        app.alerts["Переименовать"].buttons["Отмена"].tap()
+    }
+
+    /// Долгое нажатие собирает все действия с записью, а не только выбор темы.
+    func testLongPressOffersEveryRecordAction() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = quietCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей с расшифровкой — прогони design/qa/seed-home.py")
+        card.press(forDuration: 1.2)
+
+        for action in ["Поделиться", "Переименовать", "Тема", "Отправить в Obsidian", "Удалить"] {
+            XCTAssertTrue(app.buttons[action].waitForExistence(timeout: 5), "в меню нет «\(action)»")
+        }
+        save(XCUIScreen.main.screenshot(), named: "home-context-menu")
+        app.buttons["Поделиться"].tap()
+        XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 5), "«Поделиться» раскрывается форматами")
+        XCTAssertTrue(app.buttons["Markdown (.md)"].exists)
+    }
+
+    /// «Поделиться» — главный глагол: свайп вправо и выбор формата теми же словами,
+    /// что на Маке.
+    func testLeadingSwipeSharesWithFormatChoice() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = quietCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей с расшифровкой — прогони design/qa/seed-home.py")
+        card.swipeRight()
+        // Полный свайп сразу открывает выбор формата; короткий — показывает кнопку.
+        let share = app.buttons["Поделиться"]
+        if share.waitForExistence(timeout: 2), !app.staticTexts["Поделиться расшифровкой"].exists {
+            tap(share)
+        }
+
+        XCTAssertTrue(app.staticTexts["Поделиться расшифровкой"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["PDF · Удобно читать и отправлять"].exists)
+        XCTAssertTrue(app.buttons["Markdown (.md) · Текст для дальнейшей работы"].exists)
+        save(XCUIScreen.main.screenshot(), named: "home-share-format")
+        dismissDialog(in: app)
+        XCTAssertTrue(app.staticTexts["Поделиться расшифровкой"].waitForNonExistence(timeout: 5))
+    }
+
+    /// Кнопка на карточке ставит запись в очередь и не открывает её; блок очереди
+    /// появляется сверху, а «Остановить» сначала переспрашивает.
+    func testInlineTranscribeStartsQueueAndStopAsksFirst() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 30)
+
+        let action = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Расшифровать")).firstMatch
+        try XCTSkipUnless(action.waitForExistence(timeout: 5), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        tap(action)
+
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5), "блок очереди появляется над списком")
+        XCTAssertTrue(queue.label.hasPrefix("Расшифровка"), queue.label)
+        XCTAssertFalse(app.buttons["Слушать"].exists, "кнопка на карточке не открывает запись")
+        XCTAssertTrue(
+            cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю")).firstMatch.waitForExistence(timeout: 5),
+            "карточка говорит, что идёт работа"
+        )
+        save(XCUIScreen.main.screenshot(), named: "home-queue-single")
+
+        tap(app.buttons["stopQueueButton"])
+        XCTAssertTrue(app.staticTexts["Остановить расшифровку?"].waitForExistence(timeout: 5), "остановка переспрашивает")
+        XCTAssertTrue(app.staticTexts["Записи останутся — расшифровку можно запустить снова."].exists)
+        save(XCUIScreen.main.screenshot(), named: "home-stop-confirm")
+        tap(dialogButton("Остановить", in: app))
+        XCTAssertTrue(queue.waitForNonExistence(timeout: 10), "после остановки блок очереди уходит")
+    }
+
+    /// Тап по блоку очереди открывает ту запись, что считается.
+    func testQueueBlockOpensTheCurrentRecord() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 30)
+
+        let action = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Расшифровать")).firstMatch
+        try XCTSkipUnless(action.waitForExistence(timeout: 5), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        tap(action)
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        queue.tap()
+        XCTAssertTrue(app.buttons["Слушать"].waitForExistence(timeout: 5), "блок открывает запись")
+        tap(app.buttons["Расшифровки"])
+
+        tap(app.buttons["stopQueueButton"])
+        tap(dialogButton("Остановить", in: app))
+        XCTAssertTrue(queue.waitForNonExistence(timeout: 10))
+    }
+
+    /// Меню `+` без «Настроек»: шестерёнка в шапке — единственный вход туда.
+    func testPlusMenuHasNoSettings() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        tap(app.buttons["importButton"])
+        XCTAssertTrue(app.buttons["Аудио из Файлов"].waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Вставить")).firstMatch.exists,
+            "вставка из буфера на месте"
+        )
+        XCTAssertEqual(
+            app.buttons.matching(NSPredicate(format: "label == %@", "Настройки")).count, 1,
+            "настройки — только шестерёнкой в шапке"
+        )
+    }
+
+    // MARK: - Снимки главного экрана
+
+    /// Пять файлов из «Поделиться» → Lori: список в панели, «Расшифровать 5», очередь,
+    /// строка ошибки и список после пачки — в светлой и тёмной теме.
+    ///
+    /// Нужен посев: `python3 design/qa/seed-home.py <udid> --inbox-only` — файлы ждут в
+    /// `Documents/Inbox`, и запуск без `--forget-attachments` прикрепляет их к панели.
+    func testZZ1AttachedPanelAndQueueScreenshots() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 12, forgetAttachments: false)
+
+        let panel = app.descendants(matching: .any)["attachedFile"]
+        try XCTSkipUnless(panel.waitForExistence(timeout: 8), "нет файлов в Documents/Inbox — прогони seed-home.py --inbox-only")
+        let transcribe = app.buttons["transcribeButton"]
+        XCTAssertTrue(transcribe.waitForExistence(timeout: 5))
+        XCTAssertTrue(transcribe.label.hasPrefix("Расшифровать"), transcribe.label)
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "в облако · примерно")).firstMatch.waitForExistence(timeout: 5), "оценка времени видна до нажатия")
+        sleep(1)
+        shoot(named: "home-attached")
+
+        tap(transcribe)
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        XCTAssertTrue(queue.waitForExistence(timeout: 15), "пачка ушла в очередь")
+        XCTAssertTrue(panel.waitForNonExistence(timeout: 10), "ушедшие в работу файлы сняты с панели")
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Расшифровка · 1 из")).firstMatch.exists
+                      || queue.label.contains("из 5"), "счётчик пачки: \(queue.label)")
+        sleep(4)
+        shoot(named: "home-queue")
+
+        let failed = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Нет связи с сервисом")).firstMatch
+        XCTAssertTrue(failed.waitForExistence(timeout: 90), "файл с «fail» в имени показывает ошибку на карточке")
+        sleep(2)
+        shoot(named: "home-failed")
+
+        XCTAssertTrue(queue.waitForNonExistence(timeout: 120), "пачка доходит до конца")
+        sleep(2)
+        shoot(named: "home-list")
+        app.swipeUp()
+        sleep(1)
+        shoot(named: "home-list-more")
+    }
+
+    /// Строка подсказки про модель заголовков и тихий список — без очереди.
+    func testZZ2ListScreenshots() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true)
+
+        let card = firstCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей — прогони design/qa/seed-home.py")
+        XCTAssertTrue(app.descendants(matching: .any)["titlesHint"].waitForExistence(timeout: 5), "без модели заголовков есть подсказка")
+        sleep(1)
+        shoot(named: "home-titles-hint")
+    }
+
+    // MARK: - Помощники
+
     /// Запуск с заданным состоянием. Выбор движка живёт в `UserDefaults` и
     /// переживает запуск, поэтому один тест влиял на другой: после проверки
     /// движка без режимов у следующего теста не было чипа режима. Аргументы
     /// командной строки читаются `UserDefaults` поверх сохранённого — и прогон
     /// перестаёт зависеть от того, чем всё кончилось в прошлый раз.
-    private func launch(engine: String = "gigaam") -> XCUIApplication {
+    ///
+    /// `stub` — проверочный движок Lori QA (`--ui-stub-engine`): симулятор не
+    /// расшифровывает, а очередь и полосы иначе не увидеть.
+    private func launch(
+        engine: String = "gigaam",
+        stub: Bool = false,
+        stubSeconds: Int = 24,
+        forgetAttachments: Bool = true
+    ) -> XCUIApplication {
         let app = XCUIApplication()
-        app.launchArguments += ["-transcriptionEngine", engine, "--forget-attachments"]
+        app.launchArguments += ["-transcriptionEngine", stub ? "elevenlabs" : engine, "-titlesHintDismissed", "NO"]
+        if forgetAttachments { app.launchArguments.append("--forget-attachments") }
+        if stub { app.launchArguments += ["--ui-stub-engine", "--ui-stub-seconds", String(stubSeconds)] }
         app.launch()
         return app
     }
+
+    private func cards(in app: XCUIApplication) -> XCUIElementQuery {
+        app.descendants(matching: .any).matching(identifier: "recordingCard")
+    }
+
+    private func firstCard(in app: XCUIApplication) -> XCUIElement {
+        cards(in: app).firstMatch
+    }
+
+    /// Тихая карточка: расшифровка есть, и с записью ничего не происходит — ей
+    /// доступны все действия, от «Поделиться» до «Переименовать».
+    private func quietCard(in app: XCUIApplication) -> XCUIElement {
+        let busy = ["Без расшифровки", "Нет связи", "В очереди", "Расшифровываю", "Прервано"]
+        let predicate = NSCompoundPredicate(notPredicateWithSubpredicate: NSCompoundPredicate(
+            orPredicateWithSubpredicates: busy.map { NSPredicate(format: "label CONTAINS %@", $0) }
+        ))
+        return cards(in: app).matching(predicate).firstMatch
+    }
+
+    /// Диалог подтверждения на iOS 26 — поповер без «Отмены»: он закрывается тапом
+    /// мимо. На системах, где кнопка есть, нажимаем её.
+    private func dismissDialog(in app: XCUIApplication) {
+        let cancel = app.buttons["Отмена"]
+        if cancel.exists, cancel.isHittable {
+            cancel.tap()
+        } else {
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.42)).tap()
+        }
+    }
+
+    /// Кнопка диалога подтверждения. Одноимённая кнопка («Остановить», «Удалить»)
+    /// есть и под диалогом — в блоке очереди или в свайпе, — поэтому ищем в листе.
+    private func dialogButton(_ label: String, in app: XCUIApplication) -> XCUIElement {
+        let inSheet = app.sheets.buttons[label]
+        if inSheet.waitForExistence(timeout: 2) { return inSheet }
+        return app.buttons.matching(NSPredicate(
+            format: "label == %@ AND identifier != %@", label, "stopQueueButton"
+        )).firstMatch
+    }
+
+    /// Снимок в светлой и тёмной теме подряд: приложение перекрашивается на лету.
+    private func shoot(named name: String) {
+        XCUIDevice.shared.appearance = .light
+        sleep(1)
+        save(XCUIScreen.main.screenshot(), named: "\(name)-light")
+        XCUIDevice.shared.appearance = .dark
+        sleep(1)
+        save(XCUIScreen.main.screenshot(), named: "\(name)-dark")
+        XCUIDevice.shared.appearance = .light
+    }
+
+    /// Лист уезжает с анимацией, и в это время кнопка под ним уже «существует»,
+    /// но точки нажатия у неё ещё нет: тап уходит в никуда. Ждём доступности.
 
     private func tap(_ element: XCUIElement, timeout: TimeInterval = 5) {
         XCTAssertTrue(element.waitForExistence(timeout: timeout), "нет элемента для нажатия")
