@@ -186,8 +186,10 @@ struct ContentView: View {
                     CircleIconButton(symbol: "magnifyingglass", label: "Искать по расшифровкам") {
                         isSearching = true
                         searchFocused = true
+                        // Тот же заголовок, что на карточке: строка поиска и так
+                        // подписана датой, повторять её в заголовке незачем.
                         search.reindex(workspace) { entry in
-                            RecordTitle.resolve(entry, summaries: summaries, previews: previews).title
+                            cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry)
                         }
                     }
                     CircleIconButton(symbol: "gearshape", label: "Настройки") { showSettings = true }
@@ -322,6 +324,7 @@ struct ContentView: View {
     private func row(_ entry: WorkspaceEntry) -> some View {
         let path = entry.relativePath
         let resolved = RecordTitle.resolve(entry, summaries: summaries, previews: previews)
+        let title = cardTitle(resolved, entry)
         let state = transcription.state(for: path)
         let hasTranscript = workspace.existingTranscript(for: entry) != nil
         let status = RecordStatus.make(
@@ -332,7 +335,7 @@ struct ContentView: View {
         )
 
         RecordingCard(
-            title: resolved.title,
+            title: title,
             detail: resolved.detail,
             time: HomeFormat.time(entry.modifiedAt),
             duration: durations.duration(for: path).map(HomeFormat.clock),
@@ -346,7 +349,7 @@ struct ContentView: View {
         .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
         .onTapGesture { opened = entry }
         .contextMenu {
-            contextMenu(for: entry, resolved: resolved, state: state, hasTranscript: hasTranscript, action: status?.action)
+            contextMenu(for: entry, title: title, state: state, hasTranscript: hasTranscript, action: status?.action)
         }
         .task {
             previews.load(entry, in: workspace)
@@ -380,7 +383,7 @@ struct ContentView: View {
             .tint(LoriPalette.danger)
 
             if !state.isActive {
-                Button { startRename(entry, title: resolved.title) } label: {
+                Button { startRename(entry, title: title) } label: {
                     Label("Переименовать", systemImage: "pencil")
                 }
                 .tint(LoriPalette.muted)
@@ -400,7 +403,7 @@ struct ContentView: View {
     @ViewBuilder
     private func contextMenu(
         for entry: WorkspaceEntry,
-        resolved: RecordTitle,
+        title: String,
         state: TranscriptionRecordState,
         hasTranscript: Bool,
         action: RecordStatus.Action?
@@ -419,7 +422,7 @@ struct ContentView: View {
             }
         }
         if !state.isActive {
-            Button { startRename(entry, title: resolved.title) } label: {
+            Button { startRename(entry, title: title) } label: {
                 Label("Переименовать", systemImage: "pencil")
             }
         }
@@ -627,6 +630,13 @@ struct ContentView: View {
     /// её не убирал. Во время скачивания она остаётся — показывает проценты.
     private var showsTitlesHint: Bool {
         !workspace.audio.isEmpty && !summaryModels.isReady && !titlesHintDismissed
+    }
+
+    /// Заголовок на карточке. У записи без заголовка — «Запись 14:58», без «вчера»
+    /// и без даты: день назван заголовком секции над карточкой, а «Запись 12 августа»
+    /// у трёх записей одного дня было бы одним и тем же словом.
+    private func cardTitle(_ resolved: RecordTitle, _ entry: WorkspaceEntry) -> String {
+        resolved.source == .date ? "Запись \(HomeFormat.time(entry.modifiedAt))" : resolved.title
     }
 
     private func title(forPath path: String) -> String {
@@ -918,7 +928,7 @@ struct ContentView: View {
             .sheet(item: $topicTarget) { entry in
                 TopicSheet(
                     topics: topics,
-                    title: RecordTitle.resolve(entry, summaries: summaries, previews: previews).title,
+                    title: cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry),
                     path: entry.relativePath,
                     suggestion: suggestion(for: entry)
                 )

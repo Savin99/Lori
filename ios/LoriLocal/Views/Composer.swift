@@ -388,21 +388,35 @@ struct ComposerBar: View {
             }
         } else {
             HStack(spacing: 6) {
-                plusMenu
-
-                EngineChip(
-                    engine: engine,
-                    readiness: engines.readiness(of: engine.kind),
-                    action: actions.chooseEngine
-                )
-                if let mode {
-                    ModeChip(engine: engine, current: mode, select: actions.setMode)
+                // Полные подписи не помещаются — чипы прокручиваются вбок, а не
+                // режутся до «E…» и «Дос…»: при крупном шрифте по такому огрызку
+                // не понять, какой движок выбран. Кнопка записи при этом на месте.
+                ViewThatFits(in: .horizontal) {
+                    chips
+                    ScrollView(.horizontal, showsIndicators: false) {
+                        chips.fixedSize()
+                    }
                 }
 
                 Spacer(minLength: 0)
                 if state == .idle {
                     roundButton
                 }
+            }
+        }
+    }
+
+    private var chips: some View {
+        HStack(spacing: 6) {
+            plusMenu
+
+            EngineChip(
+                engine: engine,
+                readiness: engines.readiness(of: engine.kind),
+                action: actions.chooseEngine
+            )
+            if let mode {
+                ModeChip(engine: engine, current: mode, select: actions.setMode)
             }
         }
     }
@@ -455,6 +469,10 @@ struct ComposerBar: View {
         .buttonStyle(.plain)
         .fixedSize()
         .contentTransition(.symbolEffect(.replace))
+        // Значок в круге на 36 точек: при самом крупном шрифте он вылезал за круг.
+        // Крупно его показывает просмотр по долгому нажатию, как у системных панелей.
+        .dynamicTypeSize(...DynamicTypeSize.xxxLarge)
+        .accessibilityShowsLargeContentViewer()
         .accessibilityLabel(state == .recording ? "Остановить запись" : "Записать")
         .accessibilityIdentifier(state == .recording ? "stopButton" : "recordButton")
     }

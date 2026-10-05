@@ -426,24 +426,17 @@ struct TitlesHint: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            HStack(alignment: .top, spacing: 6) {
-                Text("Заголовки и короткие описания придумывает модель на этом iPhone")
-                    .font(LoriFont.meta)
-                    .foregroundStyle(LoriPalette.ink)
-                    .multilineTextAlignment(.leading)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 10)
-                Button(action: dismiss) {
-                    Image(systemName: "xmark")
-                        .font(LoriFont.tiny.weight(.semibold))
-                        .foregroundStyle(LoriPalette.muted)
-                        .frame(width: 44, height: 44)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.borderless)
-                .accessibilityLabel("Скрыть подсказку про заголовки")
-                .accessibilityIdentifier("titlesHintClose")
-            }
+            // Крестик — поверх, а не соседом в строке: в паре с ним многострочный
+            // текст строка списка мерила не по той ширине и при крупном шрифте
+            // обрезала многоточием.
+            Text("Заголовки и короткие описания придумывает модель на этом iPhone")
+                .font(LoriFont.meta)
+                .foregroundStyle(LoriPalette.ink)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.top, 10)
+                .padding(.trailing, 44)
 
             if models.downloading != nil {
                 VStack(alignment: .leading, spacing: 6) {
@@ -456,12 +449,18 @@ struct TitlesHint: View {
                 .accessibilityElement(children: .combine)
             } else {
                 Button { models.download(variant) } label: {
-                    Label("Скачать \(variant.accusative) · \(variant.sizeLabel)", systemImage: "arrow.down.circle")
-                        .font(LoriFont.small.weight(.semibold))
-                        .foregroundStyle(LoriPalette.lime)
-                        .multilineTextAlignment(.leading)
-                        .frame(minHeight: 44, alignment: .leading)
-                        .contentShape(Rectangle())
+                    // Значок и подпись — явным столбцом: при крупном шрифте подпись
+                    // переносится под себя, а не под значок.
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Image(systemName: "arrow.down.circle")
+                        Text("Скачать \(variant.accusative) · \(variant.sizeLabel)")
+                            .multilineTextAlignment(.leading)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    .font(LoriFont.small.weight(.semibold))
+                    .foregroundStyle(LoriPalette.lime)
+                    .frame(minHeight: 44, alignment: .leading)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.borderless)
                 .accessibilityIdentifier("titlesHintDownload")
@@ -476,6 +475,18 @@ struct TitlesHint: View {
         }
         .padding(.leading, 14)
         .padding(.trailing, 2)
+        .overlay(alignment: .topTrailing) {
+            Button(action: dismiss) {
+                Image(systemName: "xmark")
+                    .font(LoriFont.tiny.weight(.semibold))
+                    .foregroundStyle(LoriPalette.muted)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.borderless)
+            .accessibilityLabel("Скрыть подсказку про заголовки")
+            .accessibilityIdentifier("titlesHintClose")
+        }
         .background(LoriPalette.bubble, in: RoundedRectangle(cornerRadius: 14, style: .continuous))
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("titlesHint")
