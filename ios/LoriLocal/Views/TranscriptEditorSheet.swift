@@ -7,12 +7,17 @@ struct TranscriptEditorSheet: View {
     @Environment(\.dismiss) private var dismiss
 
     let path: String
+    /// Заголовок записи (`RecordTitle`): им же называется файл, если поделиться.
     let title: String
 
     @State private var text = ""
     @State private var loaded = ""
     @State private var error: String?
     @State private var share: SharePayload?
+    @State private var confirmDiscard = false
+
+    /// Есть несохранённая правка.
+    private var isDirty: Bool { text != loaded }
 
     var body: some View {
         NavigationStack {
@@ -29,10 +34,14 @@ struct TranscriptEditorSheet: View {
             .navigationTitle(title)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Отменить") {
+                        if isDirty { confirmDiscard = true } else { dismiss() }
+                    }
+                }
+                ToolbarItem(placement: .confirmationAction) {
                     Button("Готово") {
-                        save()
-                        dismiss()
+                        if save() { dismiss() }
                     }
                 }
                 ToolbarItem(placement: .topBarTrailing) {
@@ -40,6 +49,7 @@ struct TranscriptEditorSheet: View {
                         Image(systemName: "square.and.arrow.up")
                     }
                     .accessibilityLabel("Поделиться")
+                    .accessibilityHint("Файлом Markdown, как он есть сейчас")
                 }
             }
             .task {
@@ -53,12 +63,21 @@ struct TranscriptEditorSheet: View {
             .sheet(item: $share) { payload in
                 ShareSheet(payload: payload)
             }
-            .alert("Lori", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
+            .confirmationDialog("Выйти без сохранения?", isPresented: $confirmDiscard, titleVisibility: .visible) {
+                Button("Не сохранять", role: .destructive) { dismiss() }
+                Button("Продолжить правку", role: .cancel) {}
+            } message: {
+                Text("Правки в тексте пропадут.")
+            }
+            .alert("Не удалось сохранить", isPresented: Binding(get: { error != nil }, set: { if !$0 { error = nil } })) {
                 Button("OK", role: .cancel) { error = nil }
             } message: {
                 Text(error ?? "")
             }
         }
+        // Смахнуть лист с несохранённой правкой — значит молча её потерять:
+        // сохраняет только «Готово». Пока правка есть, выйти можно кнопками.
+        .interactiveDismissDisabled(isDirty)
         // Снаружи стека — по той же причине, что и в настройках: внутри плашку
         // перекрывает навигационная панель.
         .recordingBanner { dismiss() }
@@ -81,14 +100,19 @@ struct TranscriptEditorSheet: View {
 
     /// Пустой текст не сохраняется: это почти всегда промах по клавиатуре,
     /// а не желание стереть расшифровку.
-    private func save() {
+    ///
+    /// - Returns: можно ли закрывать лист. Раньше лист закрывался и при ошибке
+    ///   записи — алерт уезжал вместе с ним, и правка пропадала молча.
+    private func save() -> Bool {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed != loaded.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return }
+        guard trimmed != loaded.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else { return true }
         do {
             try workspace.writeText(text, at: path)
             loaded = text
+            return true
         } catch {
             self.error = error.localizedDescription
+            return false
         }
     }
 }
