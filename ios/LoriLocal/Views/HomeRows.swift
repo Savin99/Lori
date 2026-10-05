@@ -53,7 +53,7 @@ struct RecordingCard: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
 
             if let detail {
-                Text(detail)
+                Text(Self.sentence(detail))
                     .font(LoriFont.meta)
                     .foregroundStyle(LoriPalette.muted)
                     .lineLimit(2)
@@ -70,6 +70,14 @@ struct RecordingCard: View {
         .accessibilityElement(children: .combine)
         .accessibilityAddTraits(.isButton)
         .accessibilityIdentifier("recordingCard")
+    }
+
+    /// Описание — отдельная строка, и начинается она с заглавной. Продолжение
+    /// первой фразы после двоеточия («Созвон с дизайнером: убираем иконки…»)
+    /// иначе стояло бы со строчной и читалось как обрывок.
+    static func sentence(_ text: String) -> String {
+        guard let first = text.first, first.isLowercase else { return text }
+        return first.uppercased() + text.dropFirst()
     }
 
     private var meta: some View {

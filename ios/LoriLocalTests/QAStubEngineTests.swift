@@ -63,7 +63,11 @@ final class QAStubEngineTests: XCTestCase {
     func testDifferentNamesGetDifferentConversations() {
         let names = ["Совещание по бюджету", "Интервью Маши", "Звонок поставщику", "Разбор отзывов", "Планёрка"]
         let titles = Set(names.map { TranscriptTitle.title(from: QAStubTranscriber.transcript(for: $0).markdown(title: $0)) })
-        XCTAssertGreaterThan(titles.count, 2)
+        XCTAssertEqual(titles.count, names.count, "у каждой записи свой разговор")
+        XCTAssertTrue(
+            QAStubTranscriber.transcript(for: "Интервью Маши").text.contains("Маша"),
+            "интервью — про интервью: заголовок и описание не спорят"
+        )
         XCTAssertEqual(
             QAStubTranscriber.stableIndex(of: "Интервью Маши", count: 5),
             QAStubTranscriber.stableIndex(of: "Интервью Маши", count: 5),

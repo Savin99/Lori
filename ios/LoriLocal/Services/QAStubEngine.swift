@@ -101,7 +101,7 @@ struct QAStubTranscriber: Transcribing {
     /// Какой из разговоров — решает имя файла, чтобы у разных записей в списке и
     /// заголовки, и описания были разными.
     static func transcript(for name: String) -> Transcript {
-        let script = scripts[stableIndex(of: name, count: scripts.count)]
+        let script = scripts[scriptIndex(for: name)]
         var segments: [TranscriptSegment] = []
         var start: TimeInterval = 0
         for (index, line) in script.enumerated() {
@@ -112,6 +112,18 @@ struct QAStubTranscriber: Transcribing {
             start += length + 1
         }
         return Transcript(text: script.joined(separator: " "), segments: segments)
+    }
+
+    /// Разговор под имя файла: «Интервью Маши» — интервью, «Звонок поставщику» —
+    /// звонок. Иначе на снимке заголовок говорил бы одно, а описание другое.
+    /// Незнакомое имя — по номеру из имени.
+    static func scriptIndex(for name: String) -> Int {
+        let lowered = name.lowercased()
+        let keywords: [(String, Int)] = [
+            ("бюджет", 0), ("интервью", 1), ("поставщик", 2), ("отзыв", 3), ("планёрк", 4), ("планерк", 4), ("релиз", 4),
+        ]
+        for (keyword, index) in keywords where lowered.contains(keyword) { return index }
+        return stableIndex(of: name, count: scripts.count)
     }
 
     /// Номер по сумме кодов знаков, а не `hashValue`: тот меняется от запуска к запуску.

@@ -237,6 +237,8 @@ struct ComposerBar: View {
                             .disabled(busy)
                             .accessibilityIdentifier("detachAllButton")
                     }
+                    // Край текста — по столбцу крестиков выше, а не вплотную к рамке.
+                    .padding(.trailing, 14)
                 }
                 Text(estimateLine)
                     .font(LoriFont.small)

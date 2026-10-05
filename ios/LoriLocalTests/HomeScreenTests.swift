@@ -122,6 +122,16 @@ final class RecordStatusTests: XCTestCase {
     }
 }
 
+/// Описание на карточке — отдельная строка с заглавной буквы.
+final class RecordingCardTextTests: XCTestCase {
+    func testDescriptionStartsWithCapital() {
+        XCTAssertEqual(RecordingCard.sentence("убираем иконки, заголовку нужна вся ширина."), "Убираем иконки, заголовку нужна вся ширина.")
+        XCTAssertEqual(RecordingCard.sentence("Обсудили бюджет."), "Обсудили бюджет.")
+        XCTAssertEqual(RecordingCard.sentence("«цитата» в начале"), "«цитата» в начале", "не буква — не трогаем")
+        XCTAssertEqual(RecordingCard.sentence(""), "")
+    }
+}
+
 /// Блок очереди: о чём он говорит и что будет дальше.
 final class QueueSummaryTests: XCTestCase {
     private func title(_ path: String) -> String {
