@@ -262,20 +262,19 @@ final class TranscriptScreenUITests: XCTestCase {
         // Ошибку даёт сам прогон: облачный движок без ключа. Она переживает
         // перезапуск, и при следующем прогоне запись просто открывается. Одна
         // запись без расшифровки всегда остаётся — для снимка этого состояния.
+        // Карточка с ошибкой говорит её первой фразой: «Ключ ElevenLabs не сохранён».
         let untranscribed = app.descendants(matching: .any)
             .matching(identifier: "recordingCard")
             .matching(NSPredicate(format: "label CONTAINS %@", "Без расшифровки"))
-        if untranscribed.count >= 2 || !card(containing: "Ошибка", in: app).exists {
+        if untranscribed.count >= 2 || !card(containing: failedCard, in: app).exists {
             try openCard(withStatus: "Без расшифровки", in: app)
             tap(app.buttons["transcribeAction"])
-            // Алерт списка про ту же ошибку закрывает лист записи — снимок
-            // фиксирует, как это выглядит сейчас (`ContentView`, не этот экран).
-            _ = app.alerts.firstMatch.waitForExistence(timeout: 15)
-            save("record-failed-list-alert")
-            dismissAlerts(in: app)
+            // Ошибка записи — строкой на этом экране. Алерт списка про неё больше не
+            // встаёт и лист не закрывает (`ContentView.activeError`).
+            XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 3), "ошибка записи — не алертом поверх листа")
         }
         if !app.descendants(matching: .any)["recordTitle"].exists {
-            try openCard(withStatus: "Ошибка", in: app)
+            try openCard(withStatus: failedCard, in: app)
         }
         let failure = app.staticTexts["Не получилось расшифровать"]
         XCTAssertTrue(failure.waitForExistence(timeout: 15), "облачный движок без ключа даёт ошибку")
@@ -305,6 +304,9 @@ final class TranscriptScreenUITests: XCTestCase {
     }
 
     // MARK: - Помощники
+
+    /// Первая фраза ошибки облачного движка без ключа — так её пишет карточка.
+    private let failedCard = "не сохранён"
 
     /// Запуск с заданным движком: выбор живёт в `UserDefaults` и иначе переживал бы
     /// прогон — один тест влиял бы на другой.
@@ -400,18 +402,6 @@ final class TranscriptScreenUITests: XCTestCase {
         guard field.waitForExistence(timeout: 3) else { return }
         field.typeText(name)
         tap(app.buttons["Сохранить"])
-    }
-
-    /// Алерт списка про ошибку может встать поверх листа — снимок с ним
-    /// сохраняется отдельно, а сам алерт закрывается.
-    private func dismissAlerts(in app: XCUIApplication) {
-        for _ in 0..<3 {
-            let alert = app.alerts.firstMatch
-            guard alert.waitForExistence(timeout: 2) else { return }
-            let ok = alert.buttons["OK"]
-            if ok.exists { ok.tap() } else { alert.buttons.firstMatch.tap() }
-            _ = alert.waitForNonExistence(timeout: 3)
-        }
     }
 
     /// Один и тот же экран в светлой и тёмной теме.

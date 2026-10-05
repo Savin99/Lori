@@ -84,14 +84,14 @@ final class TranscriptionUITests: XCTestCase {
             app.buttons["Скорость воспроизведения"].exists,
             "скорость важнее перемотки: расшифровку слушают на 1.5–2×"
         )
-        XCTAssertTrue(app.buttons["Расшифровки"].exists, "видно, куда возвращает кнопка")
+        XCTAssertTrue(app.buttons["Записи"].exists, "видно, куда возвращает кнопка")
         XCTAssertTrue(
             app.descendants(matching: .any)["topicChip"].exists,
             "тема назначается прямо с экрана записи"
         )
         save(XCUIScreen.main.screenshot(), named: "transcript-screen")
 
-        app.buttons["Расшифровки"].tap()
+        app.buttons["Записи"].tap()
         XCTAssertTrue(play.waitForNonExistence(timeout: 5), "кнопка возврата закрывает экран записи")
     }
 
@@ -396,7 +396,7 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true))
         queue.tap()
         XCTAssertTrue(app.buttons["Слушать"].waitForExistence(timeout: 5), "блок открывает запись")
-        tap(app.buttons["Расшифровки"])
+        tap(app.buttons["Записи"])
 
         tap(app.buttons["stopQueueButton"])
         tap(dialogButton("Остановить", in: app))
@@ -418,6 +418,116 @@ final class TranscriptionUITests: XCTestCase {
             app.buttons.matching(NSPredicate(format: "label == %@", "Настройки")).count, 1,
             "настройки — только шестерёнкой в шапке"
         )
+    }
+
+    // MARK: - Экран записи из списка
+
+    /// Ошибка расшифровки не закрывает открытый экран записи: она встаёт на нём
+    /// строкой с «Повторить», а алерта главного экрана поверх листа больше нет.
+    /// Раньше этот алерт выбивал лист записи — так было в отчёте экрана записи
+    /// 5 октября. Две записи с «fail» в имени: первая в работе, вторая ждёт в
+    /// очереди — её и открываем, пока ждёт.
+    func testFailureKeepsRecordScreenOpen() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 30)
+        stopQueueIfRunning(app)
+
+        let retries = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Повторить"))
+        let first = retries.firstMatch
+        try XCTSkipUnless(scrollUntilExists(first, in: app), "нет записи с «fail» в имени — прогони seed-home.py --inbox-only и testZZ1")
+        scroll(to: first, in: app)
+        tap(first)
+        // У первой кнопка ушла вместе с ошибкой — следующая «Повторить» уже у второй.
+        let second = retries.firstMatch
+        try XCTSkipUnless(scrollUntilExists(second, in: app), "нужны две записи с «fail» в имени — testZZ1 дважды")
+        scroll(to: second, in: app)
+        tap(second)
+
+        let queued = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "В очереди")).firstMatch
+        XCTAssertTrue(scrollUntilExists(queued, in: app), "вторая ждёт в очереди")
+        scroll(to: queued, in: app)
+        tap(queued)
+        let title = app.descendants(matching: .any)["recordTitle"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "экран записи открыт")
+        let status = app.descendants(matching: .any)["transcriptionStatus"]
+        XCTAssertTrue(status.waitForExistence(timeout: 5), "на экране — блок состояния")
+
+        let failure = app.staticTexts["Не получилось расшифровать"]
+        XCTAssertTrue(failure.waitForExistence(timeout: 60), "ошибка встаёт строкой на экране записи")
+        XCTAssertTrue(status.buttons["Повторить"].exists, "рядом с ошибкой — «Повторить»")
+        XCTAssertEqual(app.alerts.count, 0, "алерта поверх листа нет")
+        sleep(2)
+        XCTAssertTrue(title.exists, "лист записи остался открытым")
+        save(XCUIScreen.main.screenshot(), named: "record-failed-stays-open")
+        tap(app.buttons["Записи"])
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+    }
+
+    /// Переименование с экрана записи не закрывает лист: путь записи меняется, а
+    /// экран остаётся и показывает новое имя. Имя возвращается назад — набор для
+    /// тестов экрана записи («UI sample») ищет запись по прежнему заголовку.
+    func testRenameFromRecordScreenKeepsItOpen() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let sample = "Проверка плеера записи"
+        let card = cards(in: app).matching(NSPredicate(format: "label BEGINSWITH %@", sample)).firstMatch
+        try XCTSkipUnless(scrollUntilExists(card, in: app), "нет записи «UI sample» — прогони design/qa/seed-audio.sh")
+        scroll(to: card, in: app)
+        tap(card)
+
+        let title = app.buttons["recordTitle"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "заголовок — кнопка переименования")
+        XCTAssertEqual(title.label, sample)
+        let suffix = " проверка"
+
+        title.tap()
+        let field = app.textFields["Название"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        XCTAssertEqual(field.value as? String, sample, "в поле — видимый заголовок")
+        field.typeText(suffix)
+        app.buttons["Сохранить"].tap()
+
+        XCTAssertTrue(
+            title.waitForLabel(sample + suffix, timeout: 5),
+            "экран показывает новое имя: \(title.label)"
+        )
+        XCTAssertTrue(app.buttons["Записи"].exists, "лист остался открытым")
+        XCTAssertTrue(app.descendants(matching: .any)["recordingMeta"].exists, "и это всё тот же экран записи")
+
+        // Назад — тем же путём.
+        title.tap()
+        XCTAssertTrue(field.waitForExistence(timeout: 5))
+        field.typeText(String(repeating: XCUIKeyboardKey.delete.rawValue, count: suffix.count))
+        app.buttons["Сохранить"].tap()
+        XCTAssertTrue(title.waitForLabel(sample, timeout: 5), "имя вернулось: \(title.label)")
+        tap(app.buttons["Записи"])
+        XCTAssertTrue(card.waitForExistence(timeout: 5), "карточка — под прежним заголовком")
+    }
+
+    /// «Удалить запись» на экране записи переспрашивает теми же словами, что список.
+    func testDeleteFromRecordScreenAsksFirst() throws {
+        continueAfterFailure = false
+        let app = launch()
+
+        let card = quietCard(in: app)
+        try XCTSkipUnless(card.waitForExistence(timeout: 5), "нет записей с расшифровкой — прогони design/qa/seed-home.py")
+        tap(card)
+        let title = app.descendants(matching: .any)["recordTitle"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5))
+
+        tap(app.buttons["transcriptMenu"])
+        tap(app.buttons["Удалить запись"])
+        XCTAssertTrue(app.staticTexts["Удалить запись?"].waitForExistence(timeout: 5), "без подтверждения не удаляем")
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Аудио и расшифровка переедут в корзину Lori")).firstMatch.exists,
+            "те же слова, что в списке"
+        )
+        save(XCUIScreen.main.screenshot(), named: "record-delete-confirm")
+        dismissDialog(in: app)
+        XCTAssertTrue(app.staticTexts["Удалить запись?"].waitForNonExistence(timeout: 5))
+        XCTAssertTrue(title.exists, "отказ оставляет запись и экран")
+        tap(app.buttons["Записи"])
     }
 
     // MARK: - Снимки главного экрана
@@ -473,6 +583,48 @@ final class TranscriptionUITests: XCTestCase {
         sleep(1)
         shoot(named: "home-titles-hint")
 
+        stopQueueIfRunning(app)
+    }
+
+    /// Экран записи в очереди и в работе — в светлой и тёмной теме. Нужны две
+    /// записи без расшифровки (`seed-home.py --untranscribed`): первая считается,
+    /// вторая ждёт. В конце очередь снимается, и обе остаются без расшифровки.
+    func testZZ3RecordScreenQueueScreenshots() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 120)
+        stopQueueIfRunning(app)
+
+        let first = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(first, in: app), "нет записи без расшифровки — seed-home.py --untranscribed")
+        scroll(to: first, in: app)
+        tap(first)
+        let second = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(second, in: app), "нужны две записи без расшифровки — seed-home.py --untranscribed")
+        scroll(to: second, in: app)
+        tap(second)
+
+        let queued = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "В очереди")).firstMatch
+        XCTAssertTrue(scrollUntilExists(queued, in: app), "вторая ждёт в очереди")
+        scroll(to: queued, in: app)
+        tap(queued)
+        XCTAssertTrue(app.descendants(matching: .any)["recordTitle"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "В очереди")).firstMatch.waitForExistence(timeout: 5))
+        sleep(1)
+        shoot(named: "record-queued")
+        tap(app.buttons["Записи"])
+
+        let running = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю")).firstMatch
+        XCTAssertTrue(scrollUntilExists(running, in: app, upwards: true) || scrollUntilExists(running, in: app), "первая считается")
+        scroll(to: running, in: app)
+        tap(running)
+        // Готовые реплики появляются по ходу работы — ждём первые.
+        XCTAssertTrue(
+            app.descendants(matching: .any)["partialTranscript"].waitForExistence(timeout: 30),
+            "по ходу работы видны готовые реплики"
+        )
+        sleep(1)
+        shoot(named: "record-running")
+        tap(app.buttons["Записи"])
         stopQueueIfRunning(app)
     }
 
@@ -645,5 +797,14 @@ final class TranscriptionUITests: XCTestCase {
         add(attachment)
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("\(name).png")
         try? screenshot.pngRepresentation.write(to: url)
+    }
+}
+
+private extension XCUIElement {
+    /// Ждёт, пока подпись элемента станет нужной: после переименования заголовок
+    /// меняется не сразу, а когда список переедет за записью.
+    func waitForLabel(_ label: String, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: self)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 }
