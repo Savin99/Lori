@@ -427,9 +427,14 @@ final class TranscriptionUITests: XCTestCase {
     /// Раньше этот алерт выбивал лист записи — так было в отчёте экрана записи
     /// 5 октября. Две записи с «fail» в имени: первая в работе, вторая ждёт в
     /// очереди — её и открываем, пока ждёт.
+    ///
+    /// Заглушка роняет «fail» на трети пути — при 90 секундах через ~37 с после
+    /// старта, и до второй записи успевают долистать, пока первая ещё идёт. С 30
+    /// секундами первая падала раньше второго нажатия, когда список вырос, и вторая
+    /// уже не ждала в очереди, а сразу шла в работу.
     func testFailureKeepsRecordScreenOpen() throws {
         continueAfterFailure = false
-        let app = launch(stub: true, stubSeconds: 30)
+        let app = launch(stub: true, stubSeconds: 90)
         stopQueueIfRunning(app)
 
         let retries = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Повторить"))
@@ -453,7 +458,8 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(status.waitForExistence(timeout: 5), "на экране — блок состояния")
 
         let failure = app.staticTexts["Не получилось расшифровать"]
-        XCTAssertTrue(failure.waitForExistence(timeout: 60), "ошибка встаёт строкой на экране записи")
+        // Вторая падает через ~37 с после первой: ждать — с запасом на обе.
+        XCTAssertTrue(failure.waitForExistence(timeout: 120), "ошибка встаёт строкой на экране записи")
         XCTAssertTrue(status.buttons["Повторить"].exists, "рядом с ошибкой — «Повторить»")
         XCTAssertEqual(app.alerts.count, 0, "алерта поверх листа нет")
         sleep(2)
