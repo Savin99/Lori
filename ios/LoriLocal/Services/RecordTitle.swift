@@ -148,10 +148,43 @@ extension RecordTitle {
         if !suffix.isEmpty, WorkspaceEntry.audioExtensions.contains(suffix) {
             base = (base as NSString).deletingPathExtension
         }
+        if isUUID(base) { return true }
         // Пустое имя или одни знаки — тоже служебное: сказать им нечего.
-        return base.lowercased()
-            .split { !$0.isLetter && !$0.isNumber }
+        return withoutUUIDs(base.lowercased().split { !$0.isLetter && !$0.isNumber })
             .allSatisfy(isFiller)
+    }
+
+    /// UUID — имя временного файла системы или чужого приложения: целиком
+    /// (`UUID(uuidString:)`) или 32 шестнадцатеричных знака подряд — то же
+    /// правило, что у `ClipboardAudio.stagedName`. Раньше UUID узнавался только
+    /// случайно, через «короткие коды», и около 80% случайных UUID проходили
+    /// как имя от человека.
+    static func isUUID(_ text: some StringProtocol) -> Bool {
+        UUID(uuidString: String(text)) != nil || (text.count == 32 && text.allSatisfy(\.isHexDigit))
+    }
+
+    /// Куски имени без UUID внутри: «<UUID> 2» (повтор имени), «audio_<UUID>».
+    /// UUID в кусках — это пять групп по 8-4-4-4-12 шестнадцатеричных знаков
+    /// подряд или одна группа из 32.
+    private static func withoutUUIDs(_ tokens: [Substring]) -> [Substring] {
+        let groups = [8, 4, 4, 4, 12]
+        var result: [Substring] = []
+        var index = 0
+        while index < tokens.count {
+            let window = tokens[index...].prefix(groups.count)
+            if window.count == groups.count,
+               zip(window, groups).allSatisfy({ token, length in token.count == length && token.allSatisfy(\.isHexDigit) }) {
+                index += groups.count
+                continue
+            }
+            if isUUID(tokens[index]) {
+                index += 1
+                continue
+            }
+            result.append(tokens[index])
+            index += 1
+        }
+        return result
     }
 
     /// Кусок имени, который не несёт смысла: число, слово из списка, одна буква

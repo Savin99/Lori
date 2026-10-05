@@ -34,6 +34,27 @@ final class RecordGenericNameTests: XCTestCase {
         }
     }
 
+    /// **Регрессия.** UUID — имя временного файла системы или чужого приложения.
+    /// Раньше он считался служебным только случайно: кусок из букв и цифр шёл в
+    /// «коды», лишь когда букв в нём не больше трёх, и около 80% случайных UUID
+    /// выходили «осмысленными» и побеждали первую фразу расшифровки.
+    func testUUIDNamesAreGeneric() {
+        for _ in 0..<50 {
+            let uuid = UUID().uuidString
+            let compact = uuid.replacingOccurrences(of: "-", with: "")
+            for name in [uuid, uuid.lowercased(), compact, compact.lowercased(), "\(uuid) 2", "audio_\(uuid)", "\(uuid).m4a"] {
+                XCTAssertTrue(RecordTitle.isGenericName(name), "«\(name)» — имя временного файла")
+            }
+        }
+    }
+
+    /// Слова из букв a–f — не UUID: «Cafe» или «Decade» назвал человек.
+    func testHexLookingWordsStayMeaningful() {
+        for name in ["Cafe", "Decade", "Bead", "Face ID", "deadbeef"] {
+            XCTAssertFalse(RecordTitle.isGenericName(name), "«\(name)» — имя от человека")
+        }
+    }
+
     func testGenericNameIsShownReadable() {
         XCTAssertEqual(RecordTitle.cleanedName("audio_5_2"), "audio 5 2")
         XCTAssertEqual(RecordTitle.cleanedName("Новая  запись_12 "), "Новая запись 12")
