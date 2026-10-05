@@ -628,6 +628,45 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertNil(store.entry(for: "a.m4a"))
     }
 
+    // MARK: - Файл заголовков не читается
+
+    /// Пока файл заголовков не прочитан (на телефоне — до первой разблокировки),
+    /// бегунок ничего не берёт в работу: он не знает, у каких записей ручные имена.
+    /// Раньше автомат ставил в очередь десяток новых записей, включая названные
+    /// человеком, и ответ модели затирал имя при сведении с файлом.
+    func testNothingRunsWhileTheTitleFileIsUnreadable() async throws {
+        let workspace = try makeWorkspace([("a.m4a", Self.transcript, 0)])
+        store.setManual(title: "Моё интервью", for: "a.m4a")
+        let manager = FileManager.default
+        try manager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: storeURL.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: storeURL.path) }
+        guard (try? Data(contentsOf: storeURL)) == nil else {
+            throw XCTSkip("файл читается и без прав — проверить отказ здесь нечем")
+        }
+        let blind = SummaryStore(url: storeURL)
+        let attempts = Attempts()
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: blind,
+            availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, _ in attempts.bump(); return .init(title: "Ответ модели", detail: "Описание") }
+        )
+        runner.connect(to: workspace)
+
+        runner.applicationDidBecomeActive()
+        runner.summarize(path: "a.m4a", text: Self.transcript)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(attempts.value, 0, "модель не запускалась")
+
+        // Телефон разблокировали, человек вернулся в приложение.
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: storeURL.path)
+        runner.applicationDidBecomeActive()
+        await waitUntil { blind.detail(for: "a.m4a") != nil }
+
+        XCTAssertEqual(blind.title(for: "a.m4a"), "Моё интервью")
+        XCTAssertEqual(SummaryStore(url: storeURL).title(for: "a.m4a"), "Моё интервью")
+        XCTAssertEqual(blind.detail(for: "a.m4a"), "Описание")
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline {

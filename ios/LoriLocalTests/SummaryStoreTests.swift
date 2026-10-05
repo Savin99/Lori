@@ -227,6 +227,51 @@ final class SummaryStoreTests: XCTestCase {
         XCTAssertEqual(merged.title(for: "b.m4a"), "Заголовок")
     }
 
+    /// **Регрессия.** Пока файл не читался, хранилище не знало о ручном имени, и
+    /// первый же ответ модели по той же записи решал защиту по пустой памяти, а
+    /// при сведении с файлом затирал имя человека.
+    func testUnreadableFileNeverLetsTheModelReplaceAManualTitleOfTheSamePath() throws {
+        store.setManual(title: "Важное имя", for: "a.m4a")
+        let manager = FileManager.default
+        try manager.setAttributes([.posixPermissions: 0o000], ofItemAtPath: url.path)
+        defer { try? manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path) }
+        guard (try? Data(contentsOf: url)) == nil else {
+            throw XCTSkip("файл читается и без прав — проверить отказ здесь нечем")
+        }
+
+        let blind = SummaryStore(url: url)
+        XCTAssertTrue(blind.isUnreadable)
+        XCTAssertFalse(blind.store(title: "Ответ модели", detail: "Описание", for: "a.m4a"), "решать по пустой памяти нельзя")
+        XCTAssertNil(blind.entry(for: "a.m4a"), "и в памяти не осталось")
+
+        try manager.setAttributes([.posixPermissions: 0o644], ofItemAtPath: url.path)
+        // Следующая правка сначала перечитывает файл — и видит ручное имя.
+        XCTAssertTrue(blind.store(title: "Ответ модели", detail: "Описание", for: "a.m4a"))
+        XCTAssertFalse(blind.isUnreadable)
+        let reopened = SummaryStore(url: url)
+        XCTAssertEqual(reopened.title(for: "a.m4a"), "Важное имя")
+        XCTAssertEqual(reopened.entry(for: "a.m4a")?.manual, true)
+        XCTAssertEqual(reopened.detail(for: "a.m4a"), "Описание", "описание модели при этом пришло")
+    }
+
+    /// Сведение файла с памятью: новое побеждает, но не-ручная запись ручное имя
+    /// из файла не заменяет. Новое ручное имя — заменяет: это последнее слово человека.
+    func testMergeNeverLetsANonManualEntryReplaceAManualOne() {
+        let manual = SummaryStore.Entry(title: "Важное имя", detail: "", origin: .manual)
+        let generated = SummaryStore.Entry(title: "Ответ модели", detail: "Описание", origin: .generated, summarized: true)
+        let newer = SummaryStore.Entry(title: "Новое имя", detail: "", origin: .manual)
+
+        let merged = SummaryStore.merge(
+            stored: ["a": manual, "b": generated, "c": manual],
+            current: ["a": generated, "b": newer, "c": newer, "d": generated]
+        )
+
+        XCTAssertEqual(merged["a"], manual, "ответ модели ручное имя не заменяет")
+        XCTAssertEqual(merged["b"], newer)
+        XCTAssertEqual(merged["c"], newer, "новое ручное имя главнее старого")
+        XCTAssertEqual(merged["d"], generated)
+    }
+
     /// Файл старой сборки: были только заголовок, описание и «ручное».
     func testLegacyFileIsUnderstood() throws {
         let legacy = """

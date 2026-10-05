@@ -75,6 +75,38 @@ final class SummaryStore: ObservableObject {
 
     var pendingQueueURL: URL { url.deletingPathExtension().appendingPathExtension("pending.json") }
 
+    /// Файл заголовков есть, но не прочитался — например, до первой разблокировки
+    /// после перезагрузки. Пока так, хранилище знает не все заголовки, и решать по
+    /// нему, чьё имя защищено, нельзя: бегунок модели в это время ничего не берёт.
+    var isUnreadable: Bool { unreadable }
+
+    /// Перечитать файл, если в прошлый раз он не прочитался. Зовётся перед каждой
+    /// правкой и при возвращении в приложение: защита данных снимается после
+    /// разблокировки, и с этого момента решения принимаются по настоящим записям,
+    /// а не по пустой памяти.
+    @discardableResult
+    func retryLoadIfNeeded() -> Bool {
+        guard unreadable else { return true }
+        guard let data = try? Data(contentsOf: url) else { return false }
+        unreadable = false
+        if let stored = decode(data) {
+            entries = Self.merge(stored: stored, current: entries)
+        }
+        guard !unreadable else { return false }
+        Diagnostics.note("заголовки: \(url.lastPathComponent) снова читается — сохранённое и сделанное с запуска сведены")
+        return true
+    }
+
+    /// Сведение файла с тем, что сделано с запуска. Новое побеждает — кроме
+    /// одного случая: запись не от человека не заменяет ручное имя из файла.
+    /// Пока файл не читался, хранилище об этом имени не знало, и ответ модели,
+    /// пришедший тогда, тоже: раньше он молча затирал имя человека.
+    static func merge(stored: [String: Entry], current: [String: Entry]) -> [String: Entry] {
+        stored.merging(current) { stored, current in
+            stored.manual && !current.manual ? stored : current
+        }
+    }
+
     static var defaultURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appending(path: "Lori", directoryHint: .isDirectory)
@@ -116,6 +148,8 @@ final class SummaryStore: ObservableObject {
     /// текст поменялся или попросили явно.
     @discardableResult
     func store(title: String, detail: String, for relativePath: String, force: Bool = false, source: String? = nil) -> Bool {
+        // Защиту ручного имени решаем по файлу, а не по пустой памяти.
+        retryLoadIfNeeded()
         let previous = entries[relativePath]
         var entry: Entry
         if var existing = previous, existing.manual, !(force && existing.replaceManual) {
@@ -136,6 +170,7 @@ final class SummaryStore: ObservableObject {
 
     /// Имя от человека. Ответ модели (описание) остаётся: он про ту же запись.
     func setManual(title: String, for relativePath: String) {
+        retryLoadIfNeeded()
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
         var entry = entries[relativePath] ?? Entry(title: clean, detail: "", origin: .manual)
@@ -150,6 +185,7 @@ final class SummaryStore: ObservableObject {
     /// Имя принесённого файла видно сразу, но это не ручное переименование в Lori.
     /// Иначе «Новая запись 5» навсегда побеждала заголовок, который модель уже создала.
     func setImported(title: String, for relativePath: String) {
+        retryLoadIfNeeded()
         guard entries[relativePath] == nil else { return }
         let clean = title.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return }
@@ -162,6 +198,8 @@ final class SummaryStore: ObservableObject {
     /// `store(…, force: true)`, и только он.
     @discardableResult
     func allowGeneratedTitle(for relativePath: String) -> Bool {
+        // Не прочитав файл, не узнать, есть ли у записи имя от человека.
+        guard retryLoadIfNeeded() else { return false }
         guard var entry = entries[relativePath], entry.manual, !entry.replaceManual else { return true }
         let previous = entry
         entry.replaceManual = true
@@ -174,6 +212,7 @@ final class SummaryStore: ObservableObject {
     /// устарел, но остаётся на экране, пока модель не напишет новый.
     @discardableResult
     func markStale(_ relativePath: String) -> Bool {
+        retryLoadIfNeeded()
         guard var entry = entries[relativePath], entry.summarized, !entry.stale else { return false }
         entry.stale = true
         entries[relativePath] = entry
@@ -189,6 +228,7 @@ final class SummaryStore: ObservableObject {
     /// временем отвечал «заголовком служит первая фраза» — неправду.
     @discardableResult
     func dropGenerated(_ relativePath: String) -> Bool {
+        retryLoadIfNeeded()
         guard var entry = entries[relativePath] else { return false }
         if entry.origin == .generated {
             entries.removeValue(forKey: relativePath)
@@ -206,12 +246,14 @@ final class SummaryStore: ObservableObject {
 
     /// Переименование файла меняет ключ: запись не должна терять заголовок.
     func move(from old: String, to new: String) {
+        retryLoadIfNeeded()
         guard old != new, let entry = entries.removeValue(forKey: old) else { return }
         entries[new] = entry
         save()
     }
 
     func forget(_ relativePath: String) {
+        retryLoadIfNeeded()
         guard entries.removeValue(forKey: relativePath) != nil else { return }
         save()
     }
@@ -271,18 +313,11 @@ final class SummaryStore: ObservableObject {
 
     @discardableResult
     private func save() -> Bool {
-        if unreadable {
-            // Файл мог стать доступным: защита данных снимается после разблокировки.
-            // Тогда сохранённое раньше — основа, а сделанное с запуска — поверх.
-            guard let data = try? Data(contentsOf: url) else {
-                Diagnostics.fault("заголовки: \(url.lastPathComponent) всё ещё не читается — не сохраняю, чтобы не затереть")
-                return false
-            }
-            unreadable = false
-            if let stored = decode(data) {
-                entries = stored.merging(entries) { _, current in current }
-            }
-            guard !unreadable else { return false }
+        // Файл мог стать доступным: защита данных снимается после разблокировки.
+        // Тогда сохранённое раньше — основа, а сделанное с запуска — поверх.
+        guard retryLoadIfNeeded() else {
+            Diagnostics.fault("заголовки: \(url.lastPathComponent) всё ещё не читается — не сохраняю, чтобы не затереть")
+            return false
         }
         do {
             try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)

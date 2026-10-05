@@ -187,6 +187,7 @@ final class SummaryRunner: ObservableObject {
     /// только имя файла или ручное имя без описания — или модель писала по
     /// другому тексту. Повторный вызов с тем же текстом ничего не делает.
     func summarize(path: String, text: String, force: Bool = false) {
+        store.retryLoadIfNeeded()
         let source = Source(text: text)
         guard source.characters > Self.minimumCharacters else {
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(Self.name(of: path))»")
@@ -223,6 +224,7 @@ final class SummaryRunner: ObservableObject {
     /// но только когда ответит (`SummaryStore.allowGeneratedTitle`). Без модели
     /// заявка ждёт её, а экран предлагает скачать на месте.
     func requestTitle(for path: String, text: String? = nil) -> TitleRequest {
+        store.retryLoadIfNeeded()
         failure = nil
         let source = text.map(Source.init(text:))
         if let source, source.characters <= Self.minimumCharacters {
@@ -245,7 +247,7 @@ final class SummaryRunner: ObservableObject {
     /// Придумать заголовки всем записям, которым их не хватает, — по кнопке в
     /// настройках, без предела автомата: человек попросил сам.
     func summarizeBacklog() {
-        guard let workspace else { return }
+        guard let workspace, !store.isUnreadable else { return }
         for entry in workspace.audio where lacksSummary(entry, in: workspace) {
             postponed.append(Postponed(path: entry.relativePath, force: false))
             revisions[entry.relativePath, default: 0] += 1
@@ -258,7 +260,7 @@ final class SummaryRunner: ObservableObject {
     /// Пересчитать, скольким записям не хватает заголовка, — для экрана
     /// настроек. В очередь ничего не ставит и файлов не читает.
     func refreshBacklog() {
-        guard let workspace, hasWeights else {
+        guard let workspace, hasWeights, !store.isUnreadable else {
             backlogCount = 0
             return
         }
@@ -328,6 +330,9 @@ final class SummaryRunner: ObservableObject {
     }
 
     func applicationDidBecomeActive() {
+        // Вернулись в приложение — телефон разблокирован, и файл заголовков,
+        // не прочитавшийся на запуске, обычно читается уже сейчас.
+        store.retryLoadIfNeeded()
         failedThisPass.removeAll()
         recoverMissingSummaries()
         drain()
@@ -342,6 +347,12 @@ final class SummaryRunner: ObservableObject {
     /// приложение каждая расшифровка разбиралась целиком на главном потоке.
     private func recoverMissingSummaries() {
         guard let workspace else { return }
+        // Пока файл заголовков не прочитан, хранилище не знает ручных имён: в
+        // очередь встали бы и записи, которые человек назвал сам.
+        guard !store.isUnreadable else {
+            backlogCount = 0
+            return
+        }
         guard hasWeights else {
             backlogCount = 0
             return
@@ -389,6 +400,13 @@ final class SummaryRunner: ObservableObject {
 
     private func drain() {
         guard transcriptionPauses == 0, running == nil, !postponed.isEmpty else { return }
+        // Решать, чьё имя защищено, по пустой памяти нельзя: работа ждёт, пока
+        // файл заголовков прочитается (`applicationDidBecomeActive`).
+        guard !store.isUnreadable else {
+            waitingReason = "Заголовки продолжатся, когда файл заголовков снова прочитается"
+            note("заголовки: файл заголовков не читается — жду (в очереди \(postponed.count))", reason: "файл")
+            return
+        }
         // Графического процессора в фоне нет: команда возвращается с ошибкой, и MLX
         // гасит процесс из своей очереди. Работа не теряется — откладывается.
         guard isForeground() else {
