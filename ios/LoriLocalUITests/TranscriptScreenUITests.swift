@@ -154,6 +154,38 @@ final class TranscriptScreenUITests: XCTestCase {
         )
     }
 
+    /// Переименование заполняет поле тем, что человек видит, а не именем файла:
+    /// иначе «Сохранить» без правки сделало бы «UI sample» ручным заголовком.
+    /// Пункт есть, только когда список передал экрану `onRename`.
+    func testRenameIsPrefilledWithVisibleTitle() throws {
+        let app = launch()
+        try open(sample, in: app)
+
+        let title = app.buttons["recordTitle"]
+        try XCTSkipUnless(title.exists, "список ещё не передал экрану onRename — заголовок не кнопка")
+        title.tap()
+        let field = app.textFields["Название"]
+        XCTAssertTrue(field.waitForExistence(timeout: 5), "тап по заголовку открывает переименование")
+        XCTAssertEqual(field.value as? String, sample, "в поле — видимый заголовок")
+        save("record-rename")
+        tap(app.buttons["Отмена"])
+
+        app.buttons["transcriptMenu"].tap()
+        XCTAssertTrue(app.buttons["Переименовать"].waitForExistence(timeout: 3), "и пункт в «…»")
+    }
+
+    /// «Удалить запись» в «…» — только когда список передал `onDelete`: удаляет и
+    /// подтверждает он. Здесь пункт не нажимается.
+    func testDeleteIsOfferedWhenListAllowsIt() throws {
+        let app = launch()
+        try open(sample, in: app)
+
+        app.buttons["transcriptMenu"].tap()
+        XCTAssertTrue(app.buttons["Тема"].waitForExistence(timeout: 3))
+        try XCTSkipUnless(app.buttons["Удалить запись"].exists, "список ещё не передал экрану onDelete")
+        save("record-more-menu-full")
+    }
+
     // MARK: - Снимки состояний
 
     /// Снимки экрана записи в светлой и тёмной теме — для глаз, а не для проверок.
