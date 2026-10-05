@@ -154,6 +154,18 @@ struct RecordStatus: Equatable, Sendable {
         }
     }
 
+    /// Каким движком ставить запись по кнопке на карточке. «Продолжить» — тем же,
+    /// что считал до обрыва: у старых прерванных записей нет снимка задания, и без
+    /// движка сервис взял бы выбранный сейчас в настройках — запись, прерванная на
+    /// OpenAI, молча ушла бы в ElevenLabs. «Расшифровать» и «Повторить» — тем, что
+    /// выбран сейчас: после ошибки человек мог сменить движок именно затем.
+    static func engine(for action: Action, interrupted: TranscriptionEngineKind?) -> TranscriptionEngineKind? {
+        switch action {
+        case .resume: interrupted
+        case .transcribe, .retry: nil
+        }
+    }
+
     /// «63%» — по сделанному, без округления вверх: сотня появляется только с концом
     /// работы, иначе «100%» стояло бы на последнем куске (см. `TranscriptionService.fraction`).
     static func percent(_ fraction: Double) -> String {

@@ -345,7 +345,7 @@ struct ContentView: View {
             topic: topics.topic(for: path),
             needsTopic: needsTopic(entry),
             status: status,
-            perform: { _ in transcription.enqueue(entry, in: workspace) }
+            perform: { action in start(entry, action) }
         )
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
@@ -438,7 +438,7 @@ struct ContentView: View {
             }
         }
         if let action {
-            Button { transcription.enqueue(entry, in: workspace) } label: {
+            Button { start(entry, action) } label: {
                 Label(action.title, systemImage: action == .transcribe ? "waveform" : "arrow.clockwise")
             }
         }
@@ -835,6 +835,13 @@ struct ContentView: View {
         guard let new = try rename(entry, typed: typed, currentTitle: shownTitle), new != old else { return }
         transcription.forget(old)
         if let moved = try? workspace.entry(at: new) { opened?.entry = moved }
+    }
+
+    /// Кнопка на карточке и пункт меню: «Продолжить» — тем же движком, что считал
+    /// до обрыва (`RecordStatus.engine`), как и на экране записи.
+    private func start(_ entry: WorkspaceEntry, _ action: RecordStatus.Action) {
+        let engine = RecordStatus.engine(for: action, interrupted: transcription.interruptedEngine(for: entry.relativePath))
+        transcription.enqueue(entry, in: workspace, using: engine)
     }
 
     /// Удаление из списка — после подтверждения в списке.

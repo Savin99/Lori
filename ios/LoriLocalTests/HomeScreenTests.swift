@@ -334,7 +334,8 @@ final class ComposerClipboardTests: XCTestCase {
     }
 }
 
-/// Переименование — только у записи, с которой ничего не происходит.
+/// Переименование — только у записи, с которой ничего не происходит, а
+/// «Продолжить» — тем же движком, что считал до обрыва.
 final class RecordActionPolicyTests: XCTestCase {
     func testOnlyIdleOrFailedRecordsCanBeRenamed() {
         XCTAssertTrue(TranscriptionRecordState.idle.allowsRename)
@@ -351,5 +352,13 @@ final class RecordActionPolicyTests: XCTestCase {
     func testBusyRefusalSaysWhatToDo() {
         XCTAssertEqual(RenameFailure.message(for: RenameRefusal.busy), "Сначала дождись окончания расшифровки или останови её.")
         XCTAssertEqual(RenameFailure.message(for: WorkspaceError.nameTaken), "Запись с таким названием уже есть. Выбери другое.")
+    }
+
+    /// Старая прерванная запись без снимка задания не уходит в движок, выбранный сейчас.
+    func testResumeKeepsTheInterruptedEngine() {
+        XCTAssertEqual(RecordStatus.engine(for: .resume, interrupted: .openAI), .openAI)
+        XCTAssertNil(RecordStatus.engine(for: .resume, interrupted: nil), "движок неизвестен — решает снимок задания")
+        XCTAssertNil(RecordStatus.engine(for: .retry, interrupted: .openAI), "«Повторить» — выбранным сейчас")
+        XCTAssertNil(RecordStatus.engine(for: .transcribe, interrupted: nil))
     }
 }
