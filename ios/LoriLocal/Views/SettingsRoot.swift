@@ -29,13 +29,6 @@ struct SettingsRoot: View {
 
     @EnvironmentObject private var summaryModels: SummaryModelStore
 
-    /// Что показать в строке «Заголовки»: скачана модель или нет.
-    private var summaryValue: String {
-        let ready = SummaryVariant.allCases.filter(summaryModels.isInstalled)
-        guard let best = ready.first else { return "выключены" }
-        return best.title.lowercased()
-    }
-
     var body: some View {
         NavigationStack {
             List {
@@ -54,10 +47,13 @@ struct SettingsRoot: View {
                     }
                     .accessibilityIdentifier("settingsTranscription")
 
+                    // Без модели заголовки всё равно есть — из первой фразы, и
+                    // «выключены» тут было неправдой. Строка та же, что у подсказки
+                    // на главном экране, и во время скачивания показывает проценты.
                     NavigationLink {
                         SummaryScreen(models: summaryModels)
                     } label: {
-                        row("Заголовки", symbol: "text.quote", value: summaryValue)
+                        row("Заголовки", symbol: "text.quote", value: summaryModels.statusLine)
                     }
                     .accessibilityIdentifier("settingsSummary")
 

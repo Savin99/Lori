@@ -1,15 +1,23 @@
 import SwiftUI
 
-/// Находка поиска: файл рабочей папки и строка, в которой совпало.
+/// Находка поиска: запись и строка её расшифровки, в которой совпало.
+///
+/// Одна находка на запись. Раньше расшифровка и аудио индексировались отдельно,
+/// и запись, у которой совпали и имя, и текст, выходила в результатах дважды.
 struct SearchHit: Identifiable, Hashable, Sendable {
+    /// Сама запись — её и открывает тап, а не файл расшифровки.
     let entry: WorkspaceEntry
-    /// Строка из текста заметки; nil — значит совпало только имя.
+    /// Тот же заголовок, что на карточке (`RecordTitle`), а не имя файла.
+    let title: String
+    /// Строка расшифровки с совпадением, без разметки; nil — совпал только заголовок.
     let snippet: String?
+    /// Что искали — чтобы выделить совпадение в строке.
+    let needle: String
 
     var id: String { entry.relativePath }
 }
 
-/// Поиск по расшифровкам: текст внутри `Transcripts` плюс названия самих записей.
+/// Поиск по записям: по заголовкам, которые видны на карточках, и по тексту расшифровок.
 ///
 /// Содержимое читается один раз, на открытие поиска: перечитывать все файлы
 /// на каждое нажатие клавиши слишком дорого, а рабочая папка личная и небольшая.
@@ -19,15 +27,19 @@ final class TranscriptSearchStore: ObservableObject {
     @Published private(set) var isIndexing = false
     @Published private(set) var indexedCount = 0
 
-    private struct Document: Sendable {
+    /// Запись в индексе: заголовок, имя файла и реплики расшифровки уже без
+    /// таймкодов, меток говорящих и служебных строк.
+    struct Document: Sendable, Equatable {
         let entry: WorkspaceEntry
+        let title: String
         let name: String
-        let text: String
+        let lines: [String]
     }
 
     private struct Candidate: Sendable {
         let entry: WorkspaceEntry
-        let url: URL
+        let title: String
+        let transcript: URL?
     }
 
     private var documents: [Document] = []
@@ -35,34 +47,35 @@ final class TranscriptSearchStore: ObservableObject {
     private var indexTask: Task<Void, Never>?
     private var searchTask: Task<Void, Never>?
 
-    /// Индексируются расшифровки (по тексту) и записи (по названию): запись без
-    /// расшифровки тоже должна находиться, иначе её не отыскать вообще никак.
-    func reindex(_ workspace: WorkspaceStore) {
+    /// Индексируются все записи: запись без расшифровки тоже должна находиться по
+    /// заголовку, иначе её не отыскать вообще никак. Заголовки считает экран — они
+    /// живут в хранилищах главного актора, а файлы читаются уже фоном.
+    func reindex(_ workspace: WorkspaceStore, title: (WorkspaceEntry) -> String) {
         indexTask?.cancel()
         searchTask?.cancel()
         isIndexing = true
         hits = []
-        let candidates = ((try? workspace.entries(at: "Transcripts")) ?? [])
-            .filter { !$0.isDirectory }
-            .compactMap { entry -> Candidate? in
-                guard let url = try? workspace.readableTextURL(at: entry.relativePath) else { return nil }
-                return Candidate(entry: entry, url: url)
-            }
-        let audio = workspace.audio
+        let candidates = workspace.audio.map { entry in
+            Candidate(
+                entry: entry,
+                title: title(entry),
+                transcript: workspace.existingTranscript(for: entry).flatMap { try? workspace.readableTextURL(at: $0) }
+            )
+        }
 
         indexTask = Task { [weak self] in
             let found = await Task.detached(priority: .userInitiated) {
-                var result = candidates.map { candidate in
-                    Document(
+                candidates.map { candidate in
+                    let markdown = candidate.transcript.flatMap { try? WorkspaceStore.readTextFile(at: $0) } ?? ""
+                    return Document(
                         entry: candidate.entry,
-                        name: candidate.entry.name.lowercased(),
-                        text: (try? WorkspaceStore.readTextFile(at: candidate.url)) ?? ""
+                        title: candidate.title,
+                        name: candidate.entry.displayName,
+                        // Тот же разбор, что у экрана записи: в сниппет не попадут ни
+                        // `**[0:34–1:12]**`, ни «S1:», ни строки `_Расшифровано:_`.
+                        lines: TranscriptDocument.parse(markdown).lines.map(\.text)
                     )
                 }
-                result += audio.map {
-                    Document(entry: $0, name: $0.name.lowercased(), text: "")
-                }
-                return result
             }.value
             guard !Task.isCancelled, let self else { return }
             self.documents = found
@@ -75,7 +88,7 @@ final class TranscriptSearchStore: ObservableObject {
 
     func apply(_ query: String) {
         self.query = query
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else {
             searchTask?.cancel()
             hits = []
@@ -93,7 +106,7 @@ final class TranscriptSearchStore: ObservableObject {
     private func scheduleSearch(delay: Bool) {
         searchTask?.cancel()
         let documents = documents
-        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !needle.isEmpty else {
             hits = []
             return
@@ -104,97 +117,110 @@ final class TranscriptSearchStore: ObservableObject {
                 guard !Task.isCancelled else { return }
             }
             let found = await Task.detached(priority: .userInitiated) {
-                documents
-                    .compactMap { document -> SearchHit? in
-                        if document.name.contains(needle) {
-                            return SearchHit(
-                                entry: document.entry,
-                                snippet: Self.matchingLine(in: document.text, needle: needle)
-                            )
-                        }
-                        guard let line = Self.matchingLine(in: document.text, needle: needle) else { return nil }
-                        return SearchHit(entry: document.entry, snippet: line)
-                    }
-                    .sorted { lhs, rhs in
-                        if lhs.entry.isDirectory != rhs.entry.isDirectory { return lhs.entry.isDirectory }
-                        return lhs.entry.modifiedAt > rhs.entry.modifiedAt
-                    }
+                Self.hits(in: documents, needle: needle)
             }.value
-            guard !Task.isCancelled, let self, self.query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == needle else { return }
+            guard !Task.isCancelled, let self,
+                  self.query.trimmingCharacters(in: .whitespacesAndNewlines) == needle else { return }
             self.hits = found
             self.searchTask = nil
         }
     }
 
-    /// Первая строка с совпадением, обрезанная до читаемой длины.
-    nonisolated private static func matchingLine(in text: String, needle: String) -> String? {
-        guard !text.isEmpty else { return nil }
-        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
-            guard line.lowercased().contains(needle) else { continue }
-            let trimmed = line.trimmingCharacters(in: .whitespaces)
-            guard !trimmed.isEmpty else { continue }
-            return trimmed.count > 110 ? "\(trimmed.prefix(110))…" : trimmed
+    // MARK: - Совпадения
+
+    /// Регистр и «ё/е» не важны: в расшифровке «всё» и «все» пишутся как придётся.
+    nonisolated static let matching: String.CompareOptions = [.caseInsensitive, .diacriticInsensitive]
+
+    /// Находки по индексу: сначала совпавшие заголовком, потом текстом, внутри — новые
+    /// сверху. Заголовок — то, что человек помнит о записи, и такое совпадение
+    /// почти всегда то, что он искал.
+    nonisolated static func hits(in documents: [Document], needle: String) -> [SearchHit] {
+        let needle = needle.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !needle.isEmpty else { return [] }
+        var byTitle: [SearchHit] = []
+        var byText: [SearchHit] = []
+        for document in documents {
+            let line = document.lines.lazy.compactMap { line in
+                line.range(of: needle, options: matching, locale: LoriFormat.locale).map { (line, $0) }
+            }.first
+            let snippet = line.map { excerpt(of: $0.0, around: $0.1) }
+            let titleMatches = document.title.range(of: needle, options: matching, locale: LoriFormat.locale) != nil
+                || document.name.range(of: needle, options: matching, locale: LoriFormat.locale) != nil
+            let hit = SearchHit(entry: document.entry, title: document.title, snippet: snippet, needle: needle)
+            if titleMatches {
+                byTitle.append(hit)
+            } else if snippet != nil {
+                byText.append(hit)
+            }
         }
-        return nil
+        let newestFirst: (SearchHit, SearchHit) -> Bool = { $0.entry.modifiedAt > $1.entry.modifiedAt }
+        return byTitle.sorted(by: newestFirst) + byText.sorted(by: newestFirst)
+    }
+
+    /// Кусок реплики вокруг совпадения. Реплика бывает абзацем в несколько сотен
+    /// знаков, и совпадение в её конце в две строки сниппета не попало бы: показываем
+    /// немного до и побольше после, с многоточиями там, где текст обрезан.
+    nonisolated static func excerpt(of line: String, around match: Range<String.Index>, limit: Int = 120) -> String {
+        let clean = line.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard line.count > limit else { return clean }
+        let before = 40
+        var start = line.index(match.lowerBound, offsetBy: -before, limitedBy: line.startIndex) ?? line.startIndex
+        // Начинаем со слова, а не с его середины.
+        if start > line.startIndex, let space = line[start..<match.lowerBound].firstIndex(where: \.isWhitespace) {
+            start = line.index(after: space)
+        }
+        // Совпадение целиком внутри куска, даже если оно само длиннее предела.
+        var end = max(line.index(start, offsetBy: limit, limitedBy: line.endIndex) ?? line.endIndex, match.upperBound)
+        if end < line.endIndex, let space = line[match.upperBound..<end].lastIndex(where: \.isWhitespace) {
+            end = space
+        }
+        let body = line[start..<end].trimmingCharacters(in: .whitespacesAndNewlines)
+        return (start > line.startIndex ? "…" : "") + body + (end < line.endIndex ? "…" : "")
     }
 }
 
-/// Строка поиска. Отдельная от `NoteCard`: здесь важно не время правки,
-/// а что совпало и где это лежит.
+/// Строка поиска: заголовок записи, строка с совпадением и когда записано.
+/// Дата здесь к месту — в отличие от списка, заголовков дней в поиске нет.
 struct SearchResultRow: View {
     let hit: SearchHit
 
-    private var location: String? {
-        let parent = URL(fileURLWithPath: hit.entry.relativePath).deletingLastPathComponent().path
-        let trimmed = parent.trimmingCharacters(in: CharacterSet(charactersIn: "/."))
-        return trimmed.isEmpty ? nil : trimmed
-    }
-
-    private var symbol: String {
-        if hit.entry.isDirectory { return "folder.fill" }
-        return hit.entry.isAudio ? "waveform" : "doc.text"
-    }
-
     var body: some View {
-        HStack(spacing: 13) {
-            Image(systemName: symbol)
-                .font(LoriFont.control)
-                .foregroundStyle(LoriPalette.lime)
-                .frame(width: 38, height: 38)
-                .background(LoriPalette.limeSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 11))
-
-            VStack(alignment: .leading, spacing: 3) {
-                Text(hit.entry.displayName)
-                    .font(LoriFont.cardTitle)
-                    .foregroundStyle(LoriPalette.ink)
-                    .lineLimit(1)
-                if let snippet = hit.snippet {
-                    Text(snippet)
-                        .font(LoriFont.meta)
-                        .foregroundStyle(LoriPalette.muted)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                } else if !hit.entry.isDirectory {
-                    Text(LoriFormat.stamp(hit.entry.modifiedAt))
-                        .font(LoriFont.meta)
-                        .foregroundStyle(LoriPalette.muted)
-                }
-                if let location {
-                    Label(location, systemImage: "folder")
-                        .font(LoriFont.small)
-                        .foregroundStyle(LoriPalette.muted.opacity(0.8))
-                        .lineLimit(1)
-                }
+        VStack(alignment: .leading, spacing: 4) {
+            Text(highlighted(hit.title, base: LoriFont.cardTitle, strong: LoriFont.cardTitle))
+                .foregroundStyle(LoriPalette.ink)
+                .lineLimit(2)
+                .multilineTextAlignment(.leading)
+            if let snippet = hit.snippet {
+                Text(highlighted(snippet, base: LoriFont.meta, strong: LoriFont.meta.weight(.semibold)))
+                    .foregroundStyle(LoriPalette.muted)
+                    .lineLimit(2)
+                    .multilineTextAlignment(.leading)
             }
-
-            Spacer(minLength: 0)
+            Text(LoriFormat.stamp(hit.entry.modifiedAt))
+                .font(LoriFont.small)
+                .foregroundStyle(LoriPalette.muted)
         }
-        .padding(.horizontal, 15)
+        .padding(.horizontal, 16)
         .padding(.vertical, 12)
-        .frame(minHeight: 66)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(LoriPalette.line, lineWidth: 1))
+        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(LoriPalette.line, lineWidth: 1))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(.isButton)
+        .accessibilityIdentifier("searchHit")
+    }
+
+    /// Совпадение выделено плотнее и цветом текста — глаз находит, за что зацепилось.
+    private func highlighted(_ text: String, base: Font, strong: Font) -> AttributedString {
+        var result = AttributedString(text)
+        result.font = base
+        guard let range = text.range(of: hit.needle, options: TranscriptSearchStore.matching, locale: LoriFormat.locale),
+              let lower = AttributedString.Index(range.lowerBound, within: result),
+              let upper = AttributedString.Index(range.upperBound, within: result) else { return result }
+        result[lower..<upper].font = strong
+        result[lower..<upper].foregroundColor = LoriPalette.ink
+        return result
     }
 }
 
@@ -210,7 +236,7 @@ struct TranscriptSearchBar: View {
                 Image(systemName: "magnifyingglass")
                     .font(LoriFont.control)
                     .foregroundStyle(LoriPalette.muted)
-                TextField("Поиск по расшифровкам", text: $query)
+                TextField("Поиск по записям", text: $query)
                     .font(LoriFont.body)
                     .foregroundStyle(LoriPalette.ink)
                     .textInputAutocapitalization(.never)
@@ -225,12 +251,15 @@ struct TranscriptSearchBar: View {
                         Image(systemName: "xmark.circle.fill")
                             .font(LoriFont.body)
                             .foregroundStyle(LoriPalette.muted.opacity(0.7))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Очистить поиск")
                 }
             }
-            .padding(.horizontal, 16)
+            .padding(.leading, 16)
+            .padding(.trailing, query.isEmpty ? 16 : 2)
             .frame(height: 48)
             .background(LoriPalette.card, in: Capsule())
             .overlay(Capsule().stroke(LoriPalette.line, lineWidth: 1))
@@ -238,6 +267,7 @@ struct TranscriptSearchBar: View {
             Button("Отмена", action: cancel)
                 .font(LoriFont.body)
                 .foregroundStyle(LoriPalette.ink)
+                .frame(minHeight: 44)
         }
     }
 }

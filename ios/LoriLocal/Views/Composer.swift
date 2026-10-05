@@ -34,9 +34,12 @@ enum ComposerState: Equatable {
 final class ComposerModel: ObservableObject {
     @Published var attached: [AttachedFile] = []
     @Published var clipboard: ClipboardAudio.Content = .none
+    /// Сколько в буфере аудио — по типам, без чтения: «В буфере 5 аудио».
+    @Published var clipboardInventory = ClipboardAudio.Inventory()
     /// Подсказку убрали крестиком — до следующей смены содержимого буфера.
     @Published var clipboardDismissed = false
     private var lastSeenClipboard: ClipboardAudio.Content = .none
+    private var lastSeenInventory = ClipboardAudio.Inventory()
 
     func state(recording: Bool) -> ComposerState {
         if recording { return .recording }
@@ -53,16 +56,29 @@ final class ComposerModel: ObservableObject {
         clipboard == .audio && !clipboardDismissed && attached.isEmpty
     }
 
+    /// Текст подсказки: «В буфере 5 аудио», а без счёта — «В буфере есть аудио».
+    var clipboardHint: String {
+        clipboardInventory.hint ?? "В буфере есть аудио"
+    }
+
+    /// Пункт меню `+`: «Вставить 5 аудио» — сразу видно, что уйдут все, а не первое.
+    var pasteTitle: String {
+        clipboardInventory.audio > 1 ? "Вставить \(clipboardInventory.audio) аудио" : "Вставить аудио"
+    }
+
     /// Типы буфера читаются без содержимого, поэтому вызывать можно свободно.
     func refreshClipboard() {
         let found = ClipboardAudio.content()
+        let inventory = ClipboardAudio.inventory()
         // Скопировали что-то новое — подсказка возвращается: отказ от прошлой
         // не должен молча распространяться на следующую запись.
-        if found != lastSeenClipboard {
+        if found != lastSeenClipboard || inventory != lastSeenInventory {
             lastSeenClipboard = found
+            lastSeenInventory = inventory
             clipboardDismissed = false
         }
         clipboard = found
+        clipboardInventory = inventory
     }
 
     func attach(_ urls: [URL]) {
@@ -102,6 +118,9 @@ final class ComposerModel: ObservableObject {
 
 /// Всё, что панель делает наружу. Отдельной структурой, иначе у `ComposerBar`
 /// набирается полтора десятка замыканий в списке параметров.
+///
+/// «Настройки» из меню `+` убраны: шестерёнка в шапке открывает то же самое, а
+/// второй вход в одно место — лишний пункт там, где выбирают, что добавить.
 struct ComposerActions {
     var record: () -> Void
     var stop: () -> Void
@@ -109,19 +128,21 @@ struct ComposerActions {
     var cancelRecording: () -> Void
     var pickFile: () -> Void
     var paste: () -> Void
-    var openSettings: () -> Void
     var chooseEngine: () -> Void
     var setMode: (TranscriptionMode) -> Void
     var transcribe: () -> Void
 }
 
-/// Нижняя панель: записать голос или расшифровать принесённый файл.
+/// Нижняя панель: записать голос или расшифровать принесённые файлы.
 ///
 /// В покое это одна строка: `+`, чип движка, чип режима и круглая кнопка
-/// записи. Прикреплённый файл добавляет сверху карточку с оценкой времени, а
-/// запись схлопывает панель в строку с таймером и волной. Капсула закреплена
-/// у нижнего края и не переезжает: между состояниями меняется начинка, а не
-/// сама панель, поэтому переход читается как перетекание, а не как подмена вью.
+/// записи. Прикреплённые файлы добавляют сверху их список с оценкой времени, а
+/// круглая кнопка вытягивается в капсулу «Расшифровать 5» во всю ширину под
+/// чипами: рядом с чипами ей не хватает места даже на большом телефоне, а
+/// урезать название движка в момент выбора нельзя — это и есть цена решения.
+/// Запись схлопывает панель в строку с таймером и волной. Капсула панели
+/// закреплена у нижнего края: между состояниями меняется начинка, а не сама
+/// панель, поэтому переход читается как перетекание, а не как подмена вью.
 struct ComposerBar: View {
     @ObservedObject var model: ComposerModel
     @ObservedObject var recorder: AudioCaptureStore
@@ -130,8 +151,19 @@ struct ComposerBar: View {
 
     let engine: EngineDescriptor
     let mode: TranscriptionMode?
+    /// Строка над панелью: «Добавляю 5 записей…». Состояние очереди живёт в блоке
+    /// над списком, здесь — только то, что относится к нажатию в самой панели.
     let status: String?
+    /// Идёт приём прикреплённого: кнопки панели ждут, пока он кончится.
+    let busy: Bool
     let actions: ComposerActions
+
+    @Namespace private var morph
+    @State private var expanded = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+
+    /// Сколько файлов видно без раскрытия списка.
+    private static let collapsedCount = 4
 
     private var state: ComposerState { model.state(recording: recorder.isCapturing) }
 
@@ -146,6 +178,7 @@ struct ComposerBar: View {
                     Spacer(minLength: 0)
                 }
                 .accessibilityElement(children: .combine)
+                .accessibilityIdentifier("composerStatus")
             }
 
             if model.showsClipboardHint, state != .recording {
@@ -154,9 +187,12 @@ struct ComposerBar: View {
 
             VStack(alignment: .leading, spacing: 8) {
                 if state == .attached {
-                    attachedCard
+                    attachedSection
                 }
                 controlRow
+                if state == .attached {
+                    primaryButton
+                }
             }
             .padding(.horizontal, 7)
             .padding(.vertical, 7)
@@ -171,62 +207,134 @@ struct ComposerBar: View {
         .padding(.horizontal, 20)
         .padding(.top, 8)
         .padding(.bottom, 10)
-        .background(LoriPalette.canvas.opacity(0.94))
-        .animation(.easeOut(duration: 0.2), value: state)
+        // Подложка сплошная и уходит под полоску «домой». Полупрозрачная пропускала
+        // текст карточек сквозь панель: в тёмной теме заливка карточки — шесть
+        // процентов белого, и строки списка читались прямо поверх чипов.
+        .background(LoriPalette.canvas.ignoresSafeArea(edges: .bottom))
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: state)
+        .onChange(of: model.attached.count) { _, count in
+            if count <= Self.collapsedCount { expanded = false }
+        }
     }
 
-    // MARK: - Прикреплённый файл
+    // MARK: - Прикреплённые файлы
 
-    private var attachedCard: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: model.attached.count > 1 ? "square.on.square" : "waveform.circle")
-                .font(LoriFont.control)
-                .foregroundStyle(LoriPalette.lime)
-                .frame(width: 26, height: 26)
+    private var attachedSection: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            fileList
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(attachedTitle)
-                    .font(LoriFont.cardTitle)
-                    .foregroundStyle(LoriPalette.ink)
-                    .lineLimit(1)
-                Text(attachedDetail)
+                if model.attached.count > 1 {
+                    HStack(spacing: 8) {
+                        Text(summaryLine)
+                            .font(LoriFont.meta.weight(.medium).monospacedDigit())
+                            .foregroundStyle(LoriPalette.ink)
+                        Spacer(minLength: 4)
+                        Button("Убрать все") { model.clear() }
+                            .font(LoriFont.small)
+                            .foregroundStyle(LoriPalette.muted)
+                            .frame(minHeight: 32)
+                            .disabled(busy)
+                            .accessibilityIdentifier("detachAllButton")
+                    }
+                }
+                Text(estimateLine)
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.muted)
-                    .lineLimit(1)
+                    .accessibilityIdentifier("attachedEstimate")
             }
-
-            Spacer(minLength: 4)
-
-            Button {
-                model.clear()
-            } label: {
-                Image(systemName: "xmark")
-                    .font(LoriFont.small.weight(.semibold))
-                    .foregroundStyle(LoriPalette.muted)
-                    .frame(width: 44, height: 44)
-                    .contentShape(Circle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Убрать файл")
-            .accessibilityIdentifier("detachButton")
+            .padding(.leading, 8)
+            .padding(.top, 2)
         }
-        .padding(.leading, 8)
+        .accessibilityElement(children: .contain)
         .accessibilityIdentifier("attachedFile")
     }
 
-    private var attachedTitle: String {
-        guard let first = model.attached.first else { return "" }
-        guard model.attached.count > 1 else { return first.name }
-        return LoriFormat.plural(model.attached.count, one: "файл", few: "файла", many: "файлов")
+    @ViewBuilder
+    private var fileList: some View {
+        let files = model.attached
+        let hidden = max(0, files.count - Self.collapsedCount)
+        if expanded, hidden > 0 {
+            // Раскрытый список прокручивается в своих пределах: двадцать файлов не
+            // должны вытолкнуть панель за верх экрана.
+            ScrollView {
+                VStack(spacing: 0) {
+                    ForEach(files) { fileRow($0) }
+                }
+            }
+            .frame(maxHeight: 44 * 5.5)
+            .scrollIndicatorsFlash(onAppear: true)
+            moreButton(title: "Свернуть список", symbol: "chevron.up") { expanded = false }
+        } else {
+            VStack(spacing: 0) {
+                ForEach(files.prefix(Self.collapsedCount)) { fileRow($0) }
+            }
+            if hidden > 0 {
+                moreButton(title: "Ещё \(hidden)", symbol: "chevron.down") { expanded = true }
+            }
+        }
+    }
+
+    private func fileRow(_ file: AttachedFile) -> some View {
+        HStack(spacing: 8) {
+            Text((file.name as NSString).deletingPathExtension)
+                .font(LoriFont.meta)
+                .foregroundStyle(LoriPalette.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+            Spacer(minLength: 4)
+            if let duration = file.duration {
+                Text(HomeFormat.clock(duration))
+                    .font(LoriFont.small.monospacedDigit())
+                    .foregroundStyle(LoriPalette.muted)
+                    .fixedSize()
+            }
+            Button {
+                model.detach(file)
+            } label: {
+                Image(systemName: "xmark")
+                    .font(LoriFont.tiny.weight(.semibold))
+                    .foregroundStyle(LoriPalette.muted)
+                    .frame(width: 44, height: 44)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(busy)
+            .accessibilityLabel("Убрать «\(file.name)»")
+            .accessibilityIdentifier("detachButton")
+        }
+        .padding(.leading, 8)
+        .frame(minHeight: 44)
+    }
+
+    private func moreButton(title: String, symbol: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            HStack(spacing: 4) {
+                Text(title)
+                Image(systemName: symbol)
+                    .font(LoriFont.tiny.weight(.semibold))
+            }
+            .font(LoriFont.small.weight(.medium))
+            .foregroundStyle(LoriPalette.lime)
+            .frame(minHeight: 36)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .padding(.leading, 8)
+        .accessibilityIdentifier("attachedMore")
+    }
+
+    /// «5 файлов · 1:41:12». Пока длительности читаются — без времени.
+    private var summaryLine: String {
+        let count = HomeFormat.files(model.attached.count)
+        let seconds = model.attachedDuration
+        return seconds > 0 ? "\(count) · \(HomeFormat.clock(seconds))" : count
     }
 
     /// Пересчитывается при смене чипа движка: «в облако · примерно 3 минуты»
     /// против «на телефоне · примерно 12 минут» — это и есть цена выбора.
-    private var attachedDetail: String {
-        let seconds = model.attachedDuration
-        let place = speed.summary(audio: seconds, engine: engine, mode: mode)
-        guard seconds > 0 else { return place }
-        return "\(LoriFormat.duration(seconds)) · \(place)"
+    private var estimateLine: String {
+        speed.summary(audio: model.attachedDuration, engine: engine, mode: mode)
     }
 
     private var clipboardRow: some View {
@@ -234,13 +342,15 @@ struct ComposerBar: View {
             Image(systemName: "doc.on.clipboard")
                 .font(LoriFont.small)
                 .foregroundStyle(LoriPalette.muted)
-            Text("В буфере есть аудио")
+                .accessibilityHidden(true)
+            Text(model.clipboardHint)
                 .font(LoriFont.small)
                 .foregroundStyle(LoriPalette.muted)
             Spacer(minLength: 4)
             Button("Вставить", action: actions.paste)
                 .font(LoriFont.small.weight(.semibold))
                 .foregroundStyle(LoriPalette.lime)
+                .frame(minHeight: 44)
                 .accessibilityIdentifier("pasteAudioButton")
             Button {
                 model.clipboardDismissed = true
@@ -248,19 +358,20 @@ struct ComposerBar: View {
                 Image(systemName: "xmark")
                     .font(LoriFont.tiny.weight(.semibold))
                     .foregroundStyle(LoriPalette.muted)
-                    .frame(width: 32, height: 32)
+                    .frame(width: 44, height: 44)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Скрыть подсказку про буфер")
         }
+        .padding(.leading, 4)
         .accessibilityIdentifier("clipboardHint")
     }
 
     // MARK: - Строка управления
 
     /// Строка, которая есть всегда: в покое она и есть вся панель, при
-    /// прикреплённом файле стоит под его карточкой, во время записи
+    /// прикреплённых файлах стоит под их списком, во время записи
     /// превращается в таймер с волной.
     @ViewBuilder
     private var controlRow: some View {
@@ -287,7 +398,9 @@ struct ComposerBar: View {
                 }
 
                 Spacer(minLength: 0)
-                roundButton
+                if state == .idle {
+                    roundButton
+                }
             }
         }
     }
@@ -303,17 +416,9 @@ struct ComposerBar: View {
             Button {
                 actions.paste()
             } label: {
-                Label("Вставить аудио", systemImage: "doc.on.clipboard")
+                Label(model.pasteTitle, systemImage: "doc.on.clipboard")
             }
             .disabled(model.clipboard == .none)
-
-            Divider()
-
-            Button {
-                actions.openSettings()
-            } label: {
-                Label("Настройки", systemImage: "gearshape")
-            }
         } label: {
             Image(systemName: "plus")
                 .font(LoriFont.control)
@@ -323,62 +428,74 @@ struct ComposerBar: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
-        .accessibilityLabel("Добавить запись")
+        .disabled(busy)
+        .accessibilityLabel(state == .attached ? "Добавить ещё" : "Добавить запись")
         .accessibilityIdentifier("importButton")
     }
 
-    // MARK: - Круглая кнопка справа
+    // MARK: - Главная кнопка
 
-    /// Одна кнопка на все состояния: микрофон, стрелка, стоп. Именно поэтому
-    /// смена состояния выглядит как превращение, а не как исчезновение одной
-    /// кнопки и появление другой на её месте.
+    /// Одна кнопка на все состояния: микрофон, стоп — и вытянутая капсула
+    /// «Расшифровать». Круг и капсула делят одно место в анимации
+    /// (`matchedGeometryEffect`), поэтому смена состояния выглядит как
+    /// превращение, а не как исчезновение одной кнопки и появление другой.
     private var roundButton: some View {
         Button(action: roundAction) {
-            Image(systemName: roundSymbol)
+            Image(systemName: state == .recording ? "stop.fill" : "mic.fill")
                 .font(LoriFont.control)
                 .foregroundStyle(LoriPalette.onInk)
                 .frame(width: 36, height: 36)
-                .background(roundFill, in: Circle())
+                .background(roundFill, in: Capsule())
+                .matchedGeometryEffect(id: "primary", in: morph, isSource: true)
                 .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .buttonStyle(.plain)
         .fixedSize()
         .contentTransition(.symbolEffect(.replace))
-        .accessibilityLabel(roundLabel)
-        .accessibilityIdentifier(roundIdentifier)
+        .accessibilityLabel(state == .recording ? "Остановить запись" : "Записать")
+        .accessibilityIdentifier(state == .recording ? "stopButton" : "recordButton")
     }
 
-    // Перечисления без `default`: новое состояние панели должно остановить
-    // сборку здесь, а не молча достаться микрофону.
-    private var roundSymbol: String {
-        switch state {
-        case .recording: "stop.fill"
-        case .attached: "arrow.up"
-        case .idle: "mic.fill"
+    /// «Расшифровать» или «Расшифровать 5» — во всю ширину под чипами.
+    private var primaryButton: some View {
+        Button(action: actions.transcribe) {
+            HStack(spacing: 8) {
+                if busy {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(LoriPalette.onInk)
+                }
+                Text(primaryTitle)
+                    .font(LoriFont.control)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
+            }
+            .foregroundStyle(LoriPalette.onInk)
+            .frame(maxWidth: .infinity)
+            .frame(minHeight: 48)
+            .background(LoriPalette.ink.opacity(busy ? 0.55 : 0.9), in: Capsule())
+            .matchedGeometryEffect(id: "primary", in: morph, isSource: true)
+            .contentShape(Capsule())
         }
+        .buttonStyle(.plain)
+        .disabled(busy)
+        .accessibilityLabel(model.attached.count > 1
+            ? "Расшифровать \(HomeFormat.files(model.attached.count))"
+            : "Расшифровать")
+        .accessibilityIdentifier("transcribeButton")
+    }
+
+    private var primaryTitle: String {
+        model.attached.count > 1 ? "Расшифровать \(model.attached.count)" : "Расшифровать"
     }
 
     private var roundFill: Color {
         state == .recording ? LoriPalette.danger : LoriPalette.ink.opacity(0.9)
     }
 
-    private var roundLabel: String {
-        switch state {
-        case .recording: "Остановить запись"
-        case .attached: "Расшифровать"
-        case .idle: "Записать"
-        }
-    }
-
-    private var roundIdentifier: String {
-        switch state {
-        case .recording: "stopButton"
-        case .attached: "transcribeButton"
-        case .idle: "recordButton"
-        }
-    }
-
+    // Перечисление без `default`: новое состояние панели должно остановить
+    // сборку здесь, а не молча достаться микрофону.
     private func roundAction() {
         switch state {
         case .recording: actions.stop()
