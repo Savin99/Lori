@@ -379,6 +379,57 @@ private final class RecognitionCollector: NSObject, SFSpeechRecognitionTaskDeleg
     }
 }
 
+/// Что с записью прямо сейчас — одним значением.
+///
+/// Раньше карточка собирала это из пяти коллекций сервиса (`running`, `queued`,
+/// `interrupted`, `failed`, `waitingForMemory`), и между «вышла из очереди» и «вошла в
+/// работу» у записи не было ни одной отметки: на секунды она числилась нигде, и
+/// карточка мигала «Без расшифровки». Здесь у этого промежутка есть имя — `starting`.
+enum TranscriptionRecordState: Equatable, Sendable {
+    /// Ни в очереди, ни в работе, ни с пометкой.
+    case idle
+    /// Ждёт своей очереди. `position` считается с единицы: 1 — пойдёт следующей.
+    case queued(position: Int, waitsForMemory: Bool)
+    /// Взята из очереди, но в работу ещё не вошла: сервис освобождает память от модели
+    /// заголовков и проверяет, на месте ли движок.
+    case starting
+    case running
+    /// Работу оборвала система; запись встанет в очередь заново при возвращении.
+    case interrupted
+    /// Последняя попытка кончилась ошибкой; текст — для человека.
+    case failed(String)
+
+    /// Запись занята: ждёт, запускается или считается. На такой карточке нельзя
+    /// показывать «Без расшифровки» и предлагать «Расшифровать».
+    var isActive: Bool {
+        switch self {
+        case .queued, .starting, .running: true
+        case .idle, .interrupted, .failed: false
+        }
+    }
+}
+
+/// Итог одной пачки: от первой поставленной записи до момента, когда очередь опустела.
+///
+/// Нужен двум читателям. Фоновой задаче — чтобы сказать системе «успешно или нет» по
+/// **этой** пачке: раньше она смотрела на общий словарь ошибок, который никто не
+/// чистил, и одна старая ошибка делала неудачной каждую следующую пачку. Экрану — чтобы
+/// сказать человеку итог: «4 из 5, одна не удалась».
+struct TranscriptionBatchOutcome: Equatable, Sendable {
+    /// Сколько записей вошло в пачку за всё время (с учётом поставленных по ходу).
+    var total = 0
+    var succeeded: [String] = []
+    /// Пути записей, на которых расшифровка кончилась ошибкой; текст — в `error(for:)`.
+    var failed: [String] = []
+    /// Записи, которые оборвала система (или связь); они встанут в очередь заново.
+    var interrupted: [String] = []
+    /// Записи, которые человек снял сам, — ни успех, ни ошибка.
+    var cancelled = 0
+
+    /// Без ошибок и без обрывов. Отмена человеком сюда не входит: это не сбой.
+    var isClean: Bool { failed.isEmpty && interrupted.isEmpty }
+}
+
 /// Состояние расшифровки для интерфейса: какие файлы в работе и чем расшифровываем.
 ///
 /// Движок берётся из настроек и **не подменяется молча**: если выбран GigaAM, а моделей
@@ -395,6 +446,11 @@ private final class RecognitionCollector: NSObject, SFSpeechRecognitionTaskDeleg
 @MainActor
 final class TranscriptionService: ObservableObject {
     @Published private(set) var running: Set<String> = []
+    /// Записи, которые уже вышли из очереди, но ещё не вошли в `running`: перед
+    /// расшифровкой сервис ждёт, пока освободят память от модели заголовков, и
+    /// проверяет движок. Окно короткое, но видимое — без этой отметки запись на это
+    /// время пропадала и из «В очереди», и из «Расшифровывается».
+    @Published private(set) var starting: Set<String> = []
     /// Что ждёт своей очереди — либо свободного места, либо памяти.
     @Published private(set) var queued: [String] = []
     /// Записи, которые ждут именно памяти. «В очереди» и «жду память» — разные вещи:
@@ -420,6 +476,20 @@ final class TranscriptionService: ObservableObject {
     /// Сервис только меряет — куда это складывать, решает экран (`TranscriptionSpeed`).
     @Published private(set) var lastMeasure: SpeedMeasure?
     @Published var lastError: String?
+
+    /// Сколько записей в нынешней пачке и сколько из них обработано — «2 из 5».
+    ///
+    /// Пачка начинается с первой поставленной записи и кончается, когда очередь
+    /// опустела: тогда оба числа обнуляются, а итог остаётся в `lastBatch`. Записи,
+    /// добавленные по ходу, входят в ту же пачку; снятые человеком и оборванные
+    /// системой из счёта выходят — их «из» уже не ждёт. Обработанная — это и
+    /// расшифрованная, и закончившаяся ошибкой: очередь прошла и мимо неё.
+    @Published private(set) var batchTotal = 0
+    @Published private(set) var batchDone = 0
+    /// Итог последней законченной пачки. Живёт до следующей законченной, а не до
+    /// начала новой: фоновая задача читает его уже после того, как очередь опустела,
+    /// и в этот промежуток успевает вклиниться следующая пачка.
+    @Published private(set) var lastBatch: TranscriptionBatchOutcome?
 
     private struct Job {
         let entry: WorkspaceEntry
@@ -472,7 +542,27 @@ final class TranscriptionService: ObservableObject {
     private var foreground = true
     private weak var recoveryWorkspace: WorkspaceStore?
     private var resumeOnReturn: Set<String> = []
-    private var drainWaiters: [CheckedContinuation<Void, Never>] = []
+    private var drainWaiters: [CheckedContinuation<TranscriptionBatchOutcome?, Never>] = []
+    /// Исходы нынешней пачки по мере накопления; `total` здесь — сколько вошло.
+    private var batch = TranscriptionBatchOutcome()
+    /// Записи пачки, у которых исхода ещё нет. Запись, снятая или оборванная до конца,
+    /// отсюда уходит сразу — иначе её закончившаяся позже работа посчиталась бы дважды.
+    private var batchLive: Set<String> = []
+    /// Записи, которые сняли, пока их работа шла: задача отменена, но движок ещё
+    /// сворачивается, и `active` держит место. Пока так, на эту же запись нельзя запустить
+    /// вторую работу и нельзя считать её «прерванной системой».
+    private var cancelling: Set<String> = []
+
+    /// Просьба поставить запись заново, пришедшая, пока прежняя работа над ней
+    /// сворачивается после отмены. Молча отказать значило бы потерять нажатие;
+    /// запустить вторую работу поверх первой — перепутать их итоги. Поднимается, когда
+    /// прежняя закончилась.
+    private struct Restart {
+        let entry: WorkspaceEntry
+        let workspace: WorkspaceStore
+        let kind: TranscriptionEngineKind?
+    }
+    private var restartAfterCancel: [String: Restart] = [:]
 
     /// Все пять движков создаются сразу: они ничего не занимают до первой расшифровки,
     /// а тестам удобно подменять набор целиком.
@@ -495,6 +585,9 @@ final class TranscriptionService: ObservableObject {
         configurations = InterruptedRecords.jobs(from: interruptedStore)
         inFlight = InterruptedRecords.load(from: interruptedStore)
         interrupted = Set(inFlight.keys)
+        // Ошибки прошлых попыток тоже: после перезапуска запись, на которой расшифровка
+        // не вышла, обязана выглядеть как «Ошибка», а не как нетронутая.
+        failed = InterruptedRecords.failures(from: interruptedStore)
     }
 
     func engine(for kind: TranscriptionEngineKind) -> any Transcribing {
@@ -509,6 +602,64 @@ final class TranscriptionService: ObservableObject {
     func isQueued(_ relativePath: String) -> Bool { queued.contains(relativePath) }
 
     func isInterrupted(_ relativePath: String) -> Bool { interrupted.contains(relativePath) }
+
+    /// Вышла из очереди, но в работу ещё не вошла — см. `starting`.
+    func isStarting(_ relativePath: String) -> Bool { starting.contains(relativePath) }
+
+    /// Запись занята: ждёт в очереди, запускается или считается. Это ровно то, что
+    /// карточке нужно знать, чтобы не показать «Без расшифровки» посреди работы.
+    func isActive(_ relativePath: String) -> Bool {
+        running.contains(relativePath) || starting.contains(relativePath) || isQueued(relativePath)
+    }
+
+    /// Место записи в очереди, считая с единицы: 1 — пойдёт следующей. nil — запись не
+    /// ждёт (идёт, запускается или вовсе не в очереди). Те, что ждут памяти, тоже
+    /// стоят на своём месте: ждать «памяти» им, а не очереди.
+    ///
+    /// Читается из самой очереди, а не из опубликованного `queued`: это один и тот же
+    /// порядок, но источник правды — она.
+    func queuePosition(for relativePath: String) -> Int? {
+        waiting.firstIndex { $0.entry.relativePath == relativePath }.map { $0 + 1 }
+    }
+
+    /// Состояние записи одним значением. Приоритет такой же, как был у карточки:
+    /// то, что происходит с записью **сейчас**, важнее того, что случилось раньше —
+    /// но «прервано» стоит выше «идёт»: оборванная запись ещё несколько мгновений
+    /// сворачивает работу, и карточка не должна всё это время врать «расшифровывается».
+    func state(for relativePath: String) -> TranscriptionRecordState {
+        if interrupted.contains(relativePath) { return .interrupted }
+        if running.contains(relativePath) { return .running }
+        if starting.contains(relativePath) { return .starting }
+        if let position = queuePosition(for: relativePath) {
+            return .queued(position: position, waitsForMemory: waitingForMemory.contains(relativePath))
+        }
+        if let message = failed[relativePath] { return .failed(message) }
+        return .idle
+    }
+
+    /// Какая запись считается сейчас: самая давно начатая из идущих и запускающихся.
+    /// При одной записи за раз (умолчание) она единственная; при нескольких одновременных
+    /// порядок задаёт время начала, а не алфавит — иначе в Dynamic Island название
+    /// прыгало бы между записями по первой букве пути.
+    var currentPath: String? {
+        running.union(starting).min { lhs, rhs in
+            let left = startedAt[lhs] ?? .distantFuture
+            let right = startedAt[rhs] ?? .distantFuture
+            return left == right ? lhs < rhs : left < right
+        }
+    }
+
+    /// Номер записи, которая сейчас в работе, внутри пачки — «2» из «2 из 5».
+    /// Ноль, когда пачки нет. Не выходит за итог: «6 из 5» человек читает как поломку.
+    var batchPosition: Int {
+        guard batchTotal > 0 else { return 0 }
+        return min(batchDone + 1, batchTotal)
+    }
+
+    /// «2 из 5»: один и тот же текст в приложении и в Dynamic Island.
+    nonisolated static func counter(done: Int, total: Int) -> String {
+        "\(min(max(done, 0) + 1, max(total, 1))) из \(max(total, 1))"
+    }
 
     /// Каким движком считали запись, когда её оборвали.
     ///
@@ -532,29 +683,68 @@ final class TranscriptionService: ObservableObject {
 
     /// Ставит запись в очередь. Возвращается сразу: интерфейсу нужно показать
     /// «в очереди», а не ждать конца расшифровки.
-    func enqueue(_ entry: WorkspaceEntry, in workspace: WorkspaceStore, using kind: TranscriptionEngineKind? = nil) {
+    ///
+    /// Возвращает `false` только тогда, когда запись **не** встала: очередь не
+    /// удалось сохранить (нет места, файл закрыт защитой данных). Запись, которая уже
+    /// идёт или ждёт, — это `true`: итог тот же, что и просили, она будет расшифрована.
+    /// При отказе всё возвращается как было — и ошибка прошлой попытки, и пометка
+    /// «Прервано»: человек видит запись такой, какой она и осталась.
+    @discardableResult
+    func enqueue(_ entry: WorkspaceEntry, in workspace: WorkspaceStore, using kind: TranscriptionEngineKind? = nil) -> Bool {
         recoveryWorkspace = workspace
         let path = entry.relativePath
-        guard active[path] == nil, !waiting.contains(where: { $0.entry.relativePath == path }) else { return }
-        failed[path] = nil
-        forget(interrupted: path)
-        let starting = !busy
-        busy = true
+        if active[path] != nil {
+            // Её только что отменили, и движок ещё сворачивается: запомнить просьбу, а не
+            // терять — `finish` поднимет запись, когда место освободится.
+            if cancelling.contains(path) {
+                restartAfterCancel[path] = Restart(entry: entry, workspace: workspace, kind: kind)
+            }
+            return true
+        }
+        guard !waiting.contains(where: { $0.entry.relativePath == path }) else { return true }
+
+        let opensBatch = !busy
         let previous = configurations[path]
         let configuration = (kind == nil || previous?.kind == kind ? previous : nil)
             ?? TranscriptionJob.capture(kind: kind ?? TranscriptionSettings.engine)
+
+        // Чтобы откатить при отказе: сохранение идёт раньше, чем запись встаёт в очередь,
+        // а лежащее в файле собирается из этих же словарей.
+        let priorFailure = failed[path]
+        let wasInterrupted = interrupted.contains(path)
+        let priorFlight = inFlight[path]
+        failed[path] = nil
+        forget(interrupted: path)
         configurations[path] = configuration
         inFlight[path] = configuration.kind
-        guard persistJobs() else { busy = !isIdle; return }
+        guard persistJobs() else {
+            failed[path] = priorFailure
+            if wasInterrupted { interrupted.insert(path) }
+            configurations[path] = previous
+            inFlight[path] = priorFlight
+            return false
+        }
+
+        busy = true
+        batchEnrol(path)
         waiting.append(Job(entry: entry, configuration: configuration, workspace: workspace))
         admit()
         // Просить фон только на переходе «ничего не шло → пошло»: задача одна на всю
         // пачку, а записи, добавленные по ходу, входят в неё же.
-        if starting { runway?.batchDidStart() }
+        if opensBatch { runway?.batchDidStart() }
+        return true
     }
 
     /// Отменяет расшифровку: и ту, что идёт, и ту, что ещё ждёт.
     func cancel(_ relativePath: String) {
+        removeFromQueue(relativePath, persist: true)
+        admit()
+    }
+
+    /// Снимает запись со всего, что её держало: очереди, запуска, «Прервано», сохранённого
+    /// задания и счёта пачки. Планировщик не трогает — это забота вызывающего, чтобы
+    /// «Отменить всё» не освобождало место на каждой записи по отдельности.
+    private func removeFromQueue(_ relativePath: String, persist: Bool) {
         if let job = configurations.removeValue(forKey: relativePath) {
             GeminiTranscriber.cleanupRemoteFiles(for: job)
             BackgroundTranscriptionTransport.shared.cancel(jobID: job.id)
@@ -563,20 +753,51 @@ final class TranscriptionService: ObservableObject {
         resumeOnReturn.remove(relativePath)
         waiting.removeAll { $0.entry.relativePath == relativePath }
         waitingForMemory.remove(relativePath)
+        // Снятая запись обратно в «запускается» не вернётся: задача до работы не дойдёт.
+        starting.remove(relativePath)
         forget(interrupted: relativePath)
-        if inFlight.removeValue(forKey: relativePath) != nil {
+        batchSettle(relativePath, as: .cancelled)
+        // Новая отмена отменяет и просьбу «поставить заново», если она успела прийти.
+        restartAfterCancel.removeValue(forKey: relativePath)
+        if inFlight.removeValue(forKey: relativePath) != nil, persist {
             _ = persistJobs()
         }
         // Задача снимается, но из `active` её убирает сама завершившаяся работа:
         // иначе освободившееся место занял бы кто-то раньше, чем движок отпустил модель.
-        active[relativePath]?.cancel()
-        admit()
+        if let task = active[relativePath] {
+            cancelling.insert(relativePath)
+            task.cancel()
+        }
     }
 
+    /// «Отменить всё»: снимает и то, что идёт, и то, что запускается, и то, что ждёт,
+    /// и пометки «Прервано» — вместе с сохранённой очередью.
+    ///
+    /// Прерванные входят намеренно. Локальные из них поднялись бы сами при ближайшем
+    /// возвращении в приложение, и «отменить всё» отменилось бы за спиной у человека.
+    /// Ошибки прошлых попыток остаются: это не очередь, а память о том, что не вышло.
+    ///
+    /// Идущие записи сворачиваются не мгновенно — место за ними держится, пока движок
+    /// не отпустит модель, и `isIdle` станет `true` только тогда. Это не помеха: новая
+    /// запись, добавленная сразу после, встанет в очередь и пойдёт, как только место
+    /// освободится.
     func cancelAll() {
-        let paths = Set(queued).union(active.keys).union(interrupted)
+        // Источник правды — сами коллекции, а не опубликованный `queued`.
+        let paths = Set(waiting.map(\.entry.relativePath))
+            .union(active.keys)
+            .union(interrupted)
+            .union(inFlight.keys)
+        // Очередь пустеет целиком первой: иначе освободившееся место успевало бы занять
+        // следующей ждущей — чтобы тут же её снять.
         waiting.removeAll()
-        for path in paths { cancel(path) }
+        // Порядок снятия не важен для результата, но важен для воспроизводимости.
+        for path in paths.sorted() { removeFromQueue(path, persist: false) }
+        // Планировщик и сохранение — один раз на всё: пока снимается последняя запись, итог
+        // пачки обязан уже знать про все предыдущие, иначе отчёт о пачке недосчитал бы снятых.
+        if !paths.isEmpty { _ = persistJobs() }
+        queued = []
+        waitingForMemory = []
+        admit()
     }
 
     /// Систему перестало устраивать, что мы работаем: процесс забирают.
@@ -589,11 +810,16 @@ final class TranscriptionService: ObservableObject {
             let path = job.entry.relativePath
             interrupted.insert(path)
             inFlight[path] = job.kind
+            batchSettle(path, as: .interrupted)
         }
-        for path in active.keys {
+        // Снятые человеком, но ещё сворачивающиеся записи не трогаем: обрыв системой не
+        // должен воскресить то, что человек отменил, — иначе при ближайшем запуске она
+        // поднялась бы сама.
+        for path in active.keys where !cancelling.contains(path) {
             interrupted.insert(path)
             interrupting.insert(path)
             if inFlight[path] == nil { inFlight[path] = lane[path] }
+            batchSettle(path, as: .interrupted)
         }
         waiting.removeAll()
         waitingForMemory.removeAll()
@@ -607,8 +833,10 @@ final class TranscriptionService: ObservableObject {
     /// Продолжаем исходное задание с зафиксированными настройками. Новые облачные
     /// задания уже запущены человеком; старые записи без снимка ждут ручного повтора.
     func resumeInterrupted(in workspace: WorkspaceStore) {
+        pruneFailures(in: workspace)
         guard !inFlight.isEmpty else { return }
-        for (path, kind) in inFlight.sorted(by: { $0.key < $1.key }) {
+        for path in resumeOrder() {
+            guard let kind = inFlight[path] else { continue }
             guard let entry = try? workspace.entry(at: path) else {
                 // Записи могло уже не быть — её удалили, пока приложение не работало.
                 forgetCompletely(path)
@@ -623,10 +851,55 @@ final class TranscriptionService: ObservableObject {
         }
     }
 
+    /// В каком порядке поднимать прерванное: в том, в каком записи добавляли.
+    ///
+    /// Раньше шло по алфавиту пути, и пять файлов, поставленных в порядке «Планёрка,
+    /// Интервью, Звонок», после перезапуска считались как «Звонок, Интервью, Планёрка»:
+    /// очередь, начатая в одном порядке, заканчивалась в другом. Порядок добавления
+    /// записан в снимке задания — `TranscriptionJob.created` ставится в момент
+    /// `enqueue`, и повторная постановка тем же движком снимок не перезаписывает, так
+    /// что порядок переживает и несколько перезапусков подряд.
+    ///
+    /// Записи без снимка (файл прежней версии, где хранился только движок) считать
+    /// не по чему: они идут первыми и между собой — по пути, как и раньше. Равные
+    /// даты разводятся тем же путём, чтобы порядок не зависел от словаря.
+    private func resumeOrder() -> [String] {
+        inFlight.keys.sorted { lhs, rhs in
+            let left = configurations[lhs]?.created ?? .distantPast
+            let right = configurations[rhs]?.created ?? .distantPast
+            return left == right ? lhs < rhs : left < right
+        }
+    }
+
     private func forgetCompletely(_ path: String) {
         interrupted.remove(path)
         inFlight.removeValue(forKey: path)
         configurations.removeValue(forKey: path)
+        failed.removeValue(forKey: path)
+        _ = persistJobs()
+    }
+
+    /// Запись удалили (или она пропала, пока приложение не работало): ошибка её
+    /// последней попытки больше никому не нужна. Вместе с ней уходят очередь и «Прервано».
+    ///
+    /// Ошибка сохраняется до тех пор, пока запись не поставят заново или не удалят, —
+    /// других поводов забыть её нет. Поэтому экран, удаляющий запись, обязан сказать
+    /// об этом здесь, как говорит `topics`, `summaries` и остальным хранилищам.
+    func forget(_ relativePath: String) {
+        let hadFailure = failed.removeValue(forKey: relativePath) != nil
+        // `cancel` сам сохраняет очередь, если запись в ней была, — уже без ошибки; если
+        // записи в очереди не было, а ошибка была, сохранить нужно отдельно.
+        cancel(relativePath)
+        if hadFailure { _ = persistJobs() }
+    }
+
+    /// Ошибки записей, которых больше нет на диске. Удаление через приложение
+    /// (`forget`) их снимает сразу, а вот файл, убранный через «Файлы», узнаётся только
+    /// по тому, что его нет, — и проверяется это там, где известна рабочая папка.
+    private func pruneFailures(in workspace: WorkspaceStore) {
+        let gone = failed.keys.filter { (try? workspace.fileURL(for: $0)) == nil }
+        guard !gone.isEmpty else { return }
+        for path in gone { failed.removeValue(forKey: path) }
         _ = persistJobs()
     }
 
@@ -635,7 +908,7 @@ final class TranscriptionService: ObservableObject {
         do {
             let all = configurations.filter { inFlight[$0.key] != nil }
             let legacy = inFlight.filter { all[$0.key] == nil }
-            try InterruptedRecords.saveJobs(all, legacy: legacy, to: interruptedStore)
+            try InterruptedRecords.saveJobs(all, legacy: legacy, failures: failed, to: interruptedStore)
             return true
         } catch {
             lastError = "Не удалось сохранить очередь. Освободи место и повтори."
@@ -659,9 +932,14 @@ final class TranscriptionService: ObservableObject {
 
     /// Ждёт, пока очередь опустеет. Этим живёт фоновая задача: сама она ничего не
     /// считает, она держит процесс и ведёт системную полосу, пока работа идёт здесь.
-    func waitForDrain() async {
-        guard !isIdle else { return }
-        await withCheckedContinuation { continuation in
+    ///
+    /// Возвращает итог пачки, которая только что кончилась: так вызывающий получает
+    /// именно её исход, а не то, что успело накопиться к моменту, когда он проснулся.
+    /// Если очередь и так пуста — последний известный итог.
+    @discardableResult
+    func waitForDrain() async -> TranscriptionBatchOutcome? {
+        guard !isIdle else { return lastBatch }
+        return await withCheckedContinuation { continuation in
             drainWaiters.append(continuation)
         }
     }
@@ -728,44 +1006,108 @@ final class TranscriptionService: ObservableObject {
         let path = job.entry.relativePath
         lane[path] = job.kind
         startedAt[path] = Date()
+        // С этой минуты и до входа в `running` запись «запускается»: из очереди она уже
+        // вышла, а в работу ещё нет, и показать это кроме как отдельной отметкой нечем.
+        starting.insert(path)
         inFlight[path] = lane[path]
         _ = persistJobs()
         active[path] = Task { [weak self] in
             await self?.willStart?()
-            await TranscriptionJob.$current.withValue(job.configuration) {
-                if !Task.isCancelled {
-                    _ = await self?.transcribe(job.entry, in: job.workspace, using: job.kind)
-                }
+            let saved: String? = await TranscriptionJob.$current.withValue(job.configuration) {
+                guard !Task.isCancelled else { return nil }
+                return await self?.transcribe(job.entry, in: job.workspace, using: job.kind)
             }
-            self?.finish(path)
+            self?.finish(path, saved: saved != nil)
             if let self, self.foreground, self.resumeOnReturn.remove(path) != nil {
                 self.resumeInterrupted(in: job.workspace)
             }
         }
     }
 
-    private func finish(_ path: String) {
+    private func finish(_ path: String, saved: Bool) {
         active[path] = nil
         lane[path] = nil
         startedAt[path] = nil
+        starting.remove(path)
+        cancelling.remove(path)
         // Прерванная запись остаётся в файле: её судьба решится при следующем запуске.
         if !interrupted.contains(path), inFlight.removeValue(forKey: path) != nil {
             connectionRetries.removeValue(forKey: path)
             if let job = configurations.removeValue(forKey: path) {
                 GeminiTranscriber.cleanupRemoteFiles(for: job)
-            BackgroundTranscriptionTransport.shared.cancel(jobID: job.id)
+                BackgroundTranscriptionTransport.shared.cancel(jobID: job.id)
             }
             _ = persistJobs()
+        }
+        // Исход записи в пачке определяется здесь, по тому, чем кончилась работа: к этой
+        // минуте `transcribe` уже вернул результат, а ошибка, обрыв и отмена оставили
+        // каждая свой след.
+        if saved {
+            batchSettle(path, as: .succeeded)
+        } else if interrupted.contains(path) {
+            batchSettle(path, as: .interrupted)
+        } else if failed[path] != nil {
+            batchSettle(path, as: .failed)
+        } else {
+            batchSettle(path, as: .cancelled)
+        }
+        // Нажали «Расшифровать» на записи, пока её отменённая работа сворачивалась, — теперь
+        // место свободно. Это до `admit`, а не после: пачка не должна успеть «опустеть».
+        if let restart = restartAfterCancel.removeValue(forKey: path) {
+            enqueue(restart.entry, in: restart.workspace, using: restart.kind)
         }
         admit()
     }
 
+    // MARK: - Пачка
+
+    private enum BatchResult { case succeeded, failed, interrupted, cancelled }
+
+    /// Запись вошла в пачку. Каждая постановка — отдельная работа, даже если путь тот
+    /// же: перерасшифровка записи, уже сделанной в этой пачке, — ещё одна работа.
+    private func batchEnrol(_ path: String) {
+        batch.total += 1
+        batchLive.insert(path)
+        publishBatch()
+    }
+
+    /// Записывает исход записи. Если исход уже записан (человек снял запись до того, как
+    /// движок вернулся), второй раз не считается.
+    private func batchSettle(_ path: String, as result: BatchResult) {
+        guard batchLive.remove(path) != nil else { return }
+        switch result {
+        case .succeeded: batch.succeeded.append(path)
+        case .failed: batch.failed.append(path)
+        case .interrupted: batch.interrupted.append(path)
+        case .cancelled: batch.cancelled += 1
+        }
+        publishBatch()
+    }
+
+    private func publishBatch() {
+        // Снятые и оборванные из «из скольких» выходят: их место в очереди уже не ждёт.
+        batchTotal = batch.total - batch.cancelled - batch.interrupted.count
+        batchDone = batch.succeeded.count + batch.failed.count
+    }
+
+    /// Пачка кончилась: итог откладывается, счётчики обнуляются.
+    private func closeBatch() -> TranscriptionBatchOutcome {
+        let outcome = batch
+        lastBatch = outcome
+        batch = TranscriptionBatchOutcome()
+        batchLive = []
+        publishBatch()
+        return outcome
+    }
+
     private func signalDrainIfIdle() {
         guard isIdle else { return }
+        // Итог собирается до того, как проснутся ждущие: они читают его уже готовым.
+        let outcome = busy ? closeBatch() : lastBatch
         if !drainWaiters.isEmpty {
             let waiters = drainWaiters
             drainWaiters = []
-            for waiter in waiters { waiter.resume() }
+            for waiter in waiters { waiter.resume(returning: outcome) }
         }
         guard busy else { return }
         busy = false
@@ -859,6 +1201,20 @@ final class TranscriptionService: ObservableObject {
         }
     }
 
+    /// Готов ли движок принять пачку: nil — да, иначе текст для человека, почему нет.
+    ///
+    /// Спрашивается **один раз перед пачкой**, а не на каждой записи. Движок проверяется
+    /// только когда запись берётся в работу, и пять файлов при пропавшем ключе давали пять
+    /// строк «Ошибка» с одним и тем же текстом — человеку нужен один вопрос и один
+    /// ответ, пока ничего ещё не импортировано и не поставлено в очередь.
+    ///
+    /// Не новая логика, а та самая, что остановит саму запись: `unavailability(of:)`.
+    /// Облачный движок проверяется по ключу, GigaAM — по скачанной модели, Whisper — по
+    /// папке модели; без `kind` берётся выбранный в настройках.
+    func preflightProblem(for kind: TranscriptionEngineKind? = nil) async -> String? {
+        await unavailability(of: kind ?? TranscriptionSettings.engine)?.errorDescription
+    }
+
     /// Расшифровывает файл и сохраняет `Transcripts/<имя>.md`. Возвращает путь расшифровки.
     /// `kind` задаётся, когда человек попросил перерасшифровать конкретным движком;
     /// иначе берётся выбранный в настройках.
@@ -887,7 +1243,10 @@ final class TranscriptionService: ObservableObject {
             return nil
         }
 
+        // Переход «запускается» → «идёт» одним синхронным шагом: между ними нет ни одной
+        // точки, где запись числилась бы нигде.
         running.insert(entry.relativePath)
+        starting.remove(entry.relativePath)
         // Первая строка состояния появляется до начала работы: облачный запрос
         // может уйти на минуту, и всё это время экран не должен выглядеть мёртвым.
         progress[entry.relativePath] = chosenKind.leavesDevice ? "отправляю запись" : "готовлю аудио"
@@ -1011,5 +1370,167 @@ final class TranscriptionService: ObservableObject {
         default:
             return url.localizedDescription
         }
+    }
+}
+
+// MARK: - Пакетный импорт и постановка
+
+/// Итог пакетного импорта: что вошло в очередь, что нет и почему.
+struct TranscriptionImportReport: Equatable {
+    struct Imported: Equatable {
+        /// Файл в промежуточной папке, откуда его взяли, — по нему интерфейс узнаёт «свой» файл.
+        let source: URL
+        /// Путь записи в рабочей папке — по нему она стоит в очереди.
+        let path: String
+    }
+
+    struct Failure: Equatable {
+        let source: URL
+        /// Причина текстом для человека: имя файла в ней уже есть.
+        let message: String
+    }
+
+    /// Не `nil` — движок не готов, и **не сделано ничего**: ни импорта, ни очереди.
+    /// Прикреплённые файлы лежат где лежали, человеку нужно починить движок и повторить.
+    var blockedBy: String?
+    var imported: [Imported] = []
+    var failed: [Failure] = []
+
+    /// Всё, что просили, вошло в очередь.
+    var isComplete: Bool { blockedBy == nil && failed.isEmpty }
+}
+
+extension TranscriptionService {
+    /// Принимает **один** подготовленный файл (из `ImportInbox`) и ставит его в очередь:
+    /// копирует в рабочую папку и тут же встаёт в очередь, как одно действие.
+    ///
+    /// Цикл по нескольким файлам и отчёт о частичном успехе остаются за вызывающим — для
+    /// этого функция и одна: один файл вошёл или не вошёл, и третьего нет. (Для пачки есть
+    /// `importAndEnqueue(_:[URL]…)`: она ещё и держит пачку одной — см. там.)
+    ///
+    /// - Успех: возвращает путь записи; файл в промежуточной папке убран (иначе он вернулся
+    ///   бы в панель при следующем открытии и импортировался второй раз).
+    /// - Неподдерживаемый формат: `ImportError.unsupportedFormat`, промежуточная копия убрана —
+    ///   негодный файл годным не станет, а в панели он только мешает.
+    /// - Любой другой отказ при копировании: бросает ошибку, файл **остаётся** в
+    ///   промежуточной папке для повтора.
+    /// - Очередь не сохранилась: импорт откатывается (копия в рабочей папке убирается),
+    ///   `ImportError.queueUnavailable`, промежуточный файл остаётся. Запись не остаётся
+    ///   в списке «Без расшифровки» в состоянии, которого человек не просил.
+    ///
+    /// `didImport` вызывается синхронно сразу после постановки, раньше, чем работа успеет
+    /// хоть на шаг продвинуться: здесь интерфейс ставит записи временный заголовок
+    /// (имя принесённого файла), и расшифровка не может закончиться и дать записи
+    /// заголовок от модели до того, как он будет задан.
+    ///
+    /// Сама запись в работу **не** уходит без вызова: «Принесённый файл никогда не уходит в
+    /// расшифровку сам» — этот вызов и есть нажатие человека.
+    @discardableResult
+    func importAndEnqueue(
+        _ staged: URL,
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind? = nil,
+        modifiedAt: Date = .now,
+        didImport: (_ relativePath: String) -> Void = { _ in }
+    ) async throws -> String {
+        let path = try await importStaged(staged, into: workspace, modifiedAt: modifiedAt)
+        return try enqueueImported(path, staged: staged, into: workspace, using: kind, didImport: didImport)
+    }
+
+    /// Принимает пачку файлов: **одна** проверка движка в начале, затем копирование всех, и
+    /// только потом — разом в очередь, по порядку. Отчёт — о том, что вошло и что нет.
+    ///
+    /// - Движок не готов — не делается ничего, в отчёте `blockedBy` с причиной. Пять файлов
+    ///   при пропавшем ключе раньше давали пять строк «Ошибка»; теперь — один вопрос до импорта.
+    /// - **Пачка остаётся одной.** Сначала копируются все файлы, и только потом они встают в
+    ///   очередь — подряд, без единой паузы между ними. Будь постановка вперемешку с
+    ///   копированием, короткая первая запись успевала бы расшифроваться, пока копируется
+    ///   вторая: очередь пустела бы посреди ввода, счётчик «1 из 5» превращался в «1 из 1» и
+    ///   «1 из 4», а фоновая задача закрывалась бы и просилась заново.
+    /// - Файлы встают в очередь **в порядке выбора**; движок один на всю пачку: он назван один
+    ///   раз в начале, и смена настройки посреди ввода пачку не перемешает.
+    /// - Один негодный файл не отменяет остальных: он попадает в `failed`, остальные идут.
+    /// - Даты изменения идут с шагом в 10 мс на убыль: первый файл — самый новый. В списке
+    ///   «новые сверху» пачка читается сверху вниз в том порядке, в каком расшифровывается.
+    ///
+    /// `didImport` получает исходный файл и путь записи — этого хватает, чтобы задать записи
+    /// заголовок по имени принесённого файла.
+    func importAndEnqueue(
+        _ files: [URL],
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind? = nil,
+        didImport: (_ source: URL, _ relativePath: String) -> Void = { _, _ in }
+    ) async -> TranscriptionImportReport {
+        var report = TranscriptionImportReport()
+        guard !files.isEmpty else { return report }
+
+        let engine = kind ?? TranscriptionSettings.engine
+        if let problem = await preflightProblem(for: engine) {
+            Diagnostics.note("импорт: пачка из \(files.count) остановлена до начала — \(problem)")
+            report.blockedBy = problem
+            return report
+        }
+
+        // Сначала копирование — по файлу и по порядку; на постановке пока ничего не стоит.
+        let start = Date()
+        var copied: [(source: URL, path: String)] = []
+        for (index, file) in files.enumerated() {
+            do {
+                let path = try await importStaged(
+                    file, into: workspace, modifiedAt: start.addingTimeInterval(-Double(index) * 0.01)
+                )
+                copied.append((file, path))
+            } catch {
+                Diagnostics.note("импорт: «\(file.lastPathComponent)» не вошла — \(error.localizedDescription)")
+                report.failed.append(.init(source: file, message: error.localizedDescription))
+            }
+        }
+
+        // Потом разом в очередь: цикл без `await`, пачка не может опустеть на полпути.
+        for (source, path) in copied {
+            do {
+                try enqueueImported(path, staged: source, into: workspace, using: engine) { didImport(source, $0) }
+                report.imported.append(.init(source: source, path: path))
+            } catch {
+                Diagnostics.note("импорт: «\(source.lastPathComponent)» не вошла — \(error.localizedDescription)")
+                report.failed.append(.init(source: source, message: error.localizedDescription))
+            }
+        }
+        return report
+    }
+
+    /// Первая половина импорта: копия в рабочую папку. Неподдерживаемый формат убирает и
+    /// промежуточную копию; любой другой отказ её оставляет.
+    private func importStaged(_ staged: URL, into workspace: WorkspaceStore, modifiedAt: Date) async throws -> String {
+        do {
+            return try await workspace.importFileAsync(from: staged, modifiedAt: modifiedAt)
+        } catch let refusal as ImportError {
+            ImportInbox.forget(staged)
+            throw refusal
+        }
+    }
+
+    /// Вторая половина: постановка в очередь. Не встала — копия в рабочей папке откатывается,
+    /// промежуточная остаётся. Встала — хук, и промежуточная копия убирается.
+    @discardableResult
+    private func enqueueImported(
+        _ path: String,
+        staged: URL,
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind?,
+        didImport: (_ relativePath: String) -> Void
+    ) throws -> String {
+        guard let entry = try? workspace.entry(at: path) else {
+            workspace.discardImportedFile(at: path)
+            throw WorkspaceError.importFailed
+        }
+        guard enqueue(entry, in: workspace, using: kind) else {
+            workspace.discardImportedFile(at: path)
+            throw ImportError.queueUnavailable(fileName: staged.lastPathComponent)
+        }
+        didImport(path)
+        ImportInbox.forget(staged)
+        Diagnostics.note("импорт: «\(path)» принята и поставлена в очередь")
+        return path
     }
 }

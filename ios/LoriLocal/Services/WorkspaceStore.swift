@@ -84,6 +84,7 @@ final class WorkspaceStore: ObservableObject {
     func start() {
         do {
             try ensureRoot()
+            removeStaleImportLeftovers()
             requestRefresh()
         } catch {
             lastError = error.localizedDescription
@@ -322,48 +323,210 @@ final class WorkspaceStore: ObservableObject {
     /// temporary access only to this exact URL; no directory-wide access is requested.
     /// Возвращает путь копии внутри рабочей папки: чат показывает вложение карточкой,
     /// и для этого ему нужен путь, а не только факт успеха.
+    ///
+    /// Правила импорта общие с `importFileAsync`: формат проверяется до копирования,
+    /// имя не должно делить расшифровку с уже лежащей записью, копия кладётся целиком или
+    /// не кладётся вовсе, а дата изменения ставится на момент импорта.
     @discardableResult
-    func importFile(from externalURL: URL, into relativeDirectory: String = "Imported") throws -> String {
-        try ensureRoot()
+    func importFile(
+        from externalURL: URL,
+        into relativeDirectory: String = "Imported",
+        modifiedAt: Date = .now
+    ) throws -> String {
+        let (destinationDirectory, name) = try prepareImport(from: externalURL, into: relativeDirectory)
         let didAccess = externalURL.startAccessingSecurityScopedResource()
         defer { if didAccess { externalURL.stopAccessingSecurityScopedResource() } }
 
-        let destinationDirectory = try safeURL(for: relativeDirectory)
-        try rejectSymbolicLinks(for: relativeDirectory)
-        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-        let name = externalURL.lastPathComponent
-        guard !name.isEmpty, !name.contains("/") else { throw WorkspaceError.importFailed }
-        let destination = uniqueDestination(in: destinationDirectory, preferredName: name)
-        try fileManager.copyItem(at: externalURL, to: destination)
+        let taken = Self.occupiedBaseNames(in: root)
+        let destination = reserveImportDestination(in: destinationDirectory, preferredName: name, taken: taken)
+        defer { releaseImportReservation(destination) }
+        try Self.copyAtomically(from: externalURL, to: destination, modifiedAt: modifiedAt)
         try refresh()
-        let filename = destination.lastPathComponent
-        return relativeDirectory.isEmpty ? filename : "\(relativeDirectory)/\(filename)"
+        return importedPath(destination, in: relativeDirectory)
     }
 
     /// Большая запись копируется не на главном потоке. Иначе после нажатия
     /// «Расшифровать» интерфейс замирал на всё время копирования из staging.
+    ///
+    /// Что делает импорт, и почему:
+    /// - **Формат проверяется до копирования.** `.ogg`, `.opus`, `.flac` раньше доезжали до
+    ///   `Imported/`, но в список записей не попадали (`WorkspaceEntry.audioExtensions`) и
+    ///   падали с «Расшифровать можно только аудиофайл»; человек не находил запись.
+    /// - **Имя уникально по базе, а не по полному имени.** Расшифровка лежит в
+    ///   `Transcripts/<база>.md`, и `Совещание.m4a` рядом с `Совещание.mp3` — или такая же
+    ///   база в `Recordings/` и `Imported/` — делили бы один файл текста: вторая расшифровка
+    ///   затирала бы первую. Занятыми считаются база любого аудио в любой папке и база любой
+    ///   расшифровки (текст мог пережить удалённое аудио). Имя при этом остаётся таким, как
+    ///   дали, пока не занято; занято — получает номер: «Совещание 2.mp3».
+    /// - **Дата изменения — момент импорта.** Список «новые сверху» сортируется по ней, а
+    ///   копия сохраняет дату оригинала: запись месячной давности ушла бы в середину списка,
+    ///   и человек, только что добавивший пять файлов, не находил бы их наверху. Своей
+    ///   «даты записи» у приложения нет — везде (группы по дням, подпись карточки, экспорт,
+    ///   оглавление ассистента) читается именно `modifiedAt`, так что у принесённой записи
+    ///   это день её принесения.
+    /// - **Копия целиком или никак.** Файл копируется под скрытым именем и только потом
+    ///   переименовывается: оборванная посреди копия не должна лежать под настоящим именем и
+    ///   выглядеть записью.
     @discardableResult
     func importFileAsync(
         from externalURL: URL,
-        into relativeDirectory: String = "Imported"
+        into relativeDirectory: String = "Imported",
+        modifiedAt: Date = .now
     ) async throws -> String {
-        try ensureRoot()
-        let destinationDirectory = try safeURL(for: relativeDirectory)
-        try rejectSymbolicLinks(for: relativeDirectory)
-        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
-        let name = externalURL.lastPathComponent
-        guard !name.isEmpty, !name.contains("/") else { throw WorkspaceError.importFailed }
-        let destination = uniqueDestination(in: destinationDirectory, preferredName: name)
+        let (destinationDirectory, name) = try prepareImport(from: externalURL, into: relativeDirectory)
+
+        // Обход всей папки — не на главном акторе. Выбор имени после него — синхронный и
+        // на главном акторе, поэтому два импорта разом не выберут одно имя: второй увидит
+        // бронь первого.
+        let root = root
+        let taken = await Task.detached(priority: .userInitiated) {
+            Self.occupiedBaseNames(in: root)
+        }.value
+        let destination = reserveImportDestination(in: destinationDirectory, preferredName: name, taken: taken)
+        defer { releaseImportReservation(destination) }
         let didAccess = externalURL.startAccessingSecurityScopedResource()
 
         try await Task.detached(priority: .userInitiated) {
             defer { if didAccess { externalURL.stopAccessingSecurityScopedResource() } }
-            try FileManager.default.copyItem(at: externalURL, to: destination)
+            try Self.copyAtomically(from: externalURL, to: destination, modifiedAt: modifiedAt)
         }.value
 
         requestRefresh()
+        return importedPath(destination, in: relativeDirectory)
+    }
+
+    /// Откат импорта: убирает файл, который `importFileAsync` только что создал.
+    ///
+    /// Не «Удалить запись» (та уходит в корзину): здесь файл — наша свежая копия, а
+    /// оригинал по-прежнему лежит в промежуточной папке, так что терять нечего. Нужен,
+    /// когда за импортом не удалось поставить запись в очередь: оставить её в списке
+    /// «Без расшифровки» значило бы вернуть человеку работу, которую он уже отдал.
+    func discardImportedFile(at relativePath: String) {
+        guard let url = try? fileURL(for: relativePath) else { return }
+        try? fileManager.removeItem(at: url)
+        requestRefresh()
+    }
+
+    // MARK: - Импорт: подготовка, имена, копирование
+
+    /// Проверки, общие для обоих вариантов импорта. Возвращает папку назначения и имя файла.
+    private func prepareImport(from externalURL: URL, into relativeDirectory: String) throws -> (URL, String) {
+        try ensureRoot()
+        let name = externalURL.lastPathComponent
+        guard !name.isEmpty, !name.contains("/") else { throw WorkspaceError.importFailed }
+        guard ImportInbox.isSupported(fileName: name) else { throw ImportError.unsupportedFormat(fileName: name) }
+        let destinationDirectory = try safeURL(for: relativeDirectory)
+        try rejectSymbolicLinks(for: relativeDirectory)
+        try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
+        return (destinationDirectory, name)
+    }
+
+    private func importedPath(_ destination: URL, in relativeDirectory: String) -> String {
         let filename = destination.lastPathComponent
         return relativeDirectory.isEmpty ? filename : "\(relativeDirectory)/\(filename)"
+    }
+
+    /// Базы имён, уже занятые в рабочей папке: любого аудио (в любой папке, при любом
+    /// расширении) и любой расшифровки. Корзина (`.LoriTrash`) и скрытое не в счёт — их не
+    /// видно ни в списке, ни в поиске расшифровки.
+    nonisolated static func occupiedBaseNames(in root: URL) -> Set<String> {
+        let keys: [URLResourceKey] = [.isRegularFileKey]
+        guard let walker = FileManager.default.enumerator(
+            at: root,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles, .skipsPackageDescendants]
+        ) else { return [] }
+
+        var taken = Set<String>()
+        for case let url as URL in walker {
+            guard (try? url.resourceValues(forKeys: Set(keys)).isRegularFile) == true else { continue }
+            let path = url.standardizedFileURL.path
+            guard path.hasPrefix(root.path + "/") else { continue }
+            let relative = path.dropFirst(root.path.count + 1)
+            let suffix = url.pathExtension.lowercased()
+            if relative.hasPrefix("Transcripts/") {
+                if suffix == "md" { taken.insert(baseKey(url.deletingPathExtension().lastPathComponent)) }
+            } else if WorkspaceEntry.audioExtensions.contains(suffix) {
+                taken.insert(baseKey(url.deletingPathExtension().lastPathComponent))
+            }
+        }
+        return taken
+    }
+
+    /// Ключ для сравнения баз. Файловая система iOS не различает регистр и форму
+    /// юникода («й» одним знаком и «и» с краткой), так что «Совещание» и «СОВЕЩАНИЕ» —
+    /// одно и то же имя, и сравнивать их надо как одно.
+    nonisolated static func baseKey(_ base: String) -> String {
+        base.precomposedStringWithCanonicalMapping.lowercased()
+    }
+
+    /// Базы, под которые копия уже выбрана, но файла ещё нет. Без этого два импорта,
+    /// идущих одновременно, выбрали бы одно имя: файла ещё нет ни у одного.
+    private var reservedImportBases: Set<String> = []
+
+    /// Выбирает имя и тут же бронирует его до конца копирования. Всё синхронно на главном
+    /// акторе — именно это и делает выбор безопасным.
+    private func reserveImportDestination(in directory: URL, preferredName: String, taken: Set<String>) -> URL {
+        let preferred = directory.appending(path: preferredName)
+        let base = preferred.deletingPathExtension().lastPathComponent
+        let suffix = preferred.pathExtension
+        var index = 1
+        while true {
+            let candidate = index == 1 ? base : "\(base) \(index)"
+            let key = Self.baseKey(candidate)
+            if !taken.contains(key), !reservedImportBases.contains(key), !isTakenOnDisk(candidate, in: directory) {
+                reservedImportBases.insert(key)
+                return directory.appending(path: suffix.isEmpty ? candidate : "\(candidate).\(suffix)")
+            }
+            index += 1
+        }
+    }
+
+    private func releaseImportReservation(_ destination: URL) {
+        reservedImportBases.remove(Self.baseKey(destination.deletingPathExtension().lastPathComponent))
+    }
+
+    /// Свежая проверка прямо на диске: обход мог начаться раньше, чем закончился
+    /// предыдущий импорт этой же пачки, и не видеть его файл, а бронь к этому времени уже снята.
+    private func isTakenOnDisk(_ base: String, in directory: URL) -> Bool {
+        let transcript = root.appending(path: "Transcripts").appending(path: "\(base).md")
+        if fileManager.fileExists(atPath: transcript.path) { return true }
+        return WorkspaceEntry.audioExtensions.contains { suffix in
+            fileManager.fileExists(atPath: directory.appending(path: "\(base).\(suffix)").path)
+        }
+    }
+
+    /// Копирует целиком или не копирует вовсе и ставит дату изменения.
+    ///
+    /// Под скрытым именем (`.lori-import-<uuid>.partial`): точка прячет файл от списка
+    /// записей и «Файлов», а переименование в той же папке происходит разом. Упади процесс
+    /// посреди копии — под настоящим именем не останется обрубка, который выглядел бы
+    /// записью и расшифровывался в мусор; остаток подберёт `removeStaleImportLeftovers`.
+    nonisolated private static func copyAtomically(from source: URL, to destination: URL, modifiedAt: Date) throws {
+        let manager = FileManager.default
+        let partial = destination.deletingLastPathComponent()
+            .appending(path: "\(importLeftoverPrefix)\(UUID().uuidString)\(importLeftoverSuffix)")
+        do {
+            try manager.copyItem(at: source, to: partial)
+            try manager.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: partial.path)
+            try manager.moveItem(at: partial, to: destination)
+        } catch {
+            try? manager.removeItem(at: partial)
+            throw error
+        }
+    }
+
+    nonisolated private static let importLeftoverPrefix = ".lori-import-"
+    nonisolated private static let importLeftoverSuffix = ".partial"
+
+    /// Недокопированное с прошлого запуска. Зовётся только при старте, когда ни один
+    /// импорт ещё идти не может, — чужую копию «в процессе» отсюда не удалить.
+    private func removeStaleImportLeftovers() {
+        let directory = root.appending(path: "Imported", directoryHint: .isDirectory)
+        guard let names = try? fileManager.contentsOfDirectory(atPath: directory.path) else { return }
+        for name in names where name.hasPrefix(Self.importLeftoverPrefix) && name.hasSuffix(Self.importLeftoverSuffix) {
+            try? fileManager.removeItem(at: directory.appending(path: name))
+        }
     }
 
     func makeRecordingURL() throws -> URL {

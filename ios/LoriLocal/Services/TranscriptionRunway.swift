@@ -72,17 +72,40 @@ final class TranscriptionRunway: ObservableObject {
     private unowned let service: TranscriptionService
     private var submitted = false
     private let network = NWPathMonitor()
-    /// Все записи, которые задача видела в этой пачке. Пачка растёт по ходу — человек
-    /// добавляет записи, пока идут прежние, — и без этого счёт «сделано» уехал бы в
-    /// минус, а полоса замерла бы.
-    private var seen: Set<String> = []
     /// Фоновое окно UIKit на те ~30 секунд, что даёт система, когда настоящей фоновой
     /// задачи нет. Короткому облачному запросу этого хватает, длинной локальной — нет,
     /// и врать об этом не нужно.
     private var grace: UIBackgroundTaskIdentifier = .invalid
 
-    init(service: TranscriptionService) {
+    /// Как назвать запись человеку: по пути вернуть её заголовок или `nil` — тогда в
+    /// Dynamic Island встанет имя файла. Подставляет приложение: заголовки живут в
+    /// `SummaryStore`, а полосе прогресса о нём знать незачем. По умолчанию — имя файла
+    /// как было: у записи с диктофона это `Recording-2026-09-01T12-00-00Z`, у принесённой
+    /// — то, что назвал человек.
+    var displayTitle: (String) -> String? = { _ in nil }
+
+    /// То, чем Runway трогает систему. Отдельной структурой, чтобы тест подменял это и не
+    /// включал настоящему телефону вечный экран.
+    struct SystemHooks {
+        /// Приложение на виду прямо сейчас — начальное состояние до первого уведомления.
+        var isActive: @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }
+        /// `UIApplication.isIdleTimerDisabled`: пока `true`, экран не гаснет по таймеру автоблокировки.
+        var setScreenAwake: @MainActor (Bool) -> Void = { UIApplication.shared.isIdleTimerDisabled = $0 }
+        var notifications: NotificationCenter = .default
+    }
+
+    private let hooks: SystemHooks
+    /// На виду ли приложение. Следим по уведомлениям, а не спрашиваем систему на месте:
+    /// на `willResignActive` `applicationState` ещё показывает `.active`.
+    private var appIsActive: Bool
+    private var keepingScreenAwake = false
+    private let observation: NotificationObservation
+
+    init(service: TranscriptionService, hooks: SystemHooks = SystemHooks()) {
         self.service = service
+        self.hooks = hooks
+        self.appIsActive = hooks.isActive()
+        self.observation = NotificationObservation(center: hooks.notifications)
         Self.current = self
         network.pathUpdateHandler = { @Sendable [weak self] path in
             guard path.status == .satisfied else { return }
@@ -92,6 +115,60 @@ final class TranscriptionRunway: ObservableObject {
         if #unavailable(iOS 26.0) {
             state = .foregroundOnly("Фоновая расшифровка есть с iOS 26. Здесь работа идёт, пока приложение открыто.")
         }
+        // Уход с переднего плана ловится здесь, а не в `LoriLocalApp`: приложение
+        // пересылает сюда только `didBecomeActive` и `didEnterBackground`, а экран надо
+        // отпустить раньше — как только он перестал быть на виду.
+        observation.observe(UIApplication.willResignActiveNotification) { [weak self] in
+            self?.appIsActive = false
+            self?.syncScreen()
+        }
+        observation.observe(UIApplication.didBecomeActiveNotification) { [weak self] in
+            self?.appIsActive = true
+            self?.syncScreen()
+        }
+    }
+
+    /// Подписки на уведомления живут в своём объекте: `deinit` изолированного на главном
+    /// акторе класса не может трогать его поля, а снять подписку надо при уничтожении.
+    ///
+    /// Обработчики идут синхронно на потоке отправителя (`queue: nil`): систему слушаем
+    /// только по уведомлениям `UIApplication`, а их она шлёт с главного потока. Чужой
+    /// поток не роняет процесс, а переезжает на главный актор задачей.
+    private final class NotificationObservation: @unchecked Sendable {
+        private let center: NotificationCenter
+        private var tokens: [NSObjectProtocol] = []
+
+        init(center: NotificationCenter) { self.center = center }
+
+        func observe(_ name: Notification.Name, perform action: @escaping @MainActor @Sendable () -> Void) {
+            tokens.append(center.addObserver(forName: name, object: nil, queue: nil) { _ in
+                if Thread.isMainThread {
+                    MainActor.assumeIsolated(action)
+                } else {
+                    Task { @MainActor in action() }
+                }
+            })
+        }
+
+        deinit { for token in tokens { center.removeObserver(token) } }
+    }
+
+    /// Экран не гаснет, пока очередь идёт и приложение на виду.
+    ///
+    /// Автоблокировка через ~30 секунд без касаний уводит приложение в фон. Там, где
+    /// настоящей фоновой задачи нет (симулятор, iOS ниже 26, отказ системы), у работы
+    /// остаётся запасное окно UIKit в те же ~30 секунд — и после него всё оборванное
+    /// считается заново с нуля. Длинная запись, поставленная и оставленная на столе,
+    /// именно так и пропадала. Поэтому пока что-то считается, экран держим включённым.
+    ///
+    /// Отпускаем в двух случаях: очередь опустела или приложение ушло с переднего плана.
+    /// Второе не про батарею, а про вежливость: флаг глобален для приложения, и он не
+    /// должен пережить его уход из-под пальца человека.
+    private func syncScreen() {
+        let wanted = appIsActive && !service.isIdle
+        guard wanted != keepingScreenAwake else { return }
+        keepingScreenAwake = wanted
+        hooks.setScreenAwake(wanted)
     }
 
     /// Коробка для перевозки задачи на главный актор.
@@ -177,12 +254,15 @@ final class TranscriptionRunway: ObservableObject {
     var canExecuteInBackground: Bool { driving || grace != .invalid }
 
     func applicationDidEnterBackground() {
+        appIsActive = false
+        syncScreen()
         guard !service.isIdle, !driving else { return }
         beginGrace()
     }
 
     /// Очередь непуста — просим у системы фон под всю пачку.
     func batchDidStart() {
+        syncScreen()
         guard !submitted else { return }
         // Заявка создаётся «от имени приложения на переднем плане» (`BGTaskRequest.h`),
         // а `resumeInterrupted` дёргает очередь прямо на запуске, когда приложение ещё
@@ -211,7 +291,7 @@ final class TranscriptionRunway: ObservableObject {
             // не узнаёт и отвечает «Unrecognized Identifier».
             identifier: Self.taskIdentifier,
             title: "Расшифровка",
-            subtitle: Self.subtitle(done: 0, total: service.batchCount, current: nil)
+            subtitle: currentSubtitle()
         )
         // `.queue` вместо `.fail`: под нагрузкой лучше подождать очереди планировщика,
         // чем остаться без фона совсем. Работа при этом уже идёт — она не ждёт задачу.
@@ -225,7 +305,7 @@ final class TranscriptionRunway: ObservableObject {
             try BGTaskScheduler.shared.submit(request)
             state = .foregroundOnly("Система ещё готовит фоновое выполнение. Если времени не хватит, работа продолжится при возвращении.")
             beginGrace()
-            Journal.append("фон: заявка \(request.identifier) подана, записей \(service.batchCount)")
+            Journal.append("фон: заявка \(request.identifier) подана, записей \(service.batchTotal)")
         } catch {
             submitted = false
             // Не гадаем, почему отказ: спрашиваем систему и пишем ответ рядом.
@@ -244,6 +324,8 @@ final class TranscriptionRunway: ObservableObject {
 
     /// Приложение стало активным — самое время подать отложенную заявку.
     func applicationDidBecomeActive() {
+        appIsActive = true
+        syncScreen()
         guard deferred, !service.isIdle else {
             deferred = false
             return
@@ -254,6 +336,7 @@ final class TranscriptionRunway: ObservableObject {
 
     /// Очередь опустела своим ходом — фоновое окно UIKit больше не нужно.
     func batchDidFinish() {
+        syncScreen()
         guard !driving else { endGrace(); return }
         if submitted { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier) }
         submitted = false
@@ -279,11 +362,13 @@ final class TranscriptionRunway: ObservableObject {
         expired = false
         endGrace()
         state = .running
-        Journal.append("фон: задача взяла пачку из \(service.batchCount)")
+        Journal.append("фон: задача взяла пачку из \(service.batchTotal)")
 
-        seen = []
-        task.progress.totalUnitCount = Int64(max(service.batchCount, 1)) * 1000
-        task.progress.completedUnitCount = 0
+        // Задача могла прийти не с начала пачки — часть записей к этому времени уже
+        // сделана, и полоса начинает с них, а не с нуля.
+        let total = max(service.batchTotal, 1)
+        task.progress.totalUnitCount = Int64(total) * 1000
+        task.progress.completedUnitCount = Int64(min(service.batchDone, total)) * 1000
 
         // `@Sendable` обязателен по той же причине, что и у обработчика запуска:
         // истечение приходит с чужой очереди, а замыкание из `@MainActor`-метода
@@ -306,10 +391,10 @@ final class TranscriptionRunway: ObservableObject {
                 try? await Task.sleep(for: .seconds(1))
             }
         }
-        await service.waitForDrain()
+        let outcome = await service.waitForDrain()
         ticker.cancel()
 
-        let success = !expired && service.interrupted.isEmpty && service.failed.isEmpty
+        let success = Self.completionSuccess(expired: expired, outcome: outcome)
         if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
         task.expirationHandler = nil
         driving = false
@@ -319,12 +404,22 @@ final class TranscriptionRunway: ObservableObject {
         await EngineSessionCache.shared.dropIdle()
     }
 
+    /// Как задача отчитывается системе: успешно или нет — **по этой пачке**.
+    ///
+    /// Раньше смотрели на общие словари сервиса (`failed`, `interrupted`), которые никто
+    /// не обнулял: одна старая ошибка, давно показанная на своей карточке, делала
+    /// неудачной каждую следующую пачку, а ждущая решения облачная запись «Прервано»
+    /// — тоже. Отмена человеком сбоем не считается: задачу закончили сознательно.
+    nonisolated static func completionSuccess(expired: Bool, outcome: TranscriptionBatchOutcome?) -> Bool {
+        !expired && (outcome?.isClean ?? true)
+    }
+
     @available(iOS 26.0, *)
     private func pump(_ task: BGContinuedProcessingTask) {
-        seen.formUnion(service.running)
-        seen.formUnion(service.queued)
-        let total = max(seen.count, 1)
-        let done = max(0, seen.count - service.batchCount)
+        // Счёт ведёт сервис, а не задача: он знает и про добавленные по ходу записи, и про
+        // снятые, и про упавшие — всё, что раньше приходилось выводить из `seen`.
+        let total = max(service.batchTotal, 1)
+        let done = min(service.batchDone, total)
         task.progress.totalUnitCount = Int64(total) * 1000
         // Доля недоделанных записей идёт в общий счёт. Это не косметика: по `progress`
         // планировщик отличает живую задачу от подвисшей и **принудительно завершает**
@@ -346,20 +441,43 @@ final class TranscriptionRunway: ObservableObject {
             task.progress.totalUnitCount,
             Int64((Double(done) + partial) * 1000)
         )
-        task.updateTitle(
-            "Расшифровка",
-            subtitle: Self.subtitle(done: done, total: total, current: service.running.sorted().first)
+        task.updateTitle("Расшифровка", subtitle: currentSubtitle())
+    }
+
+    /// Строка под полосой прогресса сейчас: «2 из 5 · Совещание 27.08».
+    ///
+    /// Имя берётся у приложения (`displayTitle`) — настоящий заголовок записи, а не
+    /// `Recording-2026-09-01T12-00-00Z`. Не нашлось или пусто — имя файла, как раньше.
+    func currentSubtitle() -> String {
+        let path = service.currentPath
+        let title = path
+            .flatMap { displayTitle($0)?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .flatMap { $0.isEmpty ? nil : $0 }
+        return Self.subtitle(
+            done: service.batchDone,
+            total: service.batchTotal,
+            name: title ?? path.map(Self.fileName(of:))
         )
     }
 
     /// «2 из 5 · Совещание 27.08». Имя записи — это то, по чему человек её узнаёт
     /// в Dynamic Island, где больше ничего и не помещается.
     nonisolated static func subtitle(done: Int, total: Int, current: String?) -> String {
-        let name = current.map { ((($0 as NSString).lastPathComponent) as NSString).deletingPathExtension }
+        subtitle(done: done, total: total, name: current.map(fileName(of:)))
+    }
+
+    /// То же, но с готовым названием: заголовок вроде «Отчёт 27.08» нельзя пускать через
+    /// разбор пути — «.08» принялось бы за расширение и отрезалось.
+    nonisolated static func subtitle(done: Int, total: Int, name: String?) -> String {
         guard total > 1 else { return name ?? "одна запись" }
-        let counter = "\(min(done + 1, total)) из \(total)"
+        let counter = TranscriptionService.counter(done: done, total: total)
         guard let name, !name.isEmpty else { return counter }
         return "\(counter) · \(name)"
+    }
+
+    /// Имя файла без папки и расширения.
+    nonisolated static func fileName(of path: String) -> String {
+        ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     }
 
     nonisolated static func explain(_ error: Error) -> String {
