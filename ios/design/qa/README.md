@@ -55,6 +55,10 @@ python3 design/qa/seed-home.py <simulator-uuid> --untranscribed # ещё одн�
 `--inbox-only` прямо перед запуском этого теста: остальные тесты стартуют с `--forget-attachments`,
 а он чистит и `Documents/Inbox`) и `testZZ2ListScreenshots`. Тема переключается внутри теста
 (`XCUIDevice.shared.appearance`), снимки достаются `xcrun xcresulttool export attachments`.
+Экран записи в очереди и в работе — `testZZ3RecordScreenQueueScreenshots`: нужны две записи без
+расшифровки — если их меньше, добавь `--untranscribed` (каждый запуск — ещё одна); в конце тест
+снимает очередь, и обе остаются без текста. `testFailureKeepsRecordScreenOpen` опирается на две
+записи с «fail» в имени — по одной от каждого прогона `testZZ1…`.
 
 Два свойства прогона, которые выглядят как поломка, но ею не являются:
 - тест плашки записи пропускается: у симулятора без звукового входа `AVAudioRecorder.record()`
