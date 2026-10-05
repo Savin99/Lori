@@ -625,6 +625,8 @@ final class TranscriptionUITests: XCTestCase {
         sleep(1)
         shoot(named: "record-running")
         tap(app.buttons["Записи"])
+        // Лист уезжает с анимацией: пока он не ушёл, «Остановить» под ним не нажать.
+        XCTAssertTrue(app.descendants(matching: .any)["recordTitle"].waitForNonExistence(timeout: 5))
         stopQueueIfRunning(app)
     }
 
