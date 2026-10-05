@@ -528,6 +528,46 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertTrue(journal.contains("текст короче 80 знаков — «журнал-коротко»"))
     }
 
+    /// Пока памяти мало, drain зовут каждые 5 секунд и на каждое возвращение.
+    /// Причина пишется в журнал один раз, а не строкой на каждый заход, хотя
+    /// число свободных мегабайт в строке каждый раз другое.
+    func testShortMemoryIsLoggedOnceNotOnEveryRetry() {
+        func occurrences() -> Int {
+            let journal = (try? String(contentsOf: Journal.url, encoding: .utf8)) ?? ""
+            return journal.components(separatedBy: "заголовки: мало памяти").count - 1
+        }
+        let before = occurrences()
+        let probe = Attempts()
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: store,
+            availableMemory: { probe.bump(); return 100_000_000 + UInt64(probe.value) * 1_048_576 },
+            isForeground: { true },
+            summarize: { _, _, _ in .init(title: "Заголовок", detail: "Описание") }
+        )
+
+        runner.summarize(path: "память.m4a", text: Self.transcript)
+        runner.applicationDidBecomeActive()
+        runner.applicationDidBecomeActive()
+        runner.applicationWillResignActive()
+
+        XCTAssertEqual(occurrences() - before, 1)
+    }
+
+    /// Явная просьба по записи без расшифровки не пропадает молча.
+    func testExplicitRequestWithoutTranscriptSaysWhy() async throws {
+        let workspace = try makeWorkspace([])
+        try Data("звук".utf8).write(to: workspaceRoots[0].appending(path: "без-текста.m4a"))
+        try workspace.refresh()
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+        runner.connect(to: workspace)
+
+        XCTAssertEqual(runner.requestTitle(for: "без-текста.m4a"), .queued)
+        await waitUntil { runner.failure != nil }
+
+        XCTAssertEqual(runner.failure, "У записи нет расшифровки — заголовок придумывать не из чего.")
+        XCTAssertEqual(runner.pendingCount, 0)
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline {

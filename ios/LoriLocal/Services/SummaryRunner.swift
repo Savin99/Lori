@@ -388,19 +388,19 @@ final class SummaryRunner: ObservableObject {
         // гасит процесс из своей очереди. Работа не теряется — откладывается.
         guard isForeground() else {
             waitingReason = "Заголовки продолжатся после возвращения в Lori"
-            note("заголовки: жду возвращения в Lori — в фоне графический процессор недоступен (в очереди \(postponed.count))")
+            note("заголовки: жду возвращения в Lori — в фоне графический процессор недоступен (в очереди \(postponed.count))", reason: "фон")
             return
         }
         guard transcription?.isIdle != false else {
             waitingReason = "Заголовки ждут завершения расшифровки"
-            note("заголовки: жду конца расшифровки (в очереди \(postponed.count))")
+            note("заголовки: жду конца расшифровки (в очереди \(postponed.count))", reason: "расшифровка")
             return
         }
         guard let variant = choose() else {
             let obstacle = obstacle()
             waitingReason = obstacle?.message
             if obstacle == .notEnoughMemory {
-                note("заголовки: мало памяти — свободно \(availableMemory() / 1_048_576) МБ, повторю через 5 с")
+                note("заголовки: мало памяти — свободно \(availableMemory() / 1_048_576) МБ, повторяю каждые 5 с", reason: "память")
                 if memoryRetry == nil {
                     memoryRetry = Task { [weak self] in
                         do { try await Task.sleep(for: .seconds(5)) } catch { return }
@@ -410,7 +410,7 @@ final class SummaryRunner: ObservableObject {
                     }
                 }
             } else {
-                note("заголовки: модели нет — ждут \(postponed.count)")
+                note("заголовки: модели нет — ждут \(postponed.count)", reason: "нет модели")
             }
             return
         }
@@ -448,6 +448,7 @@ final class SummaryRunner: ObservableObject {
         if Task.isCancelled { return .cancelled }
         guard let source else {
             note("заголовок: нет расшифровки — «\(name)»")
+            if request.force { failure = "У записи нет расшифровки — заголовок придумывать не из чего." }
             return .dropped
         }
         guard source.characters > Self.minimumCharacters else {
@@ -537,11 +538,14 @@ final class SummaryRunner: ObservableObject {
         ((path as NSString).lastPathComponent as NSString).deletingPathExtension
     }
 
-    /// Причина простоя — в журнал, но одна и та же строка не повторяется: drain
-    /// зовут на каждое возвращение и каждую заявку.
-    private func note(_ line: String) {
-        guard line != lastNote else { return }
-        lastNote = line
+    /// Причина простоя — в журнал, но одна и та же причина подряд не повторяется:
+    /// drain зовут на каждое возвращение, каждую заявку и каждые 5 секунд, пока
+    /// мало памяти. Числа в строке (очередь, свободные мегабайты) повтором не
+    /// считаются — сравнивается причина, а не текст.
+    private func note(_ line: String, reason: String? = nil) {
+        let key = reason ?? line
+        guard key != lastNote else { return }
+        lastNote = key
         Diagnostics.note(line)
     }
 }
