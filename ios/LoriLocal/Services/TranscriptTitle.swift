@@ -8,6 +8,9 @@ import Foundation
 enum TranscriptTitle {
     static let titleLimit = 42
     static let snippetLimit = 120
+    /// Граница мысли раньше этого числа знаков дала бы заголовок из пары слов
+    /// («Ок.», «Так.»), поэтому тогда берётся следующая граница.
+    static let minimumTitle = 12
 
     /// Текст расшифровки без служебной обвязки: заголовка файла, подписи движка,
     /// строки режима, предупреждений о пропусках, таймкодов и меток говорящих.
@@ -35,20 +38,32 @@ enum TranscriptTitle {
             .joined(separator: " ")
     }
 
+    /// Всё, что карточке нужно от текста, — одним разбором: заголовок,
+    /// продолжение под ним и начало текста для чужого заголовка.
+    struct Parts: Equatable, Sendable {
+        let title: String?
+        /// Продолжение текста после того, что ушло в заголовок.
+        let snippet: String?
+        /// Текст с самого начала.
+        let head: String?
+    }
+
+    /// Части карточки из уже очищенного текста (`plain`, `text(of:)`).
+    static func parts(of text: String) -> Parts {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return Parts(title: nil, snippet: nil, head: nil) }
+        let head = shortened(clean, limit: snippetLimit, ellipsis: true)
+        guard let split = split(clean) else { return Parts(title: nil, snippet: head, head: head) }
+        // Вся расшифровка уместилась в заголовок — продолжать нечем, и лучше
+        // показать текст ещё раз, чем пустоту.
+        let snippet = shortened(split.rest.isEmpty ? clean : split.rest, limit: snippetLimit, ellipsis: true)
+        return Parts(title: split.title, snippet: snippet, head: head)
+    }
+
     /// Название: первая фраза, обрезанная по слову. Точка в конце не нужна —
     /// это заголовок, а не предложение.
     static func title(from markdown: String) -> String? {
-        let text = plain(from: markdown)
-        guard !text.isEmpty else { return nil }
-
-        // Границей считаем конец мысли: точку, вопрос, двоеточие или тире —
-        // но только если она не в самом начале, иначе заголовок выйдет из двух слов.
-        let sentenceEnd = text.firstIndex { ".!?…:—".contains($0) }
-        var candidate = text
-        if let sentenceEnd, text.distance(from: text.startIndex, to: sentenceEnd) >= 12 {
-            candidate = String(text[text.startIndex..<sentenceEnd])
-        }
-        return shortened(candidate, limit: titleLimit)
+        parts(of: plain(from: markdown)).title
     }
 
     /// Сниппет: продолжение текста под названием, одна-две строки.
@@ -59,47 +74,158 @@ enum TranscriptTitle {
     /// строкой ниже. Две строки на карточке — слишком дорогое место, чтобы
     /// тратить их на повтор.
     static func snippet(from markdown: String) -> String? {
-        let text = plain(from: markdown)
-        guard !text.isEmpty else { return nil }
-
-        let rest = continuation(of: text)
-        // Вся расшифровка уместилась в заголовок — продолжать нечем, и лучше
-        // показать текст ещё раз, чем пустоту.
-        return shortened(rest.isEmpty ? text : rest, limit: snippetLimit, ellipsis: true)
+        parts(of: plain(from: markdown)).snippet
     }
 
     /// Текст с начала — для карточек, у которых заголовок не из расшифровки.
     static func head(from markdown: String) -> String? {
-        let text = plain(from: markdown)
-        guard !text.isEmpty else { return nil }
-        return shortened(text, limit: snippetLimit, ellipsis: true)
+        parts(of: plain(from: markdown)).head
     }
 
-    /// Текст после того, что ушло в заголовок.
+    /// Текст после того, что ушло в заголовок. Принимает очищенный текст.
     static func continuation(of text: String) -> String {
-        guard let head = title(from: text) else { return text }
-        let clean = head.hasSuffix("…") ? String(head.dropLast()) : head
-        guard let range = text.range(of: clean) else { return text }
+        split(text)?.rest ?? text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        var rest = String(text[range.upperBound...])
+    /// Заголовок и остаток текста после него — одним проходом, чтобы сниппет
+    /// начинался ровно там, где кончился заголовок.
+    static func split(_ text: String) -> (title: String, rest: String)? {
+        let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !clean.isEmpty else { return nil }
+        let end = boundary(in: clean).map { clean.index(clean.startIndex, offsetBy: $0) } ?? clean.endIndex
+        var title = shortened(String(clean[..<end]), limit: titleLimit)
+        // Короткая запись целиком уходит в заголовок вместе со своей точкой.
+        while title.hasSuffix(".") { title.removeLast() }
+        title = title.trimmingCharacters(in: .whitespaces)
+        guard !title.isEmpty else { return nil }
+
+        guard let range = clean.range(of: title) else { return (title, clean) }
+        var rest = clean[range.upperBound...]
         // Заголовок обрывается на границе мысли, и продолжение начинается с
         // её знака: «. Дальше…» читается как ошибка вёрстки.
-        while let first = rest.first, ".!?…:—,".contains(first) || first.isWhitespace {
+        while let first = rest.first, ".!?…:—,;".contains(first) || first.isWhitespace {
             rest.removeFirst()
         }
-        return rest.trimmingCharacters(in: .whitespacesAndNewlines)
+        return (title, String(rest).trimmingCharacters(in: .whitespacesAndNewlines))
     }
 
+    // MARK: - Граница первой фразы
+
+    /// Знаки конца предложения. Идущие подряд («...», «?!») считаются одной
+    /// границей — по первому знаку серии.
+    private static let enders: Set<Character> = [".", "!", "?", "…"]
+    /// Конец мысли внутри предложения: «Значит, по корпусу Славы: сначала…»
+    /// даёт заголовок до двоеточия.
+    private static let pauses: Set<Character> = [":", "—"]
+    /// После точки может стоять закрывающая кавычка или скобка — граница всё равно есть.
+    private static let closers: Set<Character> = ["»", "\"", "”", "’", ")", "]"]
+    /// Сокращения, после которых точка — не конец фразы. Расшифровка их почти не
+    /// пишет, но «т.е.» и «г.» встречаются, и «Мы решили, т» — хуже, чем ничего.
+    private static let abbreviations: Set<String> = [
+        "т", "е", "д", "п", "н", "г", "гг", "в", "вв", "др", "пр", "см", "им", "ул",
+        "тыс", "млн", "млрд", "руб", "коп", "напр", "проф",
+    ]
+
+    /// Смещение (в знаках) первой границы мысли, после которой заголовок уже не
+    /// из пары слов, или nil, если в пределах заголовка её нет.
+    ///
+    /// Граница — только знак, за которым пробел или конец текста. Так дата
+    /// «27.08», версия «3.5» и время «12:30» фразу не рвут: раньше считался любой
+    /// знак, и заголовок выходил «Совещание 27». Слишком ранняя граница («Ок.»)
+    /// уступает следующей, а не отменяет поиск. Дальше `titleLimit` смотреть
+    /// незачем: такой кусок всё равно режется по длине, как и текст без границ.
+    static func boundary(in text: String) -> Int? {
+        let window = Array(text.prefix(titleLimit + 2))
+        for index in window.indices where index <= titleLimit {
+            let mark = window[index]
+            let next: Character? = index + 1 < window.count ? window[index + 1] : nil
+            let breaks = next.map { $0.isWhitespace || closers.contains($0) } ?? true
+
+            if enders.contains(mark) {
+                // Середина серии «...» — граница будет на её последнем знаке.
+                if let next, enders.contains(next) { continue }
+                guard breaks else { continue }
+                var start = index
+                while start > 0, enders.contains(window[start - 1]) { start -= 1 }
+                if mark == ".", start == index, isAbbreviation(before: index, in: window) { continue }
+                if start >= minimumTitle { return start }
+            } else if pauses.contains(mark) {
+                if mark == ":" {
+                    guard breaks else { continue }
+                } else {
+                    // Тире без пробелов — диапазон «Москва—Петербург», а не пауза.
+                    let previous: Character? = index > 0 ? window[index - 1] : nil
+                    guard previous?.isWhitespace ?? true || next?.isWhitespace ?? true else { continue }
+                }
+                if index >= minimumTitle { return index }
+            }
+        }
+        return nil
+    }
+
+    /// Точка после инициала («А. С. Петров»), сокращения или слова с точкой
+    /// внутри («т.е.»).
+    private static func isAbbreviation(before index: Int, in window: [Character]) -> Bool {
+        var word = ""
+        var cursor = index - 1
+        while cursor >= 0, window[cursor].isLetter || window[cursor] == "." {
+            word.insert(window[cursor], at: word.startIndex)
+            cursor -= 1
+        }
+        guard !word.isEmpty else { return false }
+        if word.count == 1, word.first?.isUppercase == true { return true }
+        if word.contains(".") { return true }
+        return abbreviations.contains(word.lowercased())
+    }
+
+    // MARK: - Обрезка
+
     /// Обрезка по границе слова: «Планы по RAG для ОВи…» читается хуже, чем
-    /// «Планы по RAG для…».
+    /// «Планы по RAG для…». Висящий в конце предлог или союз снимается
+    /// (`tidy`) — то же правило, что у заголовков модели.
     static func shortened(_ text: String, limit: Int, ellipsis: Bool = false) -> String {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard clean.count > limit else {
-            return clean.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:—-"))
+        guard clean.count > limit else { return clean.trimmingCharacters(in: edges) }
+        let end = clean.index(clean.startIndex, offsetBy: limit)
+        let cut = clean[..<end]
+        let words: Substring
+        if clean[end].isWhitespace {
+            // Обрезка пришлась ровно на конец слова — его не теряем.
+            words = cut
+        } else if let space = cut.lastIndex(where: \.isWhitespace) {
+            words = cut[..<space]
+        } else {
+            words = cut
         }
-        let cut = clean.prefix(limit)
-        let word = cut.lastIndex(of: " ").map { String(cut[cut.startIndex..<$0]) } ?? String(cut)
-        let trimmed = word.trimmingCharacters(in: CharacterSet(charactersIn: " ,;:—-"))
+        let trimmed = tidy(String(words))
         return ellipsis ? trimmed + "…" : trimmed
+    }
+
+    /// Знаки, которым не место на краю заголовка.
+    private static let edges = CharacterSet(charactersIn: " ,;:—–-")
+
+    /// Слова, после которых фраза явно продолжается. В конце обрезанного
+    /// названия они выглядят обрубком: «…базы знаний вместе с».
+    static let danglingWords: Set<String> = [
+        "и", "или", "а", "но", "в", "во", "на", "с", "со", "к", "ко", "по", "о", "об", "обо",
+        "у", "за", "до", "для", "из", "от", "при", "про", "без", "над", "под", "через",
+        "что", "чтобы", "как", "если", "не", "ни",
+    ]
+
+    /// Убирает хвост, который остался висеть после обрезки: союз или предлог
+    /// в конце названия, а за ним и запятую перед ним — «Отчёт по продажам, и».
+    static func tidy(_ text: String) -> String {
+        var words = text
+            .trimmingCharacters(in: edges)
+            .components(separatedBy: " ")
+            .filter { !$0.isEmpty }
+        while words.count > 1, let last = words.last?.lowercased(), danglingWords.contains(last) {
+            words.removeLast()
+            while let tail = words.last, let mark = tail.last, ",;:—–-".contains(mark) {
+                words[words.count - 1] = String(tail.dropLast())
+                if words[words.count - 1].isEmpty { words.removeLast() }
+            }
+        }
+        return words.joined(separator: " ").trimmingCharacters(in: edges)
     }
 }

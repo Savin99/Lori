@@ -155,6 +155,66 @@ final class TranscriptTitleTests: XCTestCase {
             XCTAssertFalse(value?.contains("Режим") ?? true)
         }
     }
+
+    // MARK: - Где кончается первая фраза
+
+    /// Точка между цифрами — дата или версия, а не конец фразы. Раньше заголовок
+    /// обрывался на ней: «Совещание 27», «Переходим на версию 3».
+    func testDatesAndVersionsDoNotEndTheSentence() {
+        let meeting = "Совещание 27.08 по бюджету отдела. Дальше обсуждали найм."
+        XCTAssertEqual(TranscriptTitle.title(from: meeting), "Совещание 27.08 по бюджету отдела")
+        XCTAssertEqual(TranscriptTitle.snippet(from: meeting), "Дальше обсуждали найм.")
+
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Переходим на версию 3.5 уже в понедельник. Остальное позже."),
+            "Переходим на версию 3.5 уже в понедельник"
+        )
+        XCTAssertEqual(TranscriptTitle.title(from: "27.08 планёрка по релизу. Дальше детали."), "27.08 планёрка по релизу")
+    }
+
+    /// Двоеточие во времени — тоже не граница мысли.
+    func testTimeOfDayDoesNotEndTheSentence() {
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Созвон в 12:30 по поводу релиза. Потом обед."),
+            "Созвон в 12:30 по поводу релиза"
+        )
+    }
+
+    /// «т.е.» посреди фразы — сокращение: раньше из него выходило «Мы решили, т».
+    func testAbbreviationsDoNotEndTheSentence() {
+        let title = TranscriptTitle.title(from: "Мы решили, т.е. договорились, перенести релиз на май. Остальное потом.")
+        XCTAssertEqual(title, "Мы решили, т.е. договорились, перенести")
+        // Инициалы — тоже не конец фразы.
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Встреча с А. С. Петровым по договору аренды. Потом ремонт."),
+            "Встреча с А. С. Петровым по договору"
+        )
+    }
+
+    /// Слишком ранняя граница («Ок.») — повод взять следующую, а не резать весь
+    /// текст по длине посреди фразы, как раньше: «Ок. Итак, сегодня разбираем итоги».
+    func testTooEarlyBoundaryGivesWayToTheNextOne() {
+        let text = "Ок. Итак, сегодня разбираем итоги квартала. Начнём с продаж, потом расходы."
+        XCTAssertEqual(TranscriptTitle.title(from: text), "Ок. Итак, сегодня разбираем итоги квартала")
+        XCTAssertEqual(TranscriptTitle.snippet(from: text), "Начнём с продаж, потом расходы.")
+    }
+
+    /// Обрезка по длине не оставляет висеть предлог или союз — то же правило,
+    /// что у заголовков модели (`Summarizer.tidy`).
+    func testCutNeverEndsOnAPreposition() {
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Обсуждали структуру базы знаний вместе с командой поддержки"),
+            "Обсуждали структуру базы знаний вместе"
+        )
+        XCTAssertEqual(TranscriptTitle.tidy("Отчёт по продажам, и"), "Отчёт по продажам")
+        XCTAssertEqual(Summarizer.tidy("Разбор документов для"), "Разбор документов", "правило одно на оба заголовка")
+    }
+
+    /// Заголовок — не предложение: точка в конце короткой записи ему не нужна.
+    func testShortTranscriptTitleHasNoTrailingPeriod() {
+        XCTAssertEqual(TranscriptTitle.title(from: "**[0:00–0:02]** Коротко."), "Коротко")
+        XCTAssertEqual(TranscriptTitle.title(from: "Что дальше по проекту?"), "Что дальше по проекту")
+    }
 }
 
 /// Разбор файла расшифровки для экрана записи: по тапу на реплику плеер должен
