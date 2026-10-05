@@ -9,7 +9,7 @@ final class ImportBatchTests: XCTestCase {
     private var fixture: QueueFixture!
     private var outside: URL!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         try? manager.removeItem(at: ImportInbox.staging)
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.engineKey)
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.concurrencyKey)
@@ -18,7 +18,7 @@ final class ImportBatchTests: XCTestCase {
         try manager.createDirectory(at: outside, withIntermediateDirectories: true)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         fixture?.cleanUp()
         try? manager.removeItem(at: outside)
         try? manager.removeItem(at: ImportInbox.staging)

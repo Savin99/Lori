@@ -7,12 +7,12 @@ import XCTest
 final class QueueFailureTests: XCTestCase {
     private var fixture: QueueFixture!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.engineKey)
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.concurrencyKey)
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         fixture?.cleanUp()
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.engineKey)
         UserDefaults.standard.removeObject(forKey: TranscriptionSettings.concurrencyKey)

@@ -12,7 +12,7 @@ final class WorkspaceImportTests: XCTestCase {
     private var sources: URL!
     private var workspace: WorkspaceStore!
 
-    override func setUpWithError() throws {
+    override func setUp() async throws {
         root = manager.temporaryDirectory.appending(path: "LoriImportWS-\(UUID().uuidString)", directoryHint: .isDirectory)
         sources = manager.temporaryDirectory.appending(path: "LoriImportSrc-\(UUID().uuidString)", directoryHint: .isDirectory)
         try manager.createDirectory(at: sources, withIntermediateDirectories: true)
@@ -20,7 +20,7 @@ final class WorkspaceImportTests: XCTestCase {
         workspace.start()
     }
 
-    override func tearDownWithError() throws {
+    override func tearDown() async throws {
         try? manager.removeItem(at: root)
         try? manager.removeItem(at: sources)
     }
