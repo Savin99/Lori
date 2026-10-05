@@ -74,6 +74,8 @@ final class SummaryStore: ObservableObject {
     }
 
     var pendingQueueURL: URL { url.deletingPathExtension().appendingPathExtension("pending.json") }
+    /// Сколько раз модель подряд не справилась с записью (`SummaryRunner`).
+    var failuresURL: URL { url.deletingPathExtension().appendingPathExtension("failures.json") }
 
     /// Файл заголовков есть, но не прочитался — например, до первой разблокировки
     /// после перезагрузки. Пока так, хранилище знает не все заголовки, и решать по

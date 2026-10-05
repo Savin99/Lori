@@ -36,6 +36,12 @@ final class SummaryRunner: ObservableObject {
     /// берутся самые новые, остальные — при следующих возвращениях в Lori или по
     /// кнопке в настройках (`summarizeBacklog`).
     static let backlogLimit = 10
+    /// Сколько раз подряд автомат берётся за запись, с которой модель не
+    /// справляется при том же тексте. Каждая попытка — загрузка весов и сотни
+    /// токенов на графическом процессоре; раньше безнадёжная запись повторялась
+    /// на каждом возвращении в приложение и после каждой расшифровки. Новый
+    /// текст начинает счёт заново, «Придумать заголовок» работает всегда.
+    static let automaticAttempts = 3
 
     private let models: SummaryModelStore
     private let store: SummaryStore
@@ -74,8 +80,18 @@ final class SummaryRunner: ObservableObject {
         case dropped
         /// Ушли в фон или освобождали память под расшифровку — повторим.
         case cancelled
-        case failed(String)
+        /// Модель не справилась; отпечаток — того текста, с которым не справилась.
+        case failed(String, fingerprint: String?)
     }
+
+    /// Неудачи подряд по записи при одном тексте — на диске, иначе каждый
+    /// перезапуск приложения давал бы безнадёжной записи новые попытки.
+    private struct Misses: Codable, Equatable {
+        var fingerprint: String?
+        var count: Int
+    }
+    private var misses: [String: Misses] = [:]
+    private let missesURL: URL
 
     private var postponed: [Postponed] = []
     /// Текст, пришедший вместе с заявкой в этом запуске, — только в памяти.
@@ -114,6 +130,9 @@ final class SummaryRunner: ObservableObject {
             return try await Summarizer(variant: variant, directory: directory).summary(of: text)
         }
         self.queueURL = store.pendingQueueURL
+        self.missesURL = store.failuresURL
+        if let data = try? Data(contentsOf: missesURL),
+           let saved = try? JSONDecoder().decode([String: Misses].self, from: data) { misses = saved }
         // Очередь прежних сборок хранила ещё и текст — он просто не читается.
         if let data = try? Data(contentsOf: queueURL),
            let saved = try? JSONDecoder().decode([Postponed].self, from: data) { postponed = saved }
@@ -202,7 +221,16 @@ final class SummaryRunner: ObservableObject {
             dropStaleAnswer(for: path)
             return
         }
+        // Новый текст — у модели новый шанс: счёт неудач был про прежний.
+        if let miss = misses[path], miss.fingerprint != source.fingerprint {
+            misses[path] = nil
+            persistMisses()
+        }
         if !force {
+            guard !gaveUp(on: path) else {
+                note("заголовок: «\(Self.name(of: path))» — модель уже \(Self.automaticAttempts) раза не справилась с этим текстом, автоматически не пробую")
+                return
+            }
             guard !store.isUpToDate(path, fingerprint: source.fingerprint) else { return }
             // Модель писала по другому тексту: прежний ответ виден, пока не придёт новый.
             store.markStale(path)
@@ -284,6 +312,10 @@ final class SummaryRunner: ObservableObject {
         if let source = sources.removeValue(forKey: old) { sources[new] = source }
         if tooShort.remove(old) != nil { tooShort.insert(new) }
         failedThisPass.remove(old)
+        if let miss = misses.removeValue(forKey: old) {
+            misses[new] = miss
+            persistMisses()
+        }
         revisions[new, default: 0] += 1
         persist()
     }
@@ -294,6 +326,7 @@ final class SummaryRunner: ObservableObject {
         sources[path] = nil
         tooShort.remove(path)
         failedThisPass.remove(path)
+        if misses.removeValue(forKey: path) != nil { persistMisses() }
         revisions[path, default: 0] += 1
         persist()
     }
@@ -389,6 +422,7 @@ final class SummaryRunner: ObservableObject {
         let path = entry.relativePath
         return store.needsSummary(for: path)
             && !tooShort.contains(path)
+            && !gaveUp(on: path)
             && !postponed.contains(where: { $0.path == path })
             && workspace.existingTranscript(for: entry) != nil
     }
@@ -445,7 +479,7 @@ final class SummaryRunner: ObservableObject {
             }
             return
         }
-        postponed.removeAll { !$0.force && !store.needsSummary(for: $0.path) }
+        postponed.removeAll { !$0.force && (!store.needsSummary(for: $0.path) || gaveUp(on: $0.path)) }
         guard let next = postponed.first(where: { !failedThisPass.contains($0.path) }) else {
             persist()
             waitingReason = postponed.isEmpty ? nil : "Не удалось создать заголовок. Повторю при возвращении в Lori"
@@ -503,11 +537,11 @@ final class SummaryRunner: ObservableObject {
                 for: request.path,
                 force: request.force,
                 source: source.fingerprint
-            ) else { return .failed("Не удалось сохранить заголовок.") }
+            ) else { return .failed("Не удалось сохранить заголовок.", fingerprint: source.fingerprint) }
             return .done
         } catch {
             if Task.isCancelled || error is CancellationError { return .cancelled }
-            return .failed(error.localizedDescription)
+            return .failed(error.localizedDescription, fingerprint: source.fingerprint)
         }
     }
 
@@ -525,6 +559,7 @@ final class SummaryRunner: ObservableObject {
                 sources[request.path] = nil
             }
             failedThisPass.remove(request.path)
+            if misses.removeValue(forKey: request.path) != nil { persistMisses() }
         case .dropped:
             if !superseded {
                 postponed.removeAll { $0.path == request.path }
@@ -532,11 +567,11 @@ final class SummaryRunner: ObservableObject {
             }
         case .cancelled:
             waitingReason = "Заголовки продолжатся после возвращения в Lori"
-        case .failed(let message):
+        case .failed(let message, let fingerprint):
             failedThisPass.insert(request.path)
             fail(message, for: request.path)
-            waitingReason = "Не удалось создать заголовок. Повторю при возвращении в Lori"
             Diagnostics.fault("заголовок: «\(Self.name(of: request.path))» — \(message)")
+            countMiss(request, fingerprint: fingerprint)
         }
         persist()
         running = nil
@@ -546,6 +581,44 @@ final class SummaryRunner: ObservableObject {
     }
 
     // MARK: - Вспомогательное
+
+    /// Автомат за эту запись больше не берётся: модель не справилась с её
+    /// текстом `automaticAttempts` раз подряд.
+    private func gaveUp(on path: String) -> Bool {
+        (misses[path]?.count ?? 0) >= Self.automaticAttempts
+    }
+
+    /// Ещё одна неудача по записи. Заявка остаётся в очереди и повторяется при
+    /// следующем возвращении в приложение, пока неудач при том же тексте меньше
+    /// `automaticAttempts`; потом снимается. Явная просьба считается так же —
+    /// но новое нажатие «Придумать заголовок» всегда даёт ещё одну попытку
+    /// (`requestTitle` предел не проверяет). Снимать заявку на первой же неудаче
+    /// нельзя: экран записи показывает ошибку, только пока заявка в очереди.
+    private func countMiss(_ request: Postponed, fingerprint: String?) {
+        var miss = misses[request.path] ?? Misses(fingerprint: fingerprint, count: 0)
+        if miss.fingerprint != fingerprint { miss = Misses(fingerprint: fingerprint, count: 0) }
+        miss.count += 1
+        misses[request.path] = miss
+        persistMisses()
+        let name = Self.name(of: request.path)
+        if miss.count >= Self.automaticAttempts {
+            postponed.removeAll { $0.path == request.path }
+            sources[request.path] = nil
+            waitingReason = nil
+            Diagnostics.note("заголовок: модель \(miss.count) раза подряд не справилась с «\(name)» — автоматически больше не пробую, пока текст не поменяется; «Придумать заголовок» по-прежнему работает")
+        } else {
+            waitingReason = "Не удалось создать заголовок. Повторю при возвращении в Lori"
+        }
+    }
+
+    private func persistMisses() {
+        do {
+            try FileManager.default.createDirectory(at: missesURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(misses).write(to: missesURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        } catch {
+            Diagnostics.fault("заголовки: счёт неудач не сохранился: \(error.localizedDescription)")
+        }
+    }
 
     private func fail(_ message: String, for path: String?) {
         failurePath = path

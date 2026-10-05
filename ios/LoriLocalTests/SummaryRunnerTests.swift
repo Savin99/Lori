@@ -15,6 +15,7 @@ final class SummaryRunnerTests: XCTestCase {
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: storeURL)
         try? FileManager.default.removeItem(at: storeURL.deletingPathExtension().appendingPathExtension("pending.json"))
+        try? FileManager.default.removeItem(at: storeURL.deletingPathExtension().appendingPathExtension("failures.json"))
         for root in workspaceRoots { try? FileManager.default.removeItem(at: root) }
     }
 
@@ -626,6 +627,51 @@ final class SummaryRunnerTests: XCTestCase {
         await waitUntil { self.store.entry(for: "a.m4a") == nil }
 
         XCTAssertNil(store.entry(for: "a.m4a"))
+    }
+
+    // MARK: - Безнадёжная запись
+
+    /// **Регрессия.** Запись, с которой модель не справляется, повторялась на
+    /// каждом возвращении в приложение и после каждой расшифровки — и каждый
+    /// раз это загрузка весов и сотни токенов. Теперь автомат пробует не больше
+    /// `automaticAttempts` раз при том же тексте, и счёт переживает перезапуск.
+    /// «Придумать заголовок» по-прежнему работает, новый текст — новый шанс.
+    func testHopelessRecordIsNotRetriedForever() async throws {
+        let workspace = try makeWorkspace([("a.m4a", Self.transcript, 0)])
+        let attempts = Attempts()
+        func makeRunner() -> SummaryRunner {
+            let runner = SummaryRunner(
+                models: StubModels(installed: [.light]), store: store,
+                availableMemory: { 8_000_000_000 }, isForeground: { true },
+                summarize: { _, _, _ in attempts.bump(); throw Summarizer.Failure.emptyAnswer }
+            )
+            runner.connect(to: workspace)
+            return runner
+        }
+        let runner = makeRunner()
+        for _ in 0..<6 {
+            runner.applicationDidBecomeActive()
+            try await Task.sleep(for: .milliseconds(60))
+            await waitUntil { runner.running == nil }
+        }
+        XCTAssertEqual(attempts.value, SummaryRunner.automaticAttempts)
+        XCTAssertEqual(runner.pendingCount, 0, "безнадёжная запись снята с очереди")
+        let journal = (try? String(contentsOf: Journal.url, encoding: .utf8)) ?? ""
+        XCTAssertTrue(journal.contains("не справилась с «a» — автоматически больше не пробую"))
+
+        let restarted = makeRunner()
+        restarted.applicationDidBecomeActive()
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(attempts.value, SummaryRunner.automaticAttempts, "и после перезапуска не пробует")
+
+        XCTAssertEqual(restarted.requestTitle(for: "a.m4a"), .queued)
+        await waitUntil { attempts.value == SummaryRunner.automaticAttempts + 1 && restarted.running == nil }
+        XCTAssertEqual(attempts.value, SummaryRunner.automaticAttempts + 1, "явная просьба — ещё одна попытка")
+        XCTAssertEqual(restarted.failurePath, "a.m4a")
+
+        restarted.summarize(path: "a.m4a", text: "Другой " + Self.transcript)
+        await waitUntil { attempts.value == SummaryRunner.automaticAttempts + 2 && restarted.running == nil }
+        XCTAssertEqual(attempts.value, SummaryRunner.automaticAttempts + 2, "новый текст — новый шанс")
     }
 
     // MARK: - Чья ошибка
