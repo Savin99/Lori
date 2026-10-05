@@ -186,10 +186,15 @@ struct TranscriptScreen: View {
         // файл, которого уже нет.
         .onChange(of: path) { _, _ in open() }
         .onChange(of: summaryRunner.isQueued(path)) { _, queued in
-            if !queued { titleRequested = false }
+            // Третья неудача снимает заявку с очереди тем же обновлением, что и
+            // выставляет ошибку: сбрось флаг здесь раньше обработчика ошибки —
+            // и человек не узнал бы, почему заголовка нет.
+            if !queued, summaryRunner.failurePath != path { titleRequested = false }
         }
         .onChange(of: summaryRunner.failure) { _, failure in
-            guard titleRequested, let failure else { return }
+            // `failure` у модели один на все записи: без сверки пути экран этой
+            // записи показывал бы чужую неудачу как свою.
+            guard titleRequested, let failure, summaryRunner.failurePath == path else { return }
             titleRequested = false
             notice = Notice(title: "Не получилось придумать заголовок", message: failure)
         }
