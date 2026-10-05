@@ -173,3 +173,62 @@ extension RecordTitle {
             .joined(separator: " ")
     }
 }
+
+// MARK: - Переименование
+
+extension RecordTitle {
+    /// Предел имени файла записи вместе с расширением, в байтах UTF-8.
+    ///
+    /// Файловая система берёт 255 байт на имя, но корзина приклеивает к имени
+    /// UUID с дефисом (37 байт, `WorkspaceStore.moveToTrash`): запись с именем
+    /// на пределе нельзя было бы удалить. Кириллица — два байта на букву, так
+    /// что это около сотни знаков.
+    static let maxFileNameBytes = 255 - 37
+
+    /// «Готово» без правки: заголовок тот же — переименовывать нечего, и пустое
+    /// поле тоже не повод. Раньше такое нажатие проходило весь путь
+    /// переименования, и перенос темы и имён говорящих «со старого пути на новый»
+    /// при совпавших путях их стирал.
+    static func isNoOpRename(typed: String, current: String) -> Bool {
+        let typed = typed.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        let current = current.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        return typed.isEmpty || typed == current
+    }
+
+    /// Имя файла (без расширения) по заголовку, который набрал человек.
+    ///
+    /// Сам заголовок остаётся ровно таким, как набран (`SummaryStore.setManual`);
+    /// имя файла — тот же текст, пригодный для диска. «/», «\» и «:» становятся
+    /// «-»: раньше «/» отвергался целиком, а «Запись 21:46» Файлы показывают со
+    /// слэшем. Управляющие знаки становятся пробелом. Точки в начале снимаются:
+    /// файл с точкой стал бы скрытым и пропал из списка записей. Набранное по
+    /// привычке расширение не удваивается. Длина режется по границе знака так,
+    /// чтобы и запись, и её расшифровка `.md` уложились в `maxFileNameBytes`.
+    /// nil — от имени ничего не осталось.
+    static func fileBaseName(for title: String, extension suffix: String) -> String? {
+        var text = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !suffix.isEmpty, text.lowercased().hasSuffix("." + suffix.lowercased()) {
+            text.removeLast(suffix.count + 1)
+        }
+        let replaced = text.map { character -> String in
+            if "/\\:".contains(character) { return "-" }
+            if character.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) { return " " }
+            return String(character)
+        }.joined()
+        var name = replaced.split(whereSeparator: \.isWhitespace).joined(separator: " ")
+        while let first = name.first, first == "." || first.isWhitespace { name.removeFirst() }
+
+        let reserve = max(suffix.utf8.count, "md".utf8.count) + 1
+        let budget = maxFileNameBytes - reserve
+        var bytes = 0
+        var cut = ""
+        for character in name {
+            let size = String(character).utf8.count
+            guard bytes + size <= budget else { break }
+            bytes += size
+            cut.append(character)
+        }
+        let result = cut.trimmingCharacters(in: .whitespaces)
+        return result.isEmpty ? nil : result
+    }
+}

@@ -154,4 +154,126 @@ final class WorkspaceStoreTests: XCTestCase {
 
         XCTAssertEqual(renamed, "Без текста.m4a")
     }
+
+    // MARK: - Имя записи — это заголовок, который набрал человек
+
+    /// Запись «Встреча.m4a» с расшифровкой в рабочей папке.
+    @MainActor
+    private func recordWithTranscript(_ name: String = "Встреча", in folder: String = "") throws -> WorkspaceStore {
+        let workspace = WorkspaceStore(rootURL: temporaryRoot)
+        workspace.start()
+        let directory = folder.isEmpty ? temporaryRoot! : temporaryRoot.appending(path: folder, directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let audio = directory.appending(path: "\(name).m4a")
+        try Data("звук".utf8).write(to: audio)
+        _ = try workspace.saveTranscript(Transcript(text: "Текст расшифровки."), for: audio, engine: "Стаб")
+        try workspace.refresh()
+        return workspace
+    }
+
+    /// **Регрессия.** Точка в имени («27.08») принималась за расширение: запись
+    /// теряла «.m4a» и пропадала из списка, а расшифровка становилась «Совещание 27.md».
+    @MainActor
+    func testDotInTheNameKeepsTheAudioExtension() throws {
+        let workspace = try recordWithTranscript()
+
+        let renamed = try workspace.renameRecording(at: "Встреча.m4a", toName: "Совещание 27.08")
+
+        XCTAssertEqual(renamed, "Совещание 27.08.m4a")
+        XCTAssertEqual(workspace.audio.map(\.relativePath), ["Совещание 27.08.m4a"], "запись осталась в списке")
+        let moved = try workspace.entry(at: renamed)
+        XCTAssertEqual(workspace.existingTranscript(for: moved), "Transcripts/Совещание 27.08.md")
+        XCTAssertTrue(try workspace.readText(at: "Transcripts/Совещание 27.08.md").contains("Текст расшифровки."))
+    }
+
+    /// Знаки, которые файловая система не примет, в имени файла заменяются, а не
+    /// отвергаются: заголовок человек видит ровно таким, как набрал.
+    @MainActor
+    func testPathCharactersAreReplacedInsteadOfRejected() throws {
+        let workspace = try recordWithTranscript(in: "Recordings")
+
+        let renamed = try workspace.renameRecording(at: "Recordings/Встреча.m4a", toName: "Итоги: план/факт")
+
+        XCTAssertEqual(renamed, "Recordings/Итоги- план-факт.m4a", "папка та же, «/» и «:» стали «-»")
+        XCTAssertNotNil(try? workspace.readText(at: "Transcripts/Итоги- план-факт.md"), "расшифровка с тем же именем")
+    }
+
+    /// Имя, которое уже занято, — понятная ошибка, и обе записи на месте.
+    @MainActor
+    func testTakenNameIsRefusedInPlainRussian() throws {
+        let workspace = try recordWithTranscript("А")
+        try Data("звук".utf8).write(to: temporaryRoot.appending(path: "Б.m4a"))
+        try workspace.refresh()
+
+        XCTAssertThrowsError(try workspace.renameRecording(at: "Б.m4a", toName: "А")) { error in
+            XCTAssertEqual(error as? WorkspaceError, .nameTaken)
+            XCTAssertEqual(error.localizedDescription, "Запись с таким именем уже есть")
+        }
+        XCTAssertEqual(Set(workspace.audio.map(\.relativePath)), ["А.m4a", "Б.m4a"])
+    }
+
+    /// Чужая (или осиротевшая) расшифровка с тем же именем тоже занимает имя:
+    /// иначе запись без текста молча получила бы чужой.
+    @MainActor
+    func testNameOfAnExistingTranscriptIsTaken() throws {
+        let workspace = WorkspaceStore(rootURL: temporaryRoot)
+        workspace.start()
+        try workspace.writeText("# Сирота\n\nЧужой текст.", at: "Transcripts/Сирота.md")
+        try Data("звук".utf8).write(to: temporaryRoot.appending(path: "Новая.m4a"))
+        try workspace.refresh()
+
+        XCTAssertThrowsError(try workspace.renameRecording(at: "Новая.m4a", toName: "Сирота")) { error in
+            XCTAssertEqual(error as? WorkspaceError, .nameTaken)
+        }
+    }
+
+    /// Длинный заголовок режется так, чтобы имя файла и его копия в корзине
+    /// (с приставкой UUID) уложились в предел файловой системы — 255 байт.
+    @MainActor
+    func testLongTitleFitsTheFileSystemLimit() throws {
+        let workspace = try recordWithTranscript()
+        let long = String(repeating: "Очень длинное название встречи ", count: 12)
+
+        let renamed = try workspace.renameRecording(at: "Встреча.m4a", toName: long)
+
+        let name = (renamed as NSString).lastPathComponent
+        XCTAssertTrue(name.hasSuffix(".m4a"))
+        XCTAssertLessThanOrEqual(name.utf8.count, RecordTitle.maxFileNameBytes)
+        XCTAssertTrue(long.hasPrefix((name as NSString).deletingPathExtension))
+        try workspace.moveToTrash(renamed)
+    }
+
+    /// Точка в начале сделала бы файл скрытым — запись пропала бы из списка.
+    @MainActor
+    func testLeadingDotsAreDropped() throws {
+        let workspace = try recordWithTranscript()
+
+        let renamed = try workspace.renameRecording(at: "Встреча.m4a", toName: "...и так далее")
+
+        XCTAssertEqual(renamed, "и так далее.m4a")
+        XCTAssertEqual(workspace.audio.map(\.relativePath), ["и так далее.m4a"])
+    }
+
+    /// Тот же заголовок — ни одного движения файлов.
+    @MainActor
+    func testSameNameMovesNothing() throws {
+        let workspace = try recordWithTranscript()
+
+        XCTAssertEqual(try workspace.renameRecording(at: "Встреча.m4a", toName: " Встреча "), "Встреча.m4a")
+        XCTAssertNotNil(try? workspace.readText(at: "Transcripts/Встреча.md"))
+    }
+
+    /// Смена одного регистра букв — тоже переименование, а не «имя занято», даже
+    /// там, где файловая система регистр не различает (симулятор на Mac).
+    @MainActor
+    func testChangingOnlyTheCaseWorks() throws {
+        let workspace = try recordWithTranscript("встреча")
+
+        let renamed = try workspace.renameRecording(at: "встреча.m4a", toName: "Встреча")
+
+        XCTAssertEqual(renamed, "Встреча.m4a")
+        XCTAssertEqual(workspace.audio.map(\.relativePath), ["Встреча.m4a"])
+        let moved = try workspace.entry(at: renamed)
+        XCTAssertEqual(workspace.existingTranscript(for: moved), "Transcripts/Встреча.md")
+    }
 }

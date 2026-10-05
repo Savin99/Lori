@@ -122,6 +122,7 @@
 		A895961AB6EC146D22EDCCAC /* EngineControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 958482505815CBF0FF333E76 /* EngineControls.swift */; };
 		A9BE1426B256DFF55C7AD33F /* LoriLocalApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = FD27086457AC5990EC03B2A4 /* LoriLocalApp.swift */; };
 		AE30AE70DDF3FCC015460E60 /* StampedTranscript.swift in Sources */ = {isa = PBXBuildFile; fileRef = 08DB23870DCFC5594C6FC6A2 /* StampedTranscript.swift */; };
+		B0DF2178FDB223D488B6161C /* RecordRename.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3E1271AB18307525208DA4B9 /* RecordRename.swift */; };
 		B1FCADC55E135B3C06ECD008 /* SelfTest.swift in Sources */ = {isa = PBXBuildFile; fileRef = 94C80D1B8557556C871738D1 /* SelfTest.swift */; };
 		B2D651FAA789527FDFB6CE88 /* SummaryStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 022AA1C30E85B68E2BFB71E2 /* SummaryStore.swift */; };
 		B40404372B7647DB6B57D7BA /* TranscriptPDF.swift in Sources */ = {isa = PBXBuildFile; fileRef = E8E2DA14DA4A29525E37AB3D /* TranscriptPDF.swift */; };
@@ -217,6 +218,7 @@
 		362B6B0D03628661DA6198E4 /* ImportInboxTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportInboxTests.swift; sourceTree = "<group>"; };
 		37A66A9907C0CBF9789DBA69 /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		3D430EACFBC16AEAD64651AB /* EngineSessionCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineSessionCache.swift; sourceTree = "<group>"; };
+		3E1271AB18307525208DA4B9 /* RecordRename.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordRename.swift; sourceTree = "<group>"; };
 		3FD3E14667CC01F00BE34A75 /* TranscriptionUITests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionUITests.swift; sourceTree = "<group>"; };
 		410C3642F6D954114BA9CC0E /* MarkdownText.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MarkdownText.swift; sourceTree = "<group>"; };
 		41FB57FCC0F3E96FF73DB071 /* AssistantThreadTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AssistantThreadTests.swift; sourceTree = "<group>"; };
@@ -400,6 +402,7 @@
 				204A0A42B2A51EFDA4109246 /* ObsidianExport.swift */,
 				D3D25FA83D0F740CB976CDBE /* OpenAITranscriber.swift */,
 				0F40A8DC60DD6DB993A3BBDB /* RecordingDurations.swift */,
+				3E1271AB18307525208DA4B9 /* RecordRename.swift */,
 				670B6E497D6F9731DD5D6175 /* RecordTitle.swift */,
 				E1912E246C52F4F20224F7FF /* RecoveryProbe.swift */,
 				9D64AFD357989A6B8CEBC866 /* RepetitionCheck.swift */,
@@ -772,6 +775,7 @@
 				874F44074CE375BA664D8AF6 /* OpenAITranscriber.swift in Sources */,
 				9D2AFA65D6D2CACABAC23224 /* ProviderScreen.swift in Sources */,
 				37778DCFC5697E18831FD851 /* RNNTGreedyDecoder.swift in Sources */,
+				B0DF2178FDB223D488B6161C /* RecordRename.swift in Sources */,
 				EF36AE221DB36AB5F5D8E026 /* RecordTitle.swift in Sources */,
 				9A177D53976AC3E7ACCA3B46 /* RecordingBanner.swift in Sources */,
 				4D2E133BF73CAA4E418106ED /* RecordingDurations.swift in Sources */,

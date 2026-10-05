@@ -139,6 +139,114 @@ final class RecordTitleResolveTests: XCTestCase {
     }
 }
 
+/// Имя файла из заголовка и «Готово» без правки.
+final class RecordFileNameTests: XCTestCase {
+    func testNoOpRenameIsDetected() {
+        XCTAssertTrue(RecordTitle.isNoOpRename(typed: " Моё  интервью ", current: "Моё интервью"))
+        XCTAssertTrue(RecordTitle.isNoOpRename(typed: "   ", current: "Моё интервью"), "пустое поле — не имя")
+        XCTAssertFalse(RecordTitle.isNoOpRename(typed: "Моё интервью 2", current: "Моё интервью"))
+    }
+
+    func testFileNameKeepsTheTitleButNotItsPathCharacters() {
+        XCTAssertEqual(RecordTitle.fileBaseName(for: "Совещание 27.08", extension: "m4a"), "Совещание 27.08")
+        XCTAssertEqual(RecordTitle.fileBaseName(for: "Запись 21:46", extension: "m4a"), "Запись 21-46")
+        XCTAssertEqual(RecordTitle.fileBaseName(for: "план/факт\\итог", extension: "m4a"), "план-факт-итог")
+        XCTAssertEqual(RecordTitle.fileBaseName(for: "Две\nстроки\tи таб", extension: "m4a"), "Две строки и таб")
+        XCTAssertEqual(RecordTitle.fileBaseName(for: "Встреча.M4A", extension: "m4a"), "Встреча", "расширение не удваивается")
+        XCTAssertEqual(RecordTitle.fileBaseName(for: ". .скрытая", extension: "m4a"), "скрытая")
+        XCTAssertNil(RecordTitle.fileBaseName(for: " ... ", extension: "m4a"))
+    }
+
+    /// Обрезка по границе знака: половина буквы в имени файла — битый UTF-8.
+    func testLongFileNameIsCutOnACharacterBoundary() throws {
+        let name = try XCTUnwrap(RecordTitle.fileBaseName(for: String(repeating: "Ёж🦔", count: 100), extension: "aiff"))
+        XCTAssertLessThanOrEqual(name.utf8.count + ".aiff".utf8.count, RecordTitle.maxFileNameBytes)
+        XCTAssertTrue(String(repeating: "Ёж🦔", count: 100).hasPrefix(name))
+    }
+}
+
+/// Переименование целиком: файл, заголовок, тема, говорящие.
+@MainActor
+final class RecordRenameTests: XCTestCase {
+    private var root: URL!
+    private var workspace: WorkspaceStore!
+    private var summaries: SummaryStore!
+    private var topics: TopicStore!
+    private var speakers: SpeakerNames!
+    private var previews: TranscriptPreviews!
+    private let path = "Recordings/Встреча.m4a"
+
+    override func setUp() async throws {
+        root = FileManager.default.temporaryDirectory
+            .appending(path: "LoriRename-\(UUID().uuidString)", directoryHint: .isDirectory)
+        workspace = WorkspaceStore(rootURL: root)
+        workspace.start()
+        let recordings = root.appending(path: "Recordings", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true)
+        let audio = recordings.appending(path: "Встреча.m4a")
+        try Data("звук".utf8).write(to: audio)
+        _ = try workspace.saveTranscript(Transcript(text: "Обсудили бюджет на квартал. Потом найм."), for: audio)
+        try workspace.refresh()
+        summaries = SummaryStore(url: root.appending(path: "summaries.json"))
+        topics = TopicStore(url: root.appending(path: "topics.json"))
+        speakers = SpeakerNames(url: root.appending(path: "speakers.json"))
+        previews = TranscriptPreviews()
+        topics.assign("Работа", to: path)
+        speakers.rename("S1", to: "Лёша", in: path)
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func commit(_ typed: String, current: String) throws -> String? {
+        try RecordRename.commit(
+            try workspace.entry(at: path), typed: typed, currentTitle: current,
+            workspace: workspace, summaries: summaries, topics: topics, speakers: speakers, previews: previews
+        )
+    }
+
+    /// **Регрессия.** «Готово» без правки стирало тему и имена говорящих: перенос
+    /// «со старого пути на новый» шёл по одному и тому же пути.
+    func testDoneWithoutChangesKeepsTopicAndSpeakerNames() throws {
+        XCTAssertNil(try commit("Обсудили бюджет на квартал", current: "Обсудили бюджет на квартал"))
+
+        XCTAssertEqual(topics.topic(for: path), "Работа")
+        XCTAssertEqual(speakers.name(of: "S1", in: path), "Лёша")
+        XCTAssertNil(summaries.entry(for: path), "ручным заголовком ничего не стало")
+    }
+
+    /// Заголовок остаётся ровно таким, как набран; файл — пригодным для диска;
+    /// тема, говорящие и превью едут за записью.
+    func testRenameMovesEverythingAndKeepsTheTitleAsTyped() async throws {
+        previews.load(try workspace.entry(at: path), in: workspace)
+        let deadline = Date().addingTimeInterval(3)
+        while previews.preview(for: path) == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(20)) }
+
+        let renamed = try XCTUnwrap(try commit("Итоги: план/факт", current: "Обсудили бюджет на квартал"))
+
+        XCTAssertEqual(renamed, "Recordings/Итоги- план-факт.m4a")
+        XCTAssertEqual(summaries.title(for: renamed), "Итоги: план/факт")
+        XCTAssertEqual(summaries.entry(for: renamed)?.origin, .manual)
+        XCTAssertEqual(topics.topic(for: renamed), "Работа")
+        XCTAssertNil(topics.topic(for: path))
+        XCTAssertEqual(speakers.name(of: "S1", in: renamed), "Лёша")
+        XCTAssertNotNil(previews.preview(for: renamed), "карточка не падает в дату")
+        let resolved = RecordTitle.resolve(try workspace.entry(at: renamed), summaries: summaries, previews: previews)
+        XCTAssertEqual(resolved.title, "Итоги: план/факт")
+        XCTAssertEqual(resolved.source, .manual)
+    }
+
+    /// Новый заголовок при том же имени файла — только заголовок, без переносов.
+    func testTitleChangeWithoutFileChangeTouchesNothingElse() throws {
+        XCTAssertEqual(try commit("Встреча", current: "Обсудили бюджет на квартал"), path)
+
+        XCTAssertEqual(summaries.title(for: path), "Встреча")
+        XCTAssertEqual(topics.topic(for: path), "Работа")
+        XCTAssertEqual(speakers.name(of: "S1", in: path), "Лёша")
+    }
+}
+
 /// Превью карточки: читается один раз и перечитывается, когда текст поменялся.
 @MainActor
 final class TranscriptPreviewsTests: XCTestCase {

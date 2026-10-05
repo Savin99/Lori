@@ -28,6 +28,8 @@ enum WorkspaceError: LocalizedError, Equatable, Sendable {
     case notFound
     case importFailed
     case invalidName
+    /// Имя занято другой записью или её расшифровкой.
+    case nameTaken
 
     var errorDescription: String? {
         switch self {
@@ -37,6 +39,7 @@ enum WorkspaceError: LocalizedError, Equatable, Sendable {
         case .notFound: "Файл не найден."
         case .importFailed: "Не удалось добавить файл в рабочую папку Lori."
         case .invalidName: "Укажи корректное название без символов «/» и «\\»."
+        case .nameTaken: "Запись с таким именем уже есть"
         }
     }
 }
@@ -246,12 +249,41 @@ final class WorkspaceStore: ObservableObject {
         guard fileManager.fileExists(atPath: source.path) else { throw WorkspaceError.notFound }
         try rejectSymbolicLinks(for: relativePath)
         try rejectSymbolicLinks(for: destinationPath)
-        guard !fileManager.fileExists(atPath: destination.path) else {
-            throw CocoaError(.fileWriteFileExists)
-        }
         try fileManager.createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try fileManager.moveItem(at: source, to: destination)
+        if fileManager.fileExists(atPath: destination.path) {
+            guard isSameFile(source, destination) else { throw WorkspaceError.nameTaken }
+            // Тот же файл под другим регистром букв (файловая система регистр не
+            // различает): прямой перенос она считает занятым местом, поэтому —
+            // через временное имя рядом.
+            let detour = source.deletingLastPathComponent().appending(path: ".lori-rename-\(UUID().uuidString)")
+            try fileManager.moveItem(at: source, to: detour)
+            do {
+                try fileManager.moveItem(at: detour, to: destination)
+            } catch {
+                try? fileManager.moveItem(at: detour, to: source)
+                throw error
+            }
+        } else {
+            try fileManager.moveItem(at: source, to: destination)
+        }
         try refresh()
+    }
+
+    /// Один и тот же файл: так выглядит смена регистра букв там, где файловая
+    /// система регистр не различает (симулятор на Mac).
+    private func isSameFile(_ first: URL, _ second: URL) -> Bool {
+        guard let one = try? first.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier,
+              let other = try? second.resourceValues(forKeys: [.fileResourceIdentifierKey]).fileResourceIdentifier
+        else { return false }
+        return one.isEqual(other)
+    }
+
+    /// Имя свободно — или занято тем же самым файлом.
+    private func ensureFree(_ destinationPath: String, for sourcePath: String?) throws {
+        let destination = try safeURL(for: destinationPath)
+        guard fileManager.fileExists(atPath: destination.path) else { return }
+        if let sourcePath, let source = try? safeURL(for: sourcePath), isSameFile(source, destination) { return }
+        throw WorkspaceError.nameTaken
     }
 
     /// Переименование внутри той же папки. Расширение файла сохраняется, если пользователь его не указал.
@@ -274,7 +306,9 @@ final class WorkspaceStore: ObservableObject {
         let isDirectory = (try? source.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true
         let oldExtension = (oldName as NSString).pathExtension
         var finalName = cleanName
-        if !isDirectory, !oldExtension.isEmpty, (cleanName as NSString).pathExtension.isEmpty {
+        // Сравнивается окончание, а не `pathExtension`: у «Совещание 27.08»
+        // «расширение» — «08», и запись теряла «.m4a» и пропадала из списка.
+        if !isDirectory, !oldExtension.isEmpty, !cleanName.lowercased().hasSuffix(".\(oldExtension.lowercased())") {
             finalName = "\(cleanName).\(oldExtension)"
         }
 
@@ -402,31 +436,62 @@ final class WorkspaceStore: ObservableObject {
         )
     }
 
-    /// Уже готовая расшифровка для аудиофайла, если она есть.
     /// Переименовать запись вместе с её расшифровкой.
+    ///
+    /// `newName` — заголовок так, как его набрал человек; имя файла выводится
+    /// из него (`RecordTitle.fileBaseName`): «/» и «:» становятся «-», длина
+    /// укладывается в предел файловой системы, расширение записи сохраняется.
+    /// Сам заголовок хранит `SummaryStore.setManual` — ровно таким, как набран.
     ///
     /// Расшифровка ищется по имени аудиофайла (`Transcripts/<имя>.md`), поэтому
     /// переименование только аудио оставляло текст сиротой: на экране он
     /// пропадал, и запись приходилось прогонять заново. Здесь оба файла едут
     /// вместе, а если текст переименовать не удалось — возвращается и аудио,
-    /// чтобы не остаться в разъехавшемся состоянии.
+    /// чтобы не остаться в разъехавшемся состоянии. Занятое имя — ошибка
+    /// `nameTaken` до того, как сдвинулся хоть один файл.
+    ///
+    /// Возвращает новый путь записи; тот же путь — имя файла не поменялось.
     @discardableResult
     func renameRecording(at relativePath: String, toName newName: String) throws -> String {
-        let transcript = (try? entry(at: relativePath)).flatMap(existingTranscript(for:))
-        let renamed = try renameItem(at: relativePath, toName: newName)
-        guard let transcript else { return renamed }
+        var parts = relativePath.split(separator: "/", omittingEmptySubsequences: true).map(String.init)
+        guard let oldName = parts.popLast() else { throw WorkspaceError.unsafePath }
+        let parent = parts.joined(separator: "/")
+        let suffix = (oldName as NSString).pathExtension
+        guard let base = RecordTitle.fileBaseName(for: newName, extension: suffix) else {
+            throw WorkspaceError.invalidName
+        }
+        let fileName = suffix.isEmpty ? base : "\(base).\(suffix)"
+        let destination = parent.isEmpty ? fileName : "\(parent)/\(fileName)"
+        guard destination != relativePath else { return relativePath }
 
-        let base = ((renamed as NSString).lastPathComponent as NSString).deletingPathExtension
+        // Расшифровку проверяем на диске, а не по снимку папки: снимок мог не
+        // успеть за только что сохранённым текстом.
+        let transcriptPath = RecordTitle.transcriptPath(forAudio: relativePath)
+        let transcript = (try? fileURL(for: transcriptPath)) != nil ? transcriptPath : nil
+        let transcriptDestination = RecordTitle.transcriptPath(forAudio: destination)
+
+        // Имя занято — другой записью, её расшифровкой или осиротевшим текстом:
+        // переименование в него слило бы две записи в одну. Запись с тем же
+        // именем в соседней папке тоже в счёт: расшифровка у них была бы общей.
+        try ensureFree(destination, for: relativePath)
+        try ensureFree(transcriptDestination, for: transcript)
+        let namesake = audio.contains { other in
+            other.relativePath != relativePath && (other.name as NSString).deletingPathExtension == base
+        }
+        guard !namesake else { throw WorkspaceError.nameTaken }
+
+        try rename(relativePath, to: destination)
+        guard let transcript, transcript != transcriptDestination else { return destination }
         do {
-            _ = try renameItem(at: transcript, toName: "\(base).md")
+            try rename(transcript, to: transcriptDestination)
         } catch {
-            let oldName = (relativePath as NSString).lastPathComponent
-            try? renameItem(at: renamed, toName: oldName)
+            try? rename(destination, to: relativePath)
             throw error
         }
-        return renamed
+        return destination
     }
 
+    /// Уже готовая расшифровка для аудиофайла, если она есть.
     func existingTranscript(for entry: WorkspaceEntry) -> String? {
         let base = (entry.name as NSString).deletingPathExtension
         let relativePath = "Transcripts/\(base).md"
