@@ -568,6 +568,66 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertEqual(runner.pendingCount, 0)
     }
 
+    // MARK: - Текст стал коротким
+
+    /// **Регрессия.** Расшифровку переписали в пару слов (или стёрли) — а на
+    /// карточке навсегда оставался заголовок модели, написанный по прежнему
+    /// тексту. Модель по короткому тексту не пишет, значит любой её ответ при
+    /// таком тексте — про другой текст.
+    func testShortRewriteDropsTheModelTitle() {
+        store.store(title: "Бюджет на квартал", detail: "Обсудили бюджет.", for: "a.m4a",
+                    source: SummaryStore.fingerprint(of: Self.transcript))
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+
+        runner.summarize(path: "a.m4a", text: "Коротко.")
+
+        XCTAssertNil(store.entry(for: "a.m4a"), "заголовка модели больше нет")
+        let resolved = RecordTitle.resolve(
+            summary: store.entry(for: "a.m4a"),
+            preview: TranscriptPreviews.Preview.make(from: "Коротко."),
+            recordedAt: .now
+        )
+        XCTAssertEqual(resolved.title, "Коротко", "дальше — правила первой фразы")
+        XCTAssertEqual(resolved.source, .transcript)
+    }
+
+    /// При ручном имени снимается только описание модели; пустая расшифровка — тот же случай.
+    func testEmptiedTranscriptDropsTheModelDetailButKeepsTheManualName() {
+        store.setManual(title: "Моё интервью", for: "a.m4a")
+        store.store(title: "—", detail: "Старое описание.", for: "a.m4a")
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+
+        runner.transcriptSaved(path: "a.m4a", text: "")
+
+        XCTAssertEqual(store.title(for: "a.m4a"), "Моё интервью")
+        XCTAssertNil(store.detail(for: "a.m4a"))
+        XCTAssertEqual(SummaryStore(url: storeURL).entry(for: "a.m4a")?.manual, true, "и на диске")
+    }
+
+    /// «Придумать заголовок» по короткой записи отвечает «заголовком служит первая
+    /// фраза» — и после этого так и должно быть, а не висеть старый заголовок модели.
+    func testExplicitRequestForShortTextMakesItsAnswerTrue() {
+        store.store(title: "Бюджет на квартал", detail: "Обсудили бюджет.", for: "a.m4a")
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+
+        XCTAssertEqual(runner.requestTitle(for: "a.m4a", text: "Коротко."), .tooShort)
+
+        XCTAssertNil(store.entry(for: "a.m4a"))
+    }
+
+    /// Текст прочитали из файла, когда до записи дошла очередь, — и он короткий.
+    func testShortTextReadAtRunTimeDropsTheModelTitle() async throws {
+        let workspace = try makeWorkspace([("a.m4a", "Коротко.", 0)])
+        store.store(title: "Бюджет на квартал", detail: "Обсудили бюджет.", for: "a.m4a")
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+        runner.connect(to: workspace)
+
+        runner.transcriptSaved(path: "a.m4a")
+        await waitUntil { self.store.entry(for: "a.m4a") == nil }
+
+        XCTAssertNil(store.entry(for: "a.m4a"))
+    }
+
     private func waitUntil(_ condition: @MainActor () -> Bool) async {
         let deadline = Date().addingTimeInterval(5)
         while !condition(), Date() < deadline {

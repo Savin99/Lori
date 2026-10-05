@@ -181,6 +181,29 @@ final class SummaryStore: ObservableObject {
         return true
     }
 
+    /// Текст записи стал слишком коротким для модели или пустым. Модель по такому
+    /// тексту не пишет, значит любой её прежний ответ — про другой текст, и
+    /// сверять отпечаток незачем. Заголовок модели уходит совсем — дальше
+    /// работают правила первой фразы; при ручном имени снимается только описание.
+    /// Раньше старый заголовок оставался навсегда, а «Придумать заголовок» тем
+    /// временем отвечал «заголовком служит первая фраза» — неправду.
+    @discardableResult
+    func dropGenerated(_ relativePath: String) -> Bool {
+        guard var entry = entries[relativePath] else { return false }
+        if entry.origin == .generated {
+            entries.removeValue(forKey: relativePath)
+        } else {
+            guard entry.summarized || entry.stale || entry.source != nil || !entry.detail.isEmpty else { return false }
+            entry.detail = ""
+            entry.summarized = false
+            entry.source = nil
+            entry.stale = false
+            entries[relativePath] = entry
+        }
+        save()
+        return true
+    }
+
     /// Переименование файла меняет ключ: запись не должна терять заголовок.
     func move(from old: String, to new: String) {
         guard old != new, let entry = entries.removeValue(forKey: old) else { return }

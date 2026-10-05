@@ -190,6 +190,7 @@ final class SummaryRunner: ObservableObject {
         let source = Source(text: text)
         guard source.characters > Self.minimumCharacters else {
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(Self.name(of: path))»")
+            dropStaleAnswer(for: path)
             return
         }
         if !force {
@@ -224,7 +225,11 @@ final class SummaryRunner: ObservableObject {
     func requestTitle(for path: String, text: String? = nil) -> TitleRequest {
         failure = nil
         let source = text.map(Source.init(text:))
-        if let source, source.characters <= Self.minimumCharacters { return .tooShort }
+        if let source, source.characters <= Self.minimumCharacters {
+            // Ответ «заголовком служит первая фраза» обязан стать правдой.
+            dropStaleAnswer(for: path)
+            return .tooShort
+        }
         guard store.allowGeneratedTitle(for: path) else {
             return .failed("Не удалось сохранить настройку заголовка. Попробуйте ещё раз.")
         }
@@ -454,6 +459,7 @@ final class SummaryRunner: ObservableObject {
         guard source.characters > Self.minimumCharacters else {
             tooShort.insert(request.path)
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(name)»")
+            dropStaleAnswer(for: request.path)
             if request.force { failure = "В записи слишком мало текста, чтобы придумать заголовок." }
             return .dropped
         }
@@ -514,6 +520,13 @@ final class SummaryRunner: ObservableObject {
     }
 
     // MARK: - Вспомогательное
+
+    /// Текст записи стал коротким или пустым: прежний ответ модели написан по
+    /// другому тексту и врал бы на карточке (`SummaryStore.dropGenerated`).
+    private func dropStaleAnswer(for path: String) {
+        guard store.dropGenerated(path) else { return }
+        note("заголовок: текст «\(Self.name(of: path))» короче \(Self.minimumCharacters) знаков — ответ модели снят, заголовок из первой фразы")
+    }
 
     private func transcriptURL(for path: String) -> URL? {
         try? workspace?.fileURL(for: RecordTitle.transcriptPath(forAudio: path))

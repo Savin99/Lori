@@ -151,6 +151,24 @@ final class SummaryStoreTests: XCTestCase {
         XCTAssertFalse(store.needsSummary(for: "a.m4a"))
     }
 
+    /// Текст стал коротким: ответ модели снимается, а имя человека и имя файла — нет.
+    func testDroppingModelOutputKeepsHumanAndFileNames() {
+        store.store(title: "Название модели", detail: "Описание", for: "gen.m4a")
+        store.setManual(title: "Моё имя", for: "man.m4a")
+        store.store(title: "—", detail: "Описание", for: "man.m4a")
+        store.setImported(title: "Совещание 27.08", for: "imp.m4a")
+
+        XCTAssertTrue(store.dropGenerated("gen.m4a"))
+        XCTAssertNil(store.entry(for: "gen.m4a"), "заголовок модели ушёл совсем")
+        XCTAssertTrue(store.dropGenerated("man.m4a"))
+        XCTAssertEqual(store.title(for: "man.m4a"), "Моё имя")
+        XCTAssertNil(store.detail(for: "man.m4a"))
+        XCTAssertFalse(store.dropGenerated("imp.m4a"), "у имени файла ответа модели нет")
+        XCTAssertEqual(store.title(for: "imp.m4a"), "Совещание 27.08")
+        XCTAssertFalse(store.dropGenerated("none.m4a"))
+        XCTAssertNil(SummaryStore(url: url).entry(for: "gen.m4a"), "и на диске")
+    }
+
     /// При ручном имени устаревшее описание тоже заменяется новым.
     func testStaleDetailIsReplacedUnderManualName() {
         store.setManual(title: "Моё имя", for: "a.m4a")
