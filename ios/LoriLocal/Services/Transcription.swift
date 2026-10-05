@@ -714,6 +714,14 @@ final class TranscriptionService: ObservableObject {
 
     /// Отменяет расшифровку: и ту, что идёт, и ту, что ещё ждёт.
     func cancel(_ relativePath: String) {
+        removeFromQueue(relativePath, persist: true)
+        admit()
+    }
+
+    /// Снимает запись со всего, что её держало: очереди, запуска, «Прервано», сохранённого
+    /// задания и счёта пачки. Планировщик не трогает — это забота вызывающего, чтобы
+    /// «Отменить всё» не освобождало место на каждой записи по отдельности.
+    private func removeFromQueue(_ relativePath: String, persist: Bool) {
         if let job = configurations.removeValue(forKey: relativePath) {
             GeminiTranscriber.cleanupRemoteFiles(for: job)
             BackgroundTranscriptionTransport.shared.cancel(jobID: job.id)
@@ -726,13 +734,12 @@ final class TranscriptionService: ObservableObject {
         starting.remove(relativePath)
         forget(interrupted: relativePath)
         batchSettle(relativePath, as: .cancelled)
-        if inFlight.removeValue(forKey: relativePath) != nil {
+        if inFlight.removeValue(forKey: relativePath) != nil, persist {
             _ = persistJobs()
         }
         // Задача снимается, но из `active` её убирает сама завершившаяся работа:
         // иначе освободившееся место занял бы кто-то раньше, чем движок отпустил модель.
         active[relativePath]?.cancel()
-        admit()
     }
 
     /// «Отменить всё»: снимает и то, что идёт, и то, что запускается, и то, что ждёт,
@@ -752,13 +759,17 @@ final class TranscriptionService: ObservableObject {
             .union(active.keys)
             .union(interrupted)
             .union(inFlight.keys)
-        // Очередь пустеет целиком первой: иначе каждый `cancel` освобождал бы место, и
-        // следующая ждущая успевала бы стартовать — чтобы тут же быть снятой.
+        // Очередь пустеет целиком первой: иначе освободившееся место успевало бы занять
+        // следующей ждущей — чтобы тут же её снять.
         waiting.removeAll()
         // Порядок снятия не важен для результата, но важен для воспроизводимости.
-        for path in paths.sorted() { cancel(path) }
+        for path in paths.sorted() { removeFromQueue(path, persist: false) }
+        // Планировщик и сохранение — один раз на всё: пока снимается последняя запись, итог
+        // пачки обязан уже знать про все предыдущие, иначе отчёт о пачке недосчитал бы снятых.
+        if !paths.isEmpty { _ = persistJobs() }
         queued = []
         waitingForMemory = []
+        admit()
     }
 
     /// Систему перестало устраивать, что мы работаем: процесс забирают.

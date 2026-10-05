@@ -470,6 +470,27 @@ final class QueueStateTests: XCTestCase {
         XCTAssertTrue(restarted.interrupted.isEmpty)
     }
 
+    /// Записи ждут, и идти нечему (приложение не на виду, фона нет): итог пачки всё равно
+    /// знает про каждую снятую — а не только про первую, после которой очередь опустела.
+    func testCancelAllOfOnlyWaitingRecordsCountsEveryOneInTheOutcome() async throws {
+        fixture = try QueueFixture(files: three)
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate)
+        service.applicationDidEnterBackground()
+
+        try enqueueAll(three, on: service)
+        XCTAssertEqual(service.queued, three, "в фоне без фоновой задачи записи только ждут")
+        service.cancelAll()
+
+        XCTAssertTrue(service.isIdle)
+        XCTAssertEqual(service.lastBatch?.total, 3)
+        XCTAssertEqual(service.lastBatch?.cancelled, 3, "снята каждая")
+        XCTAssertEqual(service.batchTotal, 0)
+        XCTAssertTrue(InterruptedRecords.load(from: fixture.store).isEmpty)
+        let reached = await gate.arrivals()
+        XCTAssertTrue(reached.isEmpty)
+    }
+
     func testCancelAllIsHarmlessWhenNothingIsGoingOn() throws {
         fixture = try QueueFixture()
         let service = fixture.service(gate: QueueGate())
