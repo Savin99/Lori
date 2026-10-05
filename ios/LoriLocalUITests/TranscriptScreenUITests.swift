@@ -186,6 +186,44 @@ final class TranscriptScreenUITests: XCTestCase {
         save("record-more-menu-full")
     }
 
+    /// Прерванную запись не переименовать: переименование через `forget` сняло бы
+    /// её сохранённое задание. Пункта нет ни в меню долгого нажатия, ни в свайпе, а
+    /// на экране записи заголовок — не кнопка и «Переименовать» в «…» выключено.
+    /// «Продолжить» тест не нажимает: прерванная запись набора нужна снимкам.
+    func testInterruptedRecordCannotBeRenamed() throws {
+        let app = launch(engine: "elevenlabs", extra: ["--recovery-probe"])
+        let card = find("Прервано", in: app)
+        try XCTSkipUnless(
+            card.exists,
+            "нет прерванной записи — прогони design/redesign-2026-10-05/seed-record-states.sh"
+        )
+        reveal(card, in: app)
+
+        card.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Тема"].waitForExistence(timeout: 5), "меню долгого нажатия открылось")
+        XCTAssertTrue(app.buttons["Удалить"].exists)
+        XCTAssertFalse(app.buttons["Переименовать"].exists, "у прерванной записи в меню нет «Переименовать»")
+        // Меню закрывается тапом мимо — у самого края, вне карточки.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.42)).tap()
+        XCTAssertTrue(app.buttons["Тема"].waitForNonExistence(timeout: 5))
+
+        try openCard(withStatus: "Прервано", in: app)
+        XCTAssertFalse(app.buttons["recordTitle"].exists, "заголовок прерванной записи — не кнопка переименования")
+        app.buttons["transcriptMenu"].tap()
+        let rename = app.buttons["Переименовать"]
+        XCTAssertTrue(rename.waitForExistence(timeout: 3), "пункт в «…» виден")
+        XCTAssertFalse(rename.isEnabled, "но выключен")
+        // Мимо меню — в пустой низ экрана, подальше от «Продолжить».
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88)).tap()
+        XCTAssertTrue(rename.waitForNonExistence(timeout: 5))
+        close(app)
+
+        reveal(card, in: app)
+        card.swipeLeft()
+        XCTAssertTrue(app.buttons["Удалить"].waitForExistence(timeout: 5), "свайп открыл действия")
+        XCTAssertFalse(app.buttons["Переименовать"].exists, "и в свайпе «Переименовать» нет")
+    }
+
     /// У короткой записи заголовок — первая фраза; просьба придумать другой
     /// отвечает словами и в очередь модели ничего не ставит.
     func testShortRecordKeepsFirstPhraseAsTitle() throws {
