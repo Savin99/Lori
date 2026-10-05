@@ -8,6 +8,10 @@ struct LoriLocalApp: App {
     @StateObject private var summaries = SummaryStore()
     @StateObject private var summaryModels = SummaryModelStore()
     @StateObject private var summaryRunner: SummaryRunner
+    /// Заголовки и сниппеты из расшифровок — на уровне приложения, а не экрана:
+    /// расшифровку, сохранённую движком, надо перечитать и тогда, когда список
+    /// ещё не построен, а Dynamic Island берёт отсюда же название записи.
+    @StateObject private var previews: TranscriptPreviews
     /// Расшифровка живёт на уровне приложения, а не экрана: её очередь переживает
     /// уходы с главного экрана, а фоновая задача приходит от системы и не должна
     /// зависеть от того, построен ли уже `ContentView`.
@@ -30,13 +34,32 @@ struct LoriLocalApp: App {
         let runner = SummaryRunner(models: models, store: summaries)
         _summaryRunner = StateObject(wrappedValue: runner)
 
+        let previews = TranscriptPreviews()
+        _previews = StateObject(wrappedValue: previews)
+
         // Сервис и его фоновое сопровождение знают друг о друге: `unowned` в одну
         // сторону, `weak` в другую — цикла нет, а собрать их можно только здесь.
-        let transcription = TranscriptionService(interruptedStore: RecoveryProbe.enabled ? RecoveryProbe.queue : InterruptedRecords.url)
+        let transcription = TranscriptionService(
+            engines: Self.engines(),
+            interruptedStore: RecoveryProbe.enabled ? RecoveryProbe.queue : InterruptedRecords.url
+        )
         let runway = TranscriptionRunway(service: transcription)
         transcription.runway = runway
         runner.connect(to: workspace, transcription: transcription)
-        transcription.didSaveTranscript = { [weak runner] path, text in runner?.summarize(path: path, text: text) }
+        // Расшифровка легла на диск: модель заголовков получает текст сразу, а
+        // карточка перечитывает файл — иначе до перезапуска она держала бы
+        // заголовок из прошлого текста или «Запись 21:46».
+        transcription.didSaveTranscript = { [weak runner, weak previews, weak workspace] path, text in
+            runner?.transcriptSaved(path: path, text: text)
+            if let workspace { previews?.transcriptSaved(path, in: workspace) }
+        }
+        // В Dynamic Island — тот же заголовок, что на карточке: «2 из 5 · Совещание
+        // по бюджету», а не `Recording-2026-09-01T12-00-00Z`.
+        runway.displayTitle = { [weak workspace, weak summaries, weak previews] path in
+            guard let workspace, let summaries, let previews else { return nil }
+            let recordedAt = workspace.audio.first { $0.relativePath == path }?.modifiedAt ?? .now
+            return RecordTitle.resolve(path: path, recordedAt: recordedAt, summaries: summaries, previews: previews).title
+        }
         transcription.willStart = { [weak runner] in await runner?.prepareForTranscription() }
         transcription.didDrain = { [weak runner] in runner?.applicationDidBecomeActive() }
         _transcription = StateObject(wrappedValue: transcription)
@@ -58,6 +81,18 @@ struct LoriLocalApp: App {
     /// Unit-host не запускает задания пользовательского архива параллельно тестам.
     private var isUnitTestHost: Bool { NSClassFromString("XCTestCase") != nil }
 
+    /// Движки расшифровки. nil — настоящие. Проверочный движок QA подставляется
+    /// только в DEBUG-сборке Lori QA и только по аргументу запуска (`QAStubEngine`);
+    /// в Release этой ветки нет в коде вовсе.
+    private static func engines() -> [TranscriptionEngineKind: any Transcribing]? {
+        #if DEBUG
+        if QAStubEngine.enabled {
+            return QAStubEngine.engines(seconds: QAStubEngine.seconds(in: ProcessInfo.processInfo.arguments))
+        }
+        #endif
+        return nil
+    }
+
     var body: some Scene {
         WindowGroup {
             ContentView()
@@ -65,6 +100,7 @@ struct LoriLocalApp: App {
                 .environmentObject(summaries)
                 .environmentObject(summaryModels)
                 .environmentObject(summaryRunner)
+                .environmentObject(previews)
                 .environmentObject(transcription)
                 .environmentObject(runway)
                 // Акцент задаётся на уровне окна, а не экрана: у листа выбора

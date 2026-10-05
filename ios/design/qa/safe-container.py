@@ -30,8 +30,11 @@ def container_for(device):
 def copy_new(source, container, relative):
     """Never replace or delete existing files, including symlink targets."""
     relative = Path(relative)
+    # Documents/Inbox is where iOS leaves files shared to Lori ("Open in"); the
+    # app drains it into the attachment panel and removes it.
     allowed = ('Documents/Lori/Workspace', 'Documents/Lori/Models',
-               'Library/Application Support/Lori/Models', 'Documents/Lori/RecoveryProbe')
+               'Library/Application Support/Lori/Models', 'Documents/Lori/RecoveryProbe',
+               'Documents/Inbox')
     if relative.is_absolute() or '..' in relative.parts or not any(
             relative == Path(p) or Path(p) in relative.parents for p in allowed):
         raise ValueError('Destination must be a QA fixture directory')

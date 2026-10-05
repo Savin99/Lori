@@ -17,15 +17,11 @@ final class TranscriptPreviews: ObservableObject {
         /// имя от человека, и обрезать текст «по заголовку» тогда бессмысленно:
         /// сниппет начинался бы с середины фразы.
         let head: String?
-        /// Длина расшифровки в знаках. Нужна панели, чтобы сказать до отправки,
-        /// сколько текста уйдёт ассистенту. Считается здесь, потому что файл
-        /// на этом месте уже прочитан — ради одной цифры его не открывают заново.
-        var characters: Int = 0
 
         /// Карточка по тексту файла — одним разбором, а не тремя.
         static func make(from markdown: String) -> Preview {
             let parts = TranscriptTitle.parts(of: TranscriptTitle.plain(from: markdown))
-            return Preview(title: parts.title, snippet: parts.snippet, head: parts.head, characters: markdown.count)
+            return Preview(title: parts.title, snippet: parts.snippet, head: parts.head)
         }
     }
 

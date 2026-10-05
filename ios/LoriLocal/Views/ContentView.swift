@@ -59,20 +59,30 @@ enum LoriFont {
     static let control = Font.system(.body, weight: .semibold)
 }
 
-/// Главный экран: список расшифровок.
+/// Главный экран: библиотека записей, а не пульт.
 ///
-/// Карточка отвечает на вопрос «что это за запись» без открытия: заголовок из первых
-/// слов расшифровки, две строки текста, длительность и состояние. Название движка
+/// Сверху — блок очереди, единственный живой элемент; под ним записи по дням.
+/// Карточка отвечает на три вопроса без открытия: что это (заголовок), что
+/// внутри (описание), что с ней (только если не готова). Название движка
 /// сюда не выведено — это настройка, а не свойство записи.
 struct ContentView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
-    @StateObject private var recorder = AudioCaptureStore()
     @EnvironmentObject private var transcription: TranscriptionService
     @EnvironmentObject private var runway: TranscriptionRunway
+    @EnvironmentObject private var summaries: SummaryStore
+    @EnvironmentObject private var summaryModels: SummaryModelStore
+    @EnvironmentObject private var summaryRunner: SummaryRunner
+    /// Превью живут на уровне приложения: расшифровку, сохранённую движком, надо
+    /// перечитать и тогда, когда этот экран ещё не построен (`LoriLocalApp`).
+    @EnvironmentObject private var previews: TranscriptPreviews
+    @StateObject private var recorder = AudioCaptureStore()
     @StateObject private var search = TranscriptSearchStore()
     @StateObject private var topics = TopicStore()
     @StateObject private var durations = RecordingDurations()
-    @StateObject private var previews = TranscriptPreviews()
+    @StateObject private var engines = ContentView.makeEngineDirectory()
+    @StateObject private var composer = ComposerModel()
+    @StateObject private var speakers = SpeakerNames()
+    @StateObject private var speed = TranscriptionSpeed()
 
     @State private var showSettings = false
     @State private var opened: WorkspaceEntry?
@@ -84,28 +94,48 @@ struct ContentView: View {
     @State private var topicTarget: WorkspaceEntry?
     @State private var renameTarget: WorkspaceEntry?
     @State private var renameDraft = ""
+    /// Заголовок, который был виден, когда открылось окно переименования. С ним
+    /// сравнивается набранное: «Готово» без правки ничего не переименовывает.
+    @State private var renameOriginal = ""
     @State private var newTopicName = ""
     @State private var showNewTopic = false
     @State private var share: SharePayload?
     /// Запись, для которой спрашивают формат экспорта.
     @State private var shareTarget: WorkspaceEntry?
+    /// Запись, удаление которой ждёт подтверждения.
+    @State private var deleteTarget: WorkspaceEntry?
+    @State private var showStopQueue = false
+    @State private var notice: ImportNotice.Message?
+    /// Почему фона нет — показывается по «почему?» в блоке очереди.
+    @State private var backgroundExplanation: String?
+    /// Сколько файлов сейчас принимается в работу; ноль — приёма нет.
+    @State private var importing = 0
+    @State private var showEnginePicker = false
     @FocusState private var searchFocused: Bool
 
     @AppStorage(TranscriptionSettings.autoTranscribeKey) private var autoTranscribe = true
     @AppStorage(TranscriptionSettings.engineKey) private var engineRaw = TranscriptionEngineKind.gigaam.rawValue
-    @StateObject private var engines = EngineDirectory()
-    @EnvironmentObject private var summaries: SummaryStore
-    @EnvironmentObject private var summaryModels: SummaryModelStore
-    @EnvironmentObject private var summaryRunner: SummaryRunner
-    @State private var showEnginePicker = false
-    @StateObject private var composer = ComposerModel()
-    @StateObject private var speakers = SpeakerNames()
-    @StateObject private var speed = TranscriptionSpeed()
-    @State private var importingAttached = false
+    /// Подсказку про модель заголовков убрали крестиком — навсегда.
+    @AppStorage("titlesHintDismissed") private var titlesHintDismissed = false
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
+        dialogs(sheets(screen))
+            .fileImporter(
+                isPresented: $showFileImporter,
+                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .aiff],
+                allowsMultipleSelection: true,
+                onCompletion: attachFiles
+            )
+            // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
+            // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
+            .environmentObject(recorder)
+            .environmentObject(speakers)
+            .environmentObject(speed)
+    }
+
+    private var screen: some View {
         ZStack {
             LoriPalette.canvas.ignoresSafeArea()
 
@@ -129,84 +159,13 @@ struct ContentView: View {
             }
         }
         .tint(LoriPalette.lime)
-        .sheet(isPresented: $showSettings) {
-            SettingsRoot(transcription: transcription, topics: topics)
-        }
-        .sheet(item: $opened) { entry in
-            TranscriptScreen(
-                entry: entry,
-                transcription: transcription,
-                topics: topics,
-                previews: previews,
-                isRecording: recorder.isCapturing
-            )
-        }
-        .sheet(item: $topicTarget) { entry in
-            TopicSheet(
-                topics: topics,
-                title: title(for: entry),
-                path: entry.relativePath,
-                suggestion: suggestion(for: entry)
-            )
-        }
-        .sheet(item: $share) { payload in
-            ShareSheet(payload: payload)
-        }
-        .confirmationDialog(
-            "Поделиться расшифровкой",
-            isPresented: isPresented($shareTarget),
-            titleVisibility: .visible,
-            presenting: shareTarget
-        ) { entry in
-            ForEach(TranscriptExportFormat.allCases) { format in
-                Button(format.title) { export(entry, as: format) }
-            }
-        } message: { _ in
-            Text("PDF удобно читать и отправлять, Markdown — работать с текстом дальше.")
-        }
-        .fileImporter(
-            isPresented: $showFileImporter,
-            allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .aiff],
-            allowsMultipleSelection: true,
-            onCompletion: attachFiles
-        )
-        .alert("Переименовать", isPresented: isPresented($renameTarget)) {
-            TextField("Название", text: $renameDraft)
-            Button("Отмена", role: .cancel) { renameTarget = nil }
-            Button("Готово") { commitRename() }
-        }
-        .alert("Новая тема", isPresented: $showNewTopic) {
-            TextField("Название темы", text: $newTopicName)
-            Button("Отмена", role: .cancel) { newTopicName = "" }
-            Button("Добавить") {
-                if let added = topics.add(newTopicName) { topicFilter = added }
-                newTopicName = ""
-            }
-        }
-        .alert("Lori", isPresented: Binding(
-            get: { activeError != nil },
-            set: { if !$0 { clearErrors() } }
-        )) {
-            Button("Скопировать") {
-                UIPasteboard.general.string = activeError
-                clearErrors()
-            }
-            Button("OK", role: .cancel) { clearErrors() }
-        } message: {
-            Text(activeError ?? "")
-        }
-        // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
-        // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
-        .environmentObject(recorder)
-        .environmentObject(speakers)
-        .environmentObject(speed)
     }
 
     // MARK: - Шапка
 
-    /// Шапка без названия экрана. «Расшифровки» — единственное, что здесь могло
-    /// быть написано, и это ровно то, на что человек и так смотрит: список
-    /// расшифровок занимает весь экран. Освободившуюся строку заняли темы.
+    /// Шапка без названия экрана: слева — меню тем, подписанное тем, что сейчас
+    /// показано («Все записи ▾» или имя темы), справа — поиск и настройки.
+    /// Больше здесь ничего нет: всё остальное — в карточках и в панели.
     private var header: some View {
         Group {
             if isSearching {
@@ -219,18 +178,23 @@ struct ContentView: View {
                 .onChange(of: query) { _, value in search.apply(value) }
                 .padding(.horizontal, 20)
             } else {
-                HStack(spacing: 8) {
+                HStack(spacing: 4) {
                     topicMenu
 
-                    Spacer(minLength: 0)
+                    Spacer(minLength: 8)
 
                     CircleIconButton(symbol: "magnifyingglass", label: "Искать по расшифровкам") {
                         isSearching = true
                         searchFocused = true
-                        search.reindex(workspace)
+                        // Тот же заголовок, что на карточке: строка поиска и так
+                        // подписана датой, повторять её в заголовке незачем.
+                        search.reindex(workspace) { entry in
+                            cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry)
+                        }
                     }
                     CircleIconButton(symbol: "gearshape", label: "Настройки") { showSettings = true }
                 }
+                .padding(.leading, 20)
                 .padding(.trailing, 14)
             }
         }
@@ -238,8 +202,8 @@ struct ContentView: View {
         .padding(.bottom, 8)
     }
 
-    /// Темы больше не занимают шапку и не требуют горизонтального свайпа:
-    /// одна иконка открывает нативный список, а галочка сохраняет контекст выбора.
+    /// Меню тем. Подпись — то, что сейчас на экране: иконка фильтра сама по себе
+    /// не говорила, открыт ли весь архив или одна тема.
     private var topicMenu: some View {
         Menu {
             Button { topicFilter = nil } label: {
@@ -266,105 +230,219 @@ struct ContentView: View {
                 Label("Новая тема", systemImage: "plus")
             }
         } label: {
-            Image(systemName: "line.3.horizontal.decrease")
-                .font(LoriFont.control)
-                .foregroundStyle(topicFilter == nil ? LoriPalette.ink : LoriPalette.lime)
-                .frame(width: 40, height: 40)
-                .contentShape(Circle())
+            HStack(spacing: 6) {
+                Image(systemName: "line.3.horizontal.decrease")
+                    .font(LoriFont.meta.weight(.semibold))
+                    .foregroundStyle(LoriPalette.muted)
+                Text(topicFilter ?? "Все записи")
+                    .font(LoriFont.cardTitle)
+                    .foregroundStyle(LoriPalette.ink)
+                    .lineLimit(1)
+                Image(systemName: "chevron.down")
+                    .font(LoriFont.tiny.weight(.semibold))
+                    .foregroundStyle(LoriPalette.muted)
+            }
+            .frame(minHeight: 44)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Фильтр по теме")
         .accessibilityValue(topicFilter ?? "Все записи")
         .accessibilityIdentifier("topicMenu")
-        .padding(.leading, 14)
     }
 
     // MARK: - Список записей
 
     private var recordings: some View {
         List {
+            if let summary = queueSummary {
+                Section {
+                    QueueBlock(
+                        summary: summary,
+                        backgroundReason: backgroundReason,
+                        stop: { showStopQueue = true },
+                        explainBackground: { backgroundExplanation = backgroundReason }
+                    )
+                    .onTapGesture { opened = entry(at: summary.focusPath) }
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
+                }
+            }
+
+            if showsTitlesHint {
+                Section {
+                    TitlesHint(models: summaryModels) { titlesHintDismissed = true }
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 4, leading: 20, bottom: 4, trailing: 20))
+                }
+            }
+
             if visible.isEmpty {
                 empty
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
             }
+
             ForEach(groups) { group in
                 Section {
                     ForEach(group.items) { entry in
-                        RecordingCard(
-                            entry: entry,
-                            title: title(for: entry),
-                            snippet: snippet(for: entry),
-                            stamp: stamp(for: entry),
-                            status: status(for: entry),
-                            topic: topics.topic(for: entry.relativePath),
-                            needsTopic: needsTopic(entry)
-                        )
-                        .listRowBackground(Color.clear)
-                        .listRowSeparator(.hidden)
-                        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
-                        .onTapGesture { opened = entry }
-                        .onLongPressGesture { topicTarget = entry }
-                        .task {
-                            previews.load(entry, in: workspace)
-                            if let url = try? workspace.fileURL(for: entry.relativePath) {
-                                durations.load(entry.relativePath, url: url)
-                            }
-                        }
-                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
-                            Button { topicTarget = entry } label: {
-                                Label("Тема", systemImage: "tag")
-                            }
-                            .tint(LoriPalette.lime)
-
-                            Button {
-                                renameDraft = entry.displayName
-                                renameTarget = entry
-                            } label: {
-                                Label("Переименовать", systemImage: "pencil")
-                            }
-                            .tint(LoriPalette.muted)
-                        }
-                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
-                            Button(role: .destructive) { delete(entry) } label: {
-                                Label("Удалить", systemImage: "trash")
-                            }
-
-                            // Меню в свайп-кнопку не поставить, поэтому формат
-                            // спрашивает диалог — теми же словами, что и меню
-                            // на экране записи.
-                            Button { shareTarget = entry } label: {
-                                Label("Поделиться", systemImage: "square.and.arrow.up")
-                            }
-                            .tint(LoriPalette.lime)
-
-                            Button { sendToObsidian(entry) } label: {
-                                Label("Obsidian", systemImage: "book.closed")
-                            }
-                            .tint(LoriPalette.obsidian)
-                        }
+                        row(entry)
                     }
                 } header: {
                     // Липкий заголовок едет поверх карточек. Без своей заливки
                     // «Сегодня» читалось прямо по тексту первой из них, а без
                     // отступов — вплотную к её краю.
+                    // Сверху отступ почти нулевой: у простого списка над заголовком
+                    // секции и так своя полоса, и с прежними десятью точками дни
+                    // распадались на острова.
                     Text(group.title)
                         .font(LoriFont.section)
                         .foregroundStyle(LoriPalette.muted)
                         .textCase(nil)
                         .padding(.horizontal, 20)
-                        .padding(.top, 10)
+                        .padding(.top, 2)
                         .padding(.bottom, 6)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .background(LoriPalette.canvas)
                         .listRowInsets(EdgeInsets())
+                        .accessibilityAddTraits(.isHeader)
                 }
             }
         }
         .listStyle(.plain)
         .scrollContentBackground(.hidden)
         .environment(\.defaultMinListRowHeight, 10)
+    }
+
+    /// Строка списка. Заголовок, состояние и наличие расшифровки считаются здесь
+    /// один раз и расходятся по карточке, свайпам и меню долгого нажатия — иначе
+    /// карточка и её меню могли бы разойтись в том, что считают заголовком.
+    @ViewBuilder
+    private func row(_ entry: WorkspaceEntry) -> some View {
+        let path = entry.relativePath
+        let resolved = RecordTitle.resolve(entry, summaries: summaries, previews: previews)
+        let title = cardTitle(resolved, entry)
+        let state = transcription.state(for: path)
+        let hasTranscript = workspace.existingTranscript(for: entry) != nil
+        let status = RecordStatus.make(
+            state: state,
+            hasTranscript: hasTranscript,
+            fraction: transcription.progressFraction(for: path),
+            remaining: transcription.remainingTime(for: path)
+        )
+
+        RecordingCard(
+            title: title,
+            detail: resolved.detail,
+            time: HomeFormat.time(entry.modifiedAt),
+            duration: durations.duration(for: path).map(HomeFormat.clock),
+            topic: topics.topic(for: path),
+            needsTopic: needsTopic(entry),
+            status: status,
+            perform: { _ in transcription.enqueue(entry, in: workspace) }
+        )
+        .listRowBackground(Color.clear)
+        .listRowSeparator(.hidden)
+        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
+        .onTapGesture { opened = entry }
+        .contextMenu {
+            contextMenu(for: entry, title: title, state: state, hasTranscript: hasTranscript, action: status?.action)
+        }
+        .task {
+            previews.load(entry, in: workspace)
+            if let url = try? workspace.fileURL(for: path) {
+                durations.load(path, url: url)
+            }
+        }
+        // «Поделиться» — главный глагол: файл уходит в ИИ снаружи, и это одно
+        // движение пальцем от края. Без расшифровки делиться нечем, и полный
+        // свайп тогда не делает ничего неожиданного.
+        .swipeActions(edge: .leading, allowsFullSwipe: hasTranscript) {
+            if hasTranscript {
+                // Меню в свайп-кнопку не поставить, поэтому формат спрашивает
+                // диалог — теми же словами, что и меню на экране записи.
+                Button { shareTarget = entry } label: {
+                    Label("Поделиться", systemImage: "square.and.arrow.up")
+                }
+                .tint(LoriPalette.lime)
+            }
+            Button { topicTarget = entry } label: {
+                Label("Тема", systemImage: "tag")
+            }
+            .tint(LoriPalette.muted)
+        }
+        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+            // Без `role: .destructive`: такая кнопка сама убирает строку, ещё до
+            // подтверждения, а удаление здесь всегда переспрашивается.
+            Button { deleteTarget = entry } label: {
+                Label("Удалить", systemImage: "trash")
+            }
+            .tint(LoriPalette.danger)
+
+            if !state.isActive {
+                Button { startRename(entry, title: title) } label: {
+                    Label("Переименовать", systemImage: "pencil")
+                }
+                .tint(LoriPalette.muted)
+            }
+
+            if hasTranscript {
+                Button { sendToObsidian(entry) } label: {
+                    Label("Obsidian", systemImage: "book.closed")
+                }
+                .tint(LoriPalette.obsidian)
+            }
+        }
+    }
+
+    /// Долгое нажатие — все действия с записью в одном месте. Раньше оно сразу
+    /// открывало выбор темы, и про остальное можно было узнать только свайпом.
+    @ViewBuilder
+    private func contextMenu(
+        for entry: WorkspaceEntry,
+        title: String,
+        state: TranscriptionRecordState,
+        hasTranscript: Bool,
+        action: RecordStatus.Action?
+    ) -> some View {
+        if hasTranscript {
+            Menu {
+                ForEach(TranscriptExportFormat.allCases) { format in
+                    Button { export(entry, as: format) } label: {
+                        Text(format.title)
+                        Text(format.note)
+                        Image(systemName: format.icon)
+                    }
+                }
+            } label: {
+                Label("Поделиться", systemImage: "square.and.arrow.up")
+            }
+        }
+        if !state.isActive {
+            Button { startRename(entry, title: title) } label: {
+                Label("Переименовать", systemImage: "pencil")
+            }
+        }
+        Button { topicTarget = entry } label: {
+            Label("Тема", systemImage: "tag")
+        }
+        if hasTranscript {
+            Button { sendToObsidian(entry) } label: {
+                Label("Отправить в Obsidian", systemImage: "book.closed")
+            }
+        }
+        if let action {
+            Button { transcription.enqueue(entry, in: workspace) } label: {
+                Label(action.title, systemImage: action == .transcribe ? "waveform" : "arrow.clockwise")
+            }
+        }
+        Divider()
+        Button(role: .destructive) { deleteTarget = entry } label: {
+            Label("Удалить", systemImage: "trash")
+        }
     }
 
     private var searchResults: some View {
@@ -379,7 +457,7 @@ struct ContentView: View {
                     .foregroundStyle(LoriPalette.muted)
                     .padding(.top, 12)
                 } else if query.trimmingCharacters(in: .whitespaces).isEmpty {
-                    Text("Поиск идёт по тексту расшифровок и по названиям записей.")
+                    Text("Поиск идёт по заголовкам и тексту расшифровок.")
                         .font(LoriFont.meta)
                         .foregroundStyle(LoriPalette.muted)
                         .padding(.top, 12)
@@ -392,7 +470,7 @@ struct ContentView: View {
                     ForEach(search.hits) { hit in
                         Button {
                             searchFocused = false
-                            opened = audioEntry(for: hit)
+                            opened = hit.entry
                         } label: {
                             SearchResultRow(hit: hit)
                         }
@@ -410,17 +488,27 @@ struct ContentView: View {
             Text(topicFilter == nil ? "Пока ни одной записи" : "В этой теме пусто")
                 .font(LoriFont.cardTitle)
                 .foregroundStyle(LoriPalette.ink)
-            Text(topicFilter == nil
-                 ? "Нажми «Записать» или принеси готовый файл. После остановки Lori сама расшифрует запись."
-                 : "Тема назначается свайпом по карточке или долгим нажатием.")
+            Text(emptyHint)
                 .font(LoriFont.meta)
                 .foregroundStyle(LoriPalette.muted)
         }
         .padding(.vertical, 18)
         .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 22))
-        .overlay(RoundedRectangle(cornerRadius: 22).stroke(LoriPalette.line, lineWidth: 1))
+        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(LoriPalette.line, lineWidth: 1))
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("emptyState")
+    }
+
+    private var emptyHint: String {
+        guard topicFilter == nil else {
+            return "Назначь тему свайпом вправо по карточке или долгим нажатием на неё."
+        }
+        // Обещать расшифровку после остановки можно, только если она и правда
+        // начнётся сама: тумблер «Расшифровывать сразу» мог быть выключен.
+        let after = autoTranscribe ? " После остановки Lori сама расшифрует запись." : ""
+        return "Запиши разговор кнопкой с микрофоном внизу или добавь готовые файлы через «+»." + after
     }
 
     // MARK: - Низ экрана
@@ -433,7 +521,8 @@ struct ContentView: View {
             speed: speed,
             engine: engine,
             mode: TranscriptionSettings.mode(for: engine.kind),
-            status: transcriptionStatus,
+            status: importing > 0 ? "Добавляю \(HomeFormat.records(importing))…" : nil,
+            busy: importing > 0,
             actions: ComposerActions(
                 record: startRecording,
                 stop: stopRecording,
@@ -444,7 +533,6 @@ struct ContentView: View {
                 },
                 pickFile: { showFileImporter = true },
                 paste: pasteAudio,
-                openSettings: { showSettings = true },
                 chooseEngine: { showEnginePicker = true },
                 setMode: { mode in
                     TranscriptionSettings.setMode(mode, for: engine.kind)
@@ -476,6 +564,17 @@ struct ContentView: View {
         EngineCatalog.descriptor(for: TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam)
     }
 
+    /// Готовность движков для чипа. С проверочным движком QA считает он, и любой
+    /// выбор в панели честно готов — иначе снимки показывали бы «Нет ключа».
+    private static func makeEngineDirectory() -> EngineDirectory {
+        #if DEBUG
+        if QAStubEngine.enabled {
+            return EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { true })
+        }
+        #endif
+        return EngineDirectory()
+    }
+
     // MARK: - Состояние
 
     private struct DayGroup: Identifiable {
@@ -503,31 +602,50 @@ struct ContentView: View {
         }
     }
 
-    /// Заголовок карточки. Порядок важен: имя, заданное человеком, главнее
-    /// придуманного моделью, а оно — первой фразы расшифровки.
-    private func title(for entry: WorkspaceEntry) -> String {
-        if let title = summaries.title(for: entry.relativePath) { return title }
-        if let title = previews.preview(for: entry.relativePath)?.title, !title.isEmpty { return title }
-        return "Запись \(LoriFormat.stamp(entry.modifiedAt))"
+    /// Блок очереди виден, пока в пачке есть записи или хоть одна запись занята.
+    private var queueSummary: QueueSummary? {
+        let current = transcription.currentPath
+        guard transcription.batchTotal > 0 || current != nil || !transcription.queued.isEmpty else { return nil }
+        return QueueSummary.make(
+            current: current,
+            queued: transcription.queued,
+            batchDone: transcription.batchDone,
+            batchTotal: transcription.batchTotal,
+            fraction: current.flatMap(transcription.progressFraction(for:)),
+            remaining: current.flatMap(transcription.remainingTime(for:)),
+            note: current.flatMap(transcription.progressText(for:)),
+            waitingForMemory: transcription.waitingForMemory,
+            title: title(forPath:)
+        )
     }
 
-    /// Под заголовком — описание от модели, а без неё две строки расшифровки.
-    ///
-    /// Продолжение уместно только тогда, когда заголовок и правда взят из
-    /// текста. Если запись названа человеком или моделью, отрезать «то, что
-    /// ушло в заголовок» не от чего — и сниппет начинался бы с середины фразы.
-    private func snippet(for entry: WorkspaceEntry) -> String? {
-        if let detail = summaries.detail(for: entry.relativePath) { return detail }
-        guard let preview = previews.preview(for: entry.relativePath) else { return nil }
-        let titleIsFromText = summaries.title(for: entry.relativePath) == nil
-        return titleIsFromText ? preview.snippet : preview.head
+    /// Про фон говорим только тогда, когда его действительно нет: обещать его
+    /// молча нельзя, но и сообщать о нём каждый раз незачем.
+    private var backgroundReason: String? {
+        guard case let .foregroundOnly(reason) = runway.state, !reason.isEmpty else { return nil }
+        return reason
     }
 
-    /// «20:20 · 4:12»: время записи и её длительность.
-    private func stamp(for entry: WorkspaceEntry) -> String {
-        let time = LoriFormat.stamp(entry.modifiedAt)
-        guard let duration = durations.duration(for: entry.relativePath) else { return time }
-        return "\(time) · \(LoriFormat.duration(duration))"
+    /// Подсказка про модель заголовков: есть что называть, модели нет, и человек
+    /// её не убирал. Во время скачивания она остаётся — показывает проценты.
+    private var showsTitlesHint: Bool {
+        !workspace.audio.isEmpty && !summaryModels.isReady && !titlesHintDismissed
+    }
+
+    /// Заголовок на карточке. У записи без заголовка — «Запись 14:58», без «вчера»
+    /// и без даты: день назван заголовком секции над карточкой, а «Запись 12 августа»
+    /// у трёх записей одного дня было бы одним и тем же словом.
+    private func cardTitle(_ resolved: RecordTitle, _ entry: WorkspaceEntry) -> String {
+        resolved.source == .date ? "Запись \(HomeFormat.time(entry.modifiedAt))" : resolved.title
+    }
+
+    private func title(forPath path: String) -> String {
+        let recordedAt = workspace.audio.first { $0.relativePath == path }?.modifiedAt ?? .now
+        return RecordTitle.resolve(path: path, recordedAt: recordedAt, summaries: summaries, previews: previews).title
+    }
+
+    private func entry(at path: String) -> WorkspaceEntry? {
+        workspace.audio.first { $0.relativePath == path } ?? (try? workspace.entry(at: path))
     }
 
     /// Пометка «Без темы» показывается только в общем списке и только когда
@@ -536,56 +654,14 @@ struct ContentView: View {
         topicFilter == nil && !topics.topics.isEmpty && topics.topic(for: entry.relativePath) == nil
     }
 
-    private func status(for entry: WorkspaceEntry) -> RecordingCard.Status? {
-        let path = entry.relativePath
-        if transcription.isRunning(path) {
-            if let fraction = transcription.progressFraction(for: path) {
-                return .init(text: "Расшифровывается · \(Int(fraction * 100))%", color: LoriPalette.info)
-            }
-            return .init(text: "Расшифровывается", color: LoriPalette.info)
-        }
-        if transcription.isQueued(path) {
-            // «Жду память» и «в очереди» — разные вещи: первое может и не пройти,
-            // если телефону и правда тесно, и человек вправе видеть разницу.
-            let waiting = transcription.waitingForMemory.contains(path) ? "Жду память" : "В очереди"
-            return .init(text: waiting, color: LoriPalette.warn)
-        }
-        if transcription.isInterrupted(path) {
-            return .init(text: "Прервано", color: LoriPalette.warn)
-        }
-        if transcription.error(for: path) != nil {
-            return .init(text: "Ошибка", color: LoriPalette.danger)
-        }
-        if workspace.existingTranscript(for: entry) == nil {
-            return .init(text: "Без расшифровки", color: LoriPalette.muted)
-        }
-        return nil
+    /// Что показать алертом. Ошибку расшифровки конкретной записи алертом не
+    /// показываем: она уже стоит на карточке с «Повторить», а алерт посреди
+    /// пачки из пяти записей только прерывает. Остальные ошибки — как были.
+    private var activeError: String? {
+        if let error = workspace.lastError ?? startError { return error }
+        guard let error = transcription.lastError else { return nil }
+        return transcription.failed.values.contains(error) ? nil : error
     }
-
-    /// Одна строка на любое число расшифровок в работе. Записей теперь может идти
-    /// несколько сразу, и «Расшифровываю запись…» в единственном числе врало бы.
-    private var transcriptionStatus: String? {
-        if importingAttached { return "Добавляю запись…" }
-        let running = transcription.running.sorted()
-        let queued = transcription.queued.count
-        guard let single = running.first else { return nil }
-        var base: String
-        if running.count == 1 {
-            let progress = transcription.progressText(for: single)
-            base = progress.map { "Расшифровываю запись… \($0)" } ?? "Расшифровываю запись…"
-        } else {
-            base = "Расшифровываю \(LoriFormat.plural(running.count, one: "запись", few: "записи", many: "записей"))"
-        }
-        if queued > 0 { base += " · в очереди \(queued)" }
-        // Про фон говорим только тогда, когда его действительно нет: обещать его
-        // молча нельзя, но и сообщать о нём каждый раз незачем.
-        if case let .foregroundOnly(reason) = runway.state, !reason.isEmpty {
-            base += " · только пока приложение открыто"
-        }
-        return base
-    }
-
-    private var activeError: String? { workspace.lastError ?? transcription.lastError ?? startError }
 
     private func clearErrors() {
         workspace.lastError = nil
@@ -598,14 +674,7 @@ struct ContentView: View {
         return topics.suggestion(for: text)
     }
 
-    /// Находка поиска — это расшифровка, а открывать нужно запись, к которой она относится.
-    private func audioEntry(for hit: SearchHit) -> WorkspaceEntry? {
-        guard hit.entry.relativePath.hasPrefix("Transcripts/") else { return hit.entry }
-        let base = (hit.entry.name as NSString).deletingPathExtension
-        return workspace.audio.first { ($0.name as NSString).deletingPathExtension == base }
-    }
-
-    private func isPresented(_ target: Binding<WorkspaceEntry?>) -> Binding<Bool> {
+    private func isPresented<T>(_ target: Binding<T?>) -> Binding<Bool> {
         Binding(get: { target.wrappedValue != nil }, set: { if !$0 { target.wrappedValue = nil } })
     }
 
@@ -628,41 +697,45 @@ struct ContentView: View {
         transcription.enqueue(entry, in: workspace)
     }
 
-    /// Выбранный файл прикрепляется к панели, а не уходит в работу сам.
-    /// Человек должен увидеть движок и цену до запуска, а не после.
+    /// Выбранные файлы прикрепляются к панели, а не уходят в работу сами.
+    /// Человек должен увидеть движок и цену до запуска, а не после. Негодный
+    /// файл не отменяет остальные: они прикрепляются, а о нём — одно сообщение.
     private func attachFiles(_ result: Result<[URL], Error>) {
-        do {
+        switch result {
+        case let .success(urls):
             // Копия снимается сразу: доступ к чужому файлу живёт, пока держат
             // security scope, а до нажатия «Расшифровать» проходит сколько угодно.
-            composer.attach(try result.get().map { try ImportInbox.stage($0) })
-        } catch {
+            let report = ImportInbox.stageAll(urls)
+            composer.attach(report.staged)
+            notice = ImportNotice.rejected(report.rejected.map(\.message))
+        case let .failure(error):
             workspace.lastError = error.localizedDescription
         }
     }
 
     /// «Поделиться» → Lori и Быстрые команды: файл уже лежит в промежуточной
-    /// папке, панели остаётся его показать.
+    /// папке или ждёт в `Documents/Inbox`, панели остаётся его показать.
     private func collectIncoming() {
-        ImportInbox.drainSystemInbox()
+        let report = ImportInbox.collectSystemInbox()
         let waiting = ImportInbox.waiting()
-        guard !waiting.isEmpty else { return }
-        composer.attach(waiting)
+        if !waiting.isEmpty { composer.attach(waiting) }
+        if let message = ImportNotice.rejected(report.rejected.map(\.message)) { notice = message }
     }
 
     private func receive(_ url: URL) {
-        do {
-            composer.attach([try ImportInbox.stage(url)])
-        } catch {
-            workspace.lastError = error.localizedDescription
-        }
+        let report = ImportInbox.stageAll([url])
+        composer.attach(report.staged)
+        if let message = ImportNotice.rejected(report.rejected.map(\.message)) { notice = message }
     }
 
-    /// Ленивый поставщик отдаёт файл асинхронно, поэтому вставка — задача,
-    /// а не мгновенное действие.
+    /// Вставка забирает **всё** аудио из буфера, по порядку. Ленивый поставщик
+    /// отдаёт файл асинхронно, поэтому это задача, а не мгновенное действие.
     private func pasteAudio() {
         Task {
             do {
-                composer.attach([try await ClipboardAudio.take()])
+                let result = try await ClipboardAudio.takeBatch()
+                composer.attach(result.urls)
+                notice = ImportNotice.pasteSkipped(result.messages, taken: result.urls.count)
             } catch {
                 workspace.lastError = error.localizedDescription
             }
@@ -670,80 +743,113 @@ struct ContentView: View {
         }
     }
 
-    /// Прикреплённое уходит в рабочую папку и в очередь — по явному нажатию.
+    /// Прикреплённое уходит в рабочую папку и в очередь — по явному нажатию,
+    /// одной пачкой: проверка движка один раз, потом копирование всех, потом все
+    /// разом в очередь (`importAndEnqueue`).
+    ///
+    /// Снимаются из панели только ушедшие в работу. `composer.clear()` здесь нельзя:
+    /// он стёр бы и промежуточные копии тех, что не вошли, — повторять было бы нечего.
     private func transcribeAttached() {
         let files = composer.attached
-        guard !files.isEmpty, !importingAttached else { return }
-        importingAttached = true
+        guard !files.isEmpty, importing == 0 else { return }
+        importing = files.count
+        let kind = engine.kind
         Task {
-            defer { importingAttached = false }
-            do {
-                var imported: [String] = []
-                for file in files {
-                    let path = try await workspace.importFileAsync(from: file.url)
-                    // Пока модель не посчитала заголовок, сохраняем понятное имя
-                    // файла. Это не запрет модели впоследствии назвать запись.
-                    summaries.setImported(title: (file.name as NSString).deletingPathExtension, for: path)
-                    imported.append(path)
-                }
-                // Только теперь: `clear` убирает файлы из промежуточной папки, и
-                // сделай он это раньше — импортировать было бы уже нечего.
-                composer.clear()
-                refresh()
-                for path in imported {
-                    guard let entry = try? workspace.entry(at: path) else { continue }
-                    transcription.enqueue(entry, in: workspace)
-                }
-            } catch {
-                workspace.lastError = error.localizedDescription
+            defer { importing = 0 }
+            let report = await transcription.importAndEnqueue(
+                files.map(\.url),
+                into: workspace,
+                using: kind
+            ) { source, path in
+                // Пока модель не посчитала заголовок, у записи понятное имя файла.
+                // Это не запрет модели впоследствии назвать запись.
+                summaries.setImported(title: (source.lastPathComponent as NSString).deletingPathExtension, for: path)
             }
+            if let problem = report.blockedBy {
+                notice = ImportNotice.blocked(problem)
+                return
+            }
+            let imported = Set(report.imported.map(\.source))
+            for file in files {
+                // Неподдерживаемый файл сервис уже убрал из промежуточной папки —
+                // в панели от него осталась бы пустая строка.
+                let gone = !FileManager.default.fileExists(atPath: file.url.path)
+                if imported.contains(file.url) || gone { composer.detach(file) }
+            }
+            notice = ImportNotice.partial(report.failed.map(\.message), imported: report.imported.count)
         }
     }
 
-    /// Заголовок от локальной модели — после того, как расшифровка легла на диск.
-    private func requestSummary(for relativePath: String) {
-        let runner = summaryRunner
-        guard let entry = try? workspace.entry(at: relativePath),
-              let transcript = workspace.existingTranscript(for: entry),
-              let markdown = try? workspace.readText(at: transcript) else { return }
-        runner.summarize(path: relativePath, text: TranscriptTitle.plain(from: markdown))
-    }
-
-    private func delete(_ entry: WorkspaceEntry) {
-        do {
-            // Расшифровка уходит в корзину вместе с записью: одна без другой не нужна.
-            if let transcript = workspace.existingTranscript(for: entry) {
-                try workspace.moveToTrash(transcript)
-            }
-            try workspace.moveToTrash(entry.relativePath)
-            topics.forget(entry.relativePath)
-            summaries.forget(entry.relativePath)
-            speakers.forget(entry.relativePath)
-            previews.invalidate(entry.relativePath)
-        } catch {
-            workspace.lastError = error.localizedDescription
-        }
+    private func startRename(_ entry: WorkspaceEntry, title: String) {
+        renameOriginal = title
+        renameDraft = title
+        renameTarget = entry
     }
 
     private func commitRename() {
         guard let entry = renameTarget else { return }
         renameTarget = nil
+        let old = entry.relativePath
+        let wasActive = transcription.state(for: old).isActive
         do {
-            // Расшифровка переезжает вместе с записью: иначе текст остаётся
-            // сиротой и на экране выглядит пропавшим.
-            let path = try workspace.renameRecording(at: entry.relativePath, toName: renameDraft)
-            // Тема привязана к пути, поэтому при переименовании её нужно перенести.
-            if let topic = topics.topic(for: entry.relativePath) {
-                topics.assign(topic, to: path)
-                topics.forget(entry.relativePath)
-            }
-            summaries.move(from: entry.relativePath, to: path)
-            speakers.move(from: entry.relativePath, to: path)
-            summaries.setManual(title: renameDraft, for: path)
-            previews.invalidate(entry.relativePath)
+            guard let new = try RecordRename.commit(
+                entry,
+                typed: renameDraft,
+                currentTitle: renameOriginal,
+                workspace: workspace,
+                summaries: summaries,
+                topics: topics,
+                speakers: speakers,
+                previews: previews,
+                runner: summaryRunner
+            ) else { return }
+            // Ошибка прошлой попытки привязана к старому пути: оставь её — и она
+            // висела бы в памяти сервиса за записью, которой больше нет.
+            if new != old, !wasActive { transcription.forget(old) }
         } catch {
-            workspace.lastError = error.localizedDescription
+            workspace.lastError = Self.renameMessage(for: error)
         }
+    }
+
+    private static func renameMessage(for error: Error) -> String {
+        switch error as? WorkspaceError {
+        case .nameTaken:
+            "Запись с таким названием уже есть. Выбери другое."
+        case .invalidName:
+            "Из этого названия не получается имя файла. Добавь буквы или цифры."
+        default:
+            "Не получилось переименовать: \(error.localizedDescription)"
+        }
+    }
+
+    /// Удаление — только после подтверждения, и сначала снимается расшифровка
+    /// записи: иначе движок дописал бы текст к записи, которая уже в корзине.
+    private func delete(_ entry: WorkspaceEntry) {
+        let path = entry.relativePath
+        transcription.forget(path)
+        summaryRunner.forget(path)
+        do {
+            // Расшифровка уходит в корзину вместе с записью: одна без другой не нужна.
+            if let transcript = workspace.existingTranscript(for: entry) {
+                try workspace.moveToTrash(transcript)
+            }
+            try workspace.moveToTrash(path)
+            topics.forget(path)
+            summaries.forget(path)
+            speakers.forget(path)
+            previews.invalidate(path)
+        } catch {
+            workspace.lastError = "Не получилось удалить запись: \(error.localizedDescription)"
+        }
+    }
+
+    /// Имя, под которым запись уходит наружу. Заголовок «Запись 09:10» для файла не
+    /// годится: файл переживёт день, и через неделю время без даты ни о чём не
+    /// скажет. Поэтому у записи без заголовка — абсолютная дата.
+    private func outgoingTitle(_ entry: WorkspaceEntry) -> (title: String, detail: String?) {
+        let resolved = RecordTitle.resolve(entry, summaries: summaries, previews: previews)
+        let title = resolved.source == .date ? HomeFormat.absoluteTitle(entry.modifiedAt) : resolved.title
+        return (title, resolved.generatedDetail)
     }
 
     /// Из списка расшифровка уходит тем же файлом, что и с экрана записи:
@@ -752,15 +858,18 @@ struct ContentView: View {
     private func export(_ entry: WorkspaceEntry, as format: TranscriptExportFormat) {
         shareTarget = nil
         guard let text = transcriptText(entry) else {
-            workspace.lastError = "У этой записи ещё нет расшифровки."
+            workspace.lastError = "У этой записи ещё нет расшифровки — делиться пока нечем."
             return
         }
+        let outgoing = outgoingTitle(entry)
         let payload = TranscriptExport.make(
             markdown: text,
-            title: title(for: entry),
+            title: outgoing.title,
             recordedAt: entry.modifiedAt,
             duration: durations.duration(for: entry.relativePath),
-            detail: summaries.detail(for: entry.relativePath),
+            // В шапку файла — только описание модели: текст записи идёт следом
+            // целиком, и повторять его начало незачем.
+            detail: outgoing.detail,
             topic: topics.topic(for: entry.relativePath),
             names: speakers.names[entry.relativePath] ?? [:]
         )
@@ -773,12 +882,15 @@ struct ContentView: View {
         }
     }
 
+    /// В Obsidian уходит то же, что «Скопировать» на экране записи: текст без
+    /// служебной разметки и с именами говорящих вместо «S1».
     private func sendToObsidian(_ entry: WorkspaceEntry) {
         guard let text = transcriptText(entry) else {
-            workspace.lastError = "У этой записи ещё нет расшифровки."
+            workspace.lastError = "У этой записи ещё нет расшифровки — отправлять пока нечего."
             return
         }
-        guard let url = ObsidianExport.url(title: title(for: entry), text: text) else {
+        let plain = speakers.applied(to: TranscriptDocument.parse(text).plain, in: entry.relativePath)
+        guard let url = ObsidianExport.url(title: outgoingTitle(entry).title, text: plain) else {
             workspace.lastError = "Укажи название хранилища Obsidian: Настройки → Хранилище."
             return
         }
@@ -794,92 +906,120 @@ struct ContentView: View {
     private func refresh() {
         workspace.requestRefresh()
     }
-}
 
-/// Карточка записи: заголовок, две строки текста, время с длительностью,
-/// состояние и тема.
-struct RecordingCard: View {
-    struct Status {
-        let text: String
-        let color: Color
+    // MARK: - Листы и диалоги
+
+    /// Листы экрана. Отдельными функциями, а не одной цепочкой в `body`: десяток
+    /// листов и диалогов подряд упирается в проверку типов компилятора.
+    private func sheets(_ content: some View) -> some View {
+        content
+            .sheet(isPresented: $showSettings) {
+                SettingsRoot(transcription: transcription, topics: topics)
+            }
+            .sheet(item: $opened) { entry in
+                TranscriptScreen(
+                    entry: entry,
+                    transcription: transcription,
+                    topics: topics,
+                    previews: previews,
+                    isRecording: recorder.isCapturing
+                )
+            }
+            .sheet(item: $topicTarget) { entry in
+                TopicSheet(
+                    topics: topics,
+                    title: cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry),
+                    path: entry.relativePath,
+                    suggestion: suggestion(for: entry)
+                )
+            }
+            .sheet(item: $share) { payload in
+                ShareSheet(payload: payload)
+            }
     }
 
-    let entry: WorkspaceEntry
-    let title: String
-    let snippet: String?
-    let stamp: String
-    let status: Status?
-    let topic: String?
-    /// Запись без темы в общем списке. Это инбокс разбора: пометка нужна,
-    /// чтобы такие записи не терялись среди разложенных.
-    let needsTopic: Bool
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 13) {
-            Image(systemName: "waveform")
-                .font(LoriFont.control)
-                .foregroundStyle(LoriPalette.lime)
-                .frame(width: 38, height: 38)
-                .background(LoriPalette.limeSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 11))
-
-            VStack(alignment: .leading, spacing: 5) {
-                HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Text(title)
-                        .font(LoriFont.cardTitle)
-                        .foregroundStyle(LoriPalette.ink)
-                        .lineLimit(1)
-                    Spacer(minLength: 4)
-                    Text(stamp)
-                        .font(LoriFont.small.monospacedDigit())
-                        .foregroundStyle(LoriPalette.muted)
+    /// Диалоги экрана: формат экспорта, удаление, остановка очереди, имена и ошибки.
+    private func dialogs(_ content: some View) -> some View {
+        content
+            .confirmationDialog(
+                "Поделиться расшифровкой",
+                isPresented: isPresented($shareTarget),
+                titleVisibility: .visible,
+                presenting: shareTarget
+            ) { entry in
+                // Те же слова, что в веб-интерфейсе и в меню экрана записи:
+                // продукт один, и формат не должен называться по-разному.
+                ForEach(TranscriptExportFormat.allCases) { format in
+                    Button("\(format.title) · \(format.note)") { export(entry, as: format) }
                 }
-
-                if let snippet {
-                    Text(snippet)
-                        .font(LoriFont.meta)
-                        .foregroundStyle(LoriPalette.muted)
-                        .lineLimit(2)
-                        .multilineTextAlignment(.leading)
-                }
-
-                HStack(spacing: 6) {
-                    if let status {
-                        Text(status.text)
-                            .font(LoriFont.small)
-                            .foregroundStyle(status.color)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(status.color.opacity(0.12), in: Capsule())
-                    }
-                    if needsTopic {
-                        Text("Без темы")
-                            .font(LoriFont.small)
-                            .foregroundStyle(LoriPalette.muted)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(LoriPalette.bubble, in: Capsule())
-                            .accessibilityIdentifier("noTopicBadge")
-                    }
-                    if let topic {
-                        Text(topic)
-                            .font(LoriFont.small)
-                            .foregroundStyle(LoriPalette.lime)
-                            .padding(.horizontal, 8)
-                            .padding(.vertical, 3)
-                            .background(LoriPalette.limeSoft.opacity(0.6), in: Capsule())
-                    }
-                    Spacer(minLength: 0)
+                Button("Отмена", role: .cancel) {}
+            }
+            .confirmationDialog(
+                "Удалить запись?",
+                isPresented: isPresented($deleteTarget),
+                titleVisibility: .visible,
+                presenting: deleteTarget
+            ) { entry in
+                Button("Удалить", role: .destructive) { delete(entry) }
+                Button("Отмена", role: .cancel) {}
+            } message: { entry in
+                Text(transcription.state(for: entry.relativePath).isActive
+                     ? "Аудио и расшифровка переедут в корзину Lori. Расшифровка этой записи остановится."
+                     : "Аудио и расшифровка переедут в корзину Lori.")
+            }
+            .confirmationDialog(
+                "Остановить расшифровку?",
+                isPresented: $showStopQueue,
+                titleVisibility: .visible
+            ) {
+                Button("Остановить", role: .destructive) { transcription.cancelAll() }
+                Button("Не останавливать", role: .cancel) {}
+            } message: {
+                Text("Записи останутся — расшифровку можно запустить снова.")
+            }
+            .alert("Переименовать", isPresented: isPresented($renameTarget)) {
+                TextField("Название", text: $renameDraft)
+                Button("Отмена", role: .cancel) { renameTarget = nil }
+                Button("Готово") { commitRename() }
+            }
+            .alert("Новая тема", isPresented: $showNewTopic) {
+                TextField("Название темы", text: $newTopicName)
+                Button("Отмена", role: .cancel) { newTopicName = "" }
+                Button("Добавить") {
+                    if let added = topics.add(newTopicName) { topicFilter = added }
+                    newTopicName = ""
                 }
             }
-        }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 12)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(LoriPalette.line, lineWidth: 1))
-        .contentShape(Rectangle())
-        .accessibilityElement(children: .combine)
-        .accessibilityIdentifier("recordingCard")
+            .alert(
+                notice?.title ?? "",
+                isPresented: isPresented($notice),
+                presenting: notice
+            ) { _ in
+                Button("Понятно", role: .cancel) {}
+            } message: { notice in
+                Text(notice.text)
+            }
+            .alert(
+                "Фоновая расшифровка недоступна",
+                isPresented: isPresented($backgroundExplanation),
+                presenting: backgroundExplanation
+            ) { _ in
+                Button("Понятно", role: .cancel) {}
+            } message: { reason in
+                Text("\(reason)\n\nПока Lori открыта, расшифровка идёт как обычно.")
+            }
+            .alert("Lori", isPresented: Binding(
+                get: { activeError != nil },
+                set: { if !$0 { clearErrors() } }
+            )) {
+                Button("Скопировать") {
+                    UIPasteboard.general.string = activeError
+                    clearErrors()
+                }
+                Button("OK", role: .cancel) { clearErrors() }
+            } message: {
+                Text(activeError ?? "")
+            }
     }
 }
 
@@ -893,7 +1033,7 @@ struct CircleIconButton: View {
             Image(systemName: symbol)
                 .font(LoriFont.control)
                 .foregroundStyle(LoriPalette.ink)
-                .frame(width: 40, height: 40)
+                .frame(width: 44, height: 44)
                 .contentShape(Circle())
         }
         .accessibilityLabel(label)

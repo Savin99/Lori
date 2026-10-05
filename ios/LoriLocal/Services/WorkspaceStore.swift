@@ -757,18 +757,4 @@ final class WorkspaceStore: ObservableObject {
             }
         }
     }
-
-    private func uniqueDestination(in directory: URL, preferredName: String) -> URL {
-        let preferred = directory.appending(path: preferredName)
-        guard fileManager.fileExists(atPath: preferred.path) else { return preferred }
-        let base = preferred.deletingPathExtension().lastPathComponent
-        let extensionPart = preferred.pathExtension
-        var index = 2
-        while true {
-            let candidateName = extensionPart.isEmpty ? "\(base) \(index)" : "\(base) \(index).\(extensionPart)"
-            let candidate = directory.appending(path: candidateName)
-            if !fileManager.fileExists(atPath: candidate.path) { return candidate }
-            index += 1
-        }
-    }
 }

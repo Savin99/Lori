@@ -36,6 +36,17 @@ class SafetyTests(unittest.TestCase):
         self.assertEqual((self.destination / 'personal.wav').read_bytes(), b'keep')
         self.assertEqual((self.destination / 'sample.wav').read_bytes(), b'synthetic')
 
+    def test_share_inbox_is_append_only_fixture(self):
+        inbox = self.container / 'Documents/Inbox'
+        inbox.mkdir(parents=True)
+        (inbox / 'sample.wav').write_bytes(b'shared earlier')
+        with self.assertRaises(FileExistsError):
+            safe.copy_new(self.source, self.container, 'Documents/Inbox')
+        self.assertEqual((inbox / 'sample.wav').read_bytes(), b'shared earlier')
+        (inbox / 'sample.wav').unlink()
+        safe.copy_new(self.source, self.container, 'Documents/Inbox')
+        self.assertEqual((inbox / 'sample.wav').read_bytes(), b'synthetic')
+
     def test_existing_file_refused_without_any_overwrite(self):
         (self.destination / 'sample.wav').write_bytes(b'original')
         with self.assertRaises(FileExistsError):
