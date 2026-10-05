@@ -14,6 +14,31 @@ final class SummaryRunnerTests: XCTestCase {
 
     override func tearDownWithError() throws {
         try? FileManager.default.removeItem(at: storeURL)
+        try? FileManager.default.removeItem(at: storeURL.deletingPathExtension().appendingPathExtension("pending.json"))
+        for root in workspaceRoots { try? FileManager.default.removeItem(at: root) }
+    }
+
+    private var workspaceRoots: [URL] = []
+
+    /// Рабочая папка с записями и их расшифровками. Возраст записи задаёт
+    /// порядок в списке: новые сверху.
+    private func makeWorkspace(_ records: [(name: String, text: String, age: TimeInterval)]) throws -> WorkspaceStore {
+        let root = FileManager.default.temporaryDirectory
+            .appending(path: "LoriRunner-\(UUID().uuidString)", directoryHint: .isDirectory)
+        workspaceRoots.append(root)
+        let transcripts = root.appending(path: "Transcripts", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: transcripts, withIntermediateDirectories: true)
+        for record in records {
+            let audio = root.appending(path: record.name)
+            try Data("звук".utf8).write(to: audio)
+            try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-record.age)], ofItemAtPath: audio.path)
+            let base = (record.name as NSString).deletingPathExtension
+            try Data(Transcript(text: record.text).markdown(title: base, engine: "Стаб", mode: "Быстрый текст").utf8)
+                .write(to: transcripts.appending(path: "\(base).md"))
+        }
+        let workspace = WorkspaceStore(rootURL: root)
+        try workspace.refresh()
+        return workspace
     }
 
     /// Передний план задаётся явно: настоящий `UIApplication.applicationState`
@@ -302,12 +327,16 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertEqual(runner.pendingCount, 0)
     }
 
-    func testPendingSummarySurvivesRunnerRestartAndPreservesManualTitle() async {
+    /// Очередь на диске хранит только пути: после перезапуска текст перечитывается
+    /// из файла расшифровки, поэтому у второго бегунка есть рабочая папка.
+    func testPendingSummarySurvivesRunnerRestartAndPreservesManualTitle() async throws {
+        let workspace = try makeWorkspace([("a.m4a", Self.transcript, 0)])
         store.setManual(title: "Моё интервью", for: "a.m4a")
         let first = runner(stage: Stage(false))
         first.summarize(path: "a.m4a", text: Self.transcript)
         XCTAssertEqual(first.pendingCount, 1)
         let resumed = runner(stage: Stage(true))
+        resumed.connect(to: workspace)
         XCTAssertEqual(resumed.pendingCount, 1)
         resumed.applicationDidBecomeActive()
         try? await Task.sleep(for: .milliseconds(300))
@@ -345,6 +374,232 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertNil(store.title(for: "a.m4a"))
     }
 
+    // MARK: - Очередь без текстов и без весов
+
+    /// **Регрессия.** В файл очереди ложился весь текст расшифровки, и без
+    /// скачанных весов он копил полные тексты всех записей бессрочно.
+    func testPendingQueueOnDiskHoldsNoTranscriptText() throws {
+        let runner = runner(stage: Stage(false))
+
+        runner.summarize(path: "a.m4a", text: Self.transcript)
+
+        let saved = String(decoding: try Data(contentsOf: store.pendingQueueURL), as: UTF8.self)
+        XCTAssertTrue(saved.contains("a.m4a"))
+        XCTAssertFalse(saved.contains("расшифровки"), "на диске только путь")
+    }
+
+    /// Без весов автоматические заявки не копятся: после скачивания записи без
+    /// заголовка найдутся сами.
+    func testAutomaticRequestsDoNotPileUpWithoutWeights() {
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: []))
+
+        runner.summarize(path: "a.m4a", text: Self.transcript)
+
+        XCTAssertEqual(runner.pendingCount, 0)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: store.pendingQueueURL.path))
+    }
+
+    /// «Придумать заголовок» без модели — не ошибка, а предложение скачать: заявка
+    /// ждёт веса и после скачивания выполняется сама.
+    func testExplicitRequestWaitsForTheModelAndRunsAfterDownload() async throws {
+        let workspace = try makeWorkspace([("a.m4a", Self.transcript, 0)])
+        let models = SwitchableModels(installed: [])
+        let runner = SummaryRunner(
+            models: models, store: store, availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, _ in .init(title: "Заголовок", detail: "Описание") }
+        )
+        runner.connect(to: workspace)
+        store.setManual(title: "Моё имя", for: "a.m4a")
+
+        XCTAssertEqual(runner.requestTitle(for: "a.m4a"), .needsModel)
+        XCTAssertEqual(runner.pendingCount, 1, "просьба ждёт модель")
+        XCTAssertEqual(store.title(for: "a.m4a"), "Моё имя", "до ответа имя на месте")
+
+        models.install(.light)
+        await waitUntil { self.store.title(for: "a.m4a") == "Заголовок" }
+
+        XCTAssertEqual(store.title(for: "a.m4a"), "Заголовок", "человек сам попросил заменить имя")
+        XCTAssertEqual(runner.pendingCount, 0)
+    }
+
+    func testExplicitRequestForTooShortTextIsRefused() {
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+
+        XCTAssertEqual(runner.requestTitle(for: "a.m4a", text: "Коротко."), .tooShort)
+        XCTAssertEqual(runner.pendingCount, 0)
+    }
+
+    // MARK: - Перерасшифровка
+
+    /// Расшифровку переписали — заголовок придумывается заново, а прежний виден,
+    /// пока не придёт новый. Тот же текст (перезапуск тем же движком) модель
+    /// второй раз не гоняет.
+    func testRewrittenTranscriptRegeneratesTheTitleButTheSameTextDoesNot() async throws {
+        let attempts = Attempts()
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: store,
+            availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, text in
+                attempts.bump()
+                try await Task.sleep(for: .milliseconds(50))
+                return .init(title: text.hasPrefix("Второй") ? "Второй заголовок" : "Первый заголовок", detail: "Описание")
+            }
+        )
+
+        runner.summarize(path: "a.m4a", text: "Первый " + Self.transcript)
+        await waitUntil { self.store.title(for: "a.m4a") == "Первый заголовок" && runner.running == nil }
+        runner.summarize(path: "a.m4a", text: "Первый " + Self.transcript)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(attempts.value, 1, "тот же текст — тот же заголовок")
+
+        runner.summarize(path: "a.m4a", text: "Второй " + Self.transcript)
+        XCTAssertEqual(store.title(for: "a.m4a"), "Первый заголовок", "старый виден, пока считается новый")
+        await waitUntil { self.store.title(for: "a.m4a") == "Второй заголовок" }
+        XCTAssertEqual(attempts.value, 2)
+        XCTAssertFalse(store.needsSummary(for: "a.m4a"))
+    }
+
+    // MARK: - Записи без заголовка после скачивания модели
+
+    /// После скачивания весов заголовки придумываются сами: новые записи первыми
+    /// и не больше `backlogLimit` за раз. Остальное — по кнопке в настройках.
+    func testRecoveryAfterDownloadTakesNewestFirstAndIsBounded() async throws {
+        let total = SummaryRunner.backlogLimit + 2
+        let records = (1...total).map { ("запись-\($0).m4a", "Запись \($0). " + Self.transcript, TimeInterval($0 * 60)) }
+        let workspace = try makeWorkspace(records)
+        let order = Collected()
+        let models = SwitchableModels(installed: [])
+        let runner = SummaryRunner(
+            models: models, store: store, availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, text in
+                order.append(text)
+                return .init(title: "Заголовок", detail: "Описание")
+            }
+        )
+        runner.connect(to: workspace)
+        runner.applicationDidBecomeActive()
+        XCTAssertEqual(runner.pendingCount, 0, "без модели очередь не копится")
+
+        models.install(.light)
+        await waitUntil { order.values.count == SummaryRunner.backlogLimit && runner.pendingCount == 0 && runner.running == nil }
+
+        let numbers = order.values.map { text in
+            Int(text.dropFirst("Запись ".count).prefix { $0.isNumber }) ?? 0
+        }
+        XCTAssertEqual(numbers, Array(1...SummaryRunner.backlogLimit), "новые первыми, не больше предела")
+        XCTAssertEqual(runner.backlogCount, 2, "остальные ждут")
+
+        runner.summarizeBacklog()
+        await waitUntil { order.values.count == total && runner.running == nil }
+        XCTAssertEqual(order.values.count, total)
+        XCTAssertEqual(runner.backlogCount, 0)
+    }
+
+    /// Короткую расшифровку не перечитывают на каждом возвращении в приложение.
+    func testShortTranscriptIsNotRereadOnEveryReturn() async throws {
+        let workspace = try makeWorkspace([("a.m4a", "Коротко.", 0)])
+        let attempts = Attempts()
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: store,
+            availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, _ in attempts.bump(); return .init(title: "Заголовок", detail: "Описание") }
+        )
+        runner.connect(to: workspace)
+
+        runner.applicationDidBecomeActive()
+        await waitUntil { runner.pendingCount == 0 && runner.running == nil }
+        runner.applicationDidBecomeActive()
+
+        XCTAssertEqual(runner.pendingCount, 0, "короткая запись больше не встаёт в очередь")
+        XCTAssertEqual(attempts.value, 0)
+    }
+
+    /// Почему заголовок не считается — видно в журнале работы.
+    func testIdleReasonsAreWrittenToTheJournal() {
+        let background = runner(stage: Stage(false))
+        background.summarize(path: "журнал-фон.m4a", text: Self.transcript)
+        let empty = runner(free: 8_000_000_000, models: StubModels(installed: []))
+        empty.summarize(path: "журнал-без-модели.m4a", text: Self.transcript)
+        empty.summarize(path: "журнал-коротко.m4a", text: "Коротко.")
+
+        let journal = (try? String(contentsOf: Journal.url, encoding: .utf8)) ?? ""
+        XCTAssertTrue(journal.contains("заголовки: жду возвращения в Lori"))
+        XCTAssertTrue(journal.contains("у «журнал-без-модели» пока заголовок из первой фразы"))
+        XCTAssertTrue(journal.contains("текст короче 80 знаков — «журнал-коротко»"))
+    }
+
+    /// Пока памяти мало, drain зовут каждые 5 секунд и на каждое возвращение.
+    /// Причина пишется в журнал один раз, а не строкой на каждый заход, хотя
+    /// число свободных мегабайт в строке каждый раз другое.
+    func testShortMemoryIsLoggedOnceNotOnEveryRetry() {
+        func occurrences() -> Int {
+            let journal = (try? String(contentsOf: Journal.url, encoding: .utf8)) ?? ""
+            return journal.components(separatedBy: "заголовки: мало памяти").count - 1
+        }
+        let before = occurrences()
+        let probe = Attempts()
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: store,
+            availableMemory: { probe.bump(); return 100_000_000 + UInt64(probe.value) * 1_048_576 },
+            isForeground: { true },
+            summarize: { _, _, _ in .init(title: "Заголовок", detail: "Описание") }
+        )
+
+        runner.summarize(path: "память.m4a", text: Self.transcript)
+        runner.applicationDidBecomeActive()
+        runner.applicationDidBecomeActive()
+        runner.applicationWillResignActive()
+
+        XCTAssertEqual(occurrences() - before, 1)
+    }
+
+    /// Явная просьба по записи без расшифровки не пропадает молча.
+    func testExplicitRequestWithoutTranscriptSaysWhy() async throws {
+        let workspace = try makeWorkspace([])
+        try Data("звук".utf8).write(to: workspaceRoots[0].appending(path: "без-текста.m4a"))
+        try workspace.refresh()
+        let runner = runner(free: 8_000_000_000, models: StubModels(installed: [.light]))
+        runner.connect(to: workspace)
+
+        XCTAssertEqual(runner.requestTitle(for: "без-текста.m4a"), .queued)
+        await waitUntil { runner.failure != nil }
+
+        XCTAssertEqual(runner.failure, "У записи нет расшифровки — заголовок придумывать не из чего.")
+        XCTAssertEqual(runner.pendingCount, 0)
+    }
+
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        let deadline = Date().addingTimeInterval(5)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    /// Что модель получила, по порядку. Пишется из `@Sendable`-замыкания.
+    private final class Collected: @unchecked Sendable {
+        private let lock = NSLock()
+        private var items: [String] = []
+        func append(_ item: String) { lock.withLock { items.append(item) } }
+        var values: [String] { lock.withLock { items } }
+    }
+
+    /// Каталог моделей, в котором веса «скачиваются» посреди теста.
+    private final class SwitchableModels: SummaryModelStore {
+        private var ready: Set<SummaryVariant>
+
+        init(installed: Set<SummaryVariant>) {
+            ready = installed
+            super.init(root: FileManager.default.temporaryDirectory)
+        }
+
+        override func isInstalled(_ variant: SummaryVariant) -> Bool { ready.contains(variant) }
+
+        func install(_ variant: SummaryVariant) {
+            ready.insert(variant)
+            refresh()
+        }
+    }
+
     /// Каталог с подставленным списком скачанного: настоящих весов в тестах нет.
     func testOneFailedRecordDoesNotBlockOthersAndRetriesOnReturn() async throws {
         let recovered = Attempts()
@@ -380,5 +635,44 @@ final class SummaryRunnerTests: XCTestCase {
         }
 
         override func isInstalled(_ variant: SummaryVariant) -> Bool { ready.contains(variant) }
+    }
+}
+
+/// Что экран «Заголовки» и строка настроек говорят о модели.
+@MainActor
+final class SummaryModelStoreTests: XCTestCase {
+    private final class StubModels: SummaryModelStore {
+        private let ready: Set<SummaryVariant>
+
+        init(installed: Set<SummaryVariant>) {
+            ready = installed
+            super.init(root: FileManager.default.temporaryDirectory)
+        }
+
+        override func isInstalled(_ variant: SummaryVariant) -> Bool { ready.contains(variant) }
+    }
+
+    /// Одна кнопка «Скачать» — для модели, которая подходит телефону. Крупной
+    /// нужно 3,1 ГБ свободных: на 8 ГБ это впритык, на 6 ГБ не бывает вовсе.
+    func testRecommendedModelFollowsPhoneMemory() {
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 8_589_934_592), .heavy, "8 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 7_500_000_000), .heavy, "8 ГБ чуть ниже номинала")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 12_884_901_888), .heavy, "12 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 6_442_450_944), .light, "6 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 4_294_967_296), .light, "4 ГБ")
+    }
+
+    /// Без модели заголовки всё равно есть — из первой фразы; «выключены» было неправдой.
+    func testSettingsLineTellsWhatTitlesComeFrom() {
+        XCTAssertEqual(StubModels(installed: []).statusLine, "первая фраза")
+        XCTAssertFalse(StubModels(installed: []).isReady)
+        XCTAssertEqual(StubModels(installed: [.light]).statusLine, "лёгкая модель")
+        XCTAssertEqual(StubModels(installed: [.heavy, .light]).statusLine, "крупная модель")
+        XCTAssertTrue(StubModels(installed: [.light]).isReady)
+    }
+
+    func testSizesAreWrittenTheRussianWay() {
+        XCTAssertEqual(SummaryVariant.heavy.sizeLabel, "2,3 ГБ")
+        XCTAssertEqual(SummaryVariant.light.sizeLabel, "1,1 ГБ")
     }
 }

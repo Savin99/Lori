@@ -84,6 +84,137 @@ final class TranscriptTitleTests: XCTestCase {
         XCTAssertNil(TranscriptTitle.title(from: "# Только заголовок\n"))
         XCTAssertNil(TranscriptTitle.snippet(from: ""))
     }
+
+    // MARK: - Настоящий файл, а не рукописный образец
+
+    /// Реплики двух говорящих с таймкодами — так пишут Gemini, ElevenLabs и OpenAI
+    /// в режиме «Говорящие».
+    private let dialog = Transcript(
+        text: "",
+        segments: [
+            TranscriptSegment(start: 0, end: 4, text: "S1: Привет, это тест записи."),
+            TranscriptSegment(start: 4, end: 11, text: "S2: Да, слышу тебя хорошо. Начнём с бюджета на квартал."),
+        ]
+    )
+
+    /// Что угодно из обвязки файла, чего на карточке быть не должно.
+    private func assertClean(_ value: String?, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let value else { return XCTFail("\(label): пусто", file: file, line: line) }
+        for junk in ["Режим", "_", "Расшифровано", "S1", "S2", "**[", "0:00", "Recording-"] {
+            XCTAssertFalse(value.contains(junk), "\(label) «\(value)» содержит «\(junk)»", file: file, line: line)
+        }
+    }
+
+    /// **Регрессия.** `Transcript.markdown` пишет строку `_Режим: …_` для каждого
+    /// движка с режимом, а построчный разбор заголовка её не знал: карточка
+    /// называлась «_Режим: Спикеры и таймкоды_ Привет, это», и тем же мусором
+    /// начинались сниппет и текст под чужим заголовком.
+    func testModeLineFromRealFileNeverReachesTheCard() {
+        for stamps in [true, false] {
+            let markdown = dialog.markdown(
+                title: "Recording-2026-09-04T22-22-10Z",
+                engine: "Gemini · gemini-3.5-transcribe",
+                mode: "Спикеры и таймкоды",
+                stamps: stamps
+            )
+            XCTAssertTrue(markdown.contains("_Режим: Спикеры и таймкоды_"), "файл тот самый, с режимом")
+
+            XCTAssertEqual(TranscriptTitle.title(from: markdown), "Привет, это тест записи", "таймкоды: \(stamps)")
+            assertClean(TranscriptTitle.title(from: markdown), "заголовок")
+            assertClean(TranscriptTitle.snippet(from: markdown), "сниппет")
+            assertClean(TranscriptTitle.head(from: markdown), "начало")
+            XCTAssertEqual(TranscriptTitle.snippet(from: markdown), "Да, слышу тебя хорошо. Начнём с бюджета на квартал.")
+            XCTAssertTrue(TranscriptTitle.head(from: markdown)?.hasPrefix("Привет, это тест записи.") == true)
+        }
+    }
+
+    /// Движок без реплик (OpenAI «Быстрый текст», «Причёсанный текст» у Gemini)
+    /// отдаёт текст одним куском — режим в файле стоит и у него.
+    func testModeLineIsDroppedForPlainTextEnginesToo() {
+        let markdown = Transcript(text: "Обсудили переезд офиса в новое помещение. Коробки перевезут в субботу.")
+            .markdown(title: "audio_5_2", engine: "OpenAI · gpt-transcribe", mode: "Быстрый текст")
+
+        XCTAssertEqual(TranscriptTitle.title(from: markdown), "Обсудили переезд офиса в новое помещение")
+        XCTAssertEqual(TranscriptTitle.snippet(from: markdown), "Коробки перевезут в субботу.")
+        assertClean(TranscriptTitle.head(from: markdown), "начало")
+    }
+
+    /// Предупреждения о пропусках и «кусок» у приблизительных таймкодов — тоже
+    /// обвязка, а не слова записи.
+    func testWarningsAndApproximateStampsStayOutOfTheCard() {
+        let markdown = Transcript(
+            text: "",
+            segments: [TranscriptSegment(start: 0, end: 300, text: "Начали с отчёта о продажах за август.", isApproximate: true)],
+            warnings: ["Пропуск 2:00–2:30: слов для этого участка сервис не дал"]
+        ).markdown(title: "Новая запись 12", engine: "Gemini · gemini-3.5-transcribe", mode: "Точность")
+
+        XCTAssertEqual(TranscriptTitle.title(from: markdown), "Начали с отчёта о продажах за август")
+        for value in [TranscriptTitle.snippet(from: markdown), TranscriptTitle.head(from: markdown)] {
+            XCTAssertFalse(value?.contains("Пропуск") ?? true)
+            XCTAssertFalse(value?.contains("кусок") ?? true)
+            XCTAssertFalse(value?.contains("Режим") ?? true)
+        }
+    }
+
+    // MARK: - Где кончается первая фраза
+
+    /// Точка между цифрами — дата или версия, а не конец фразы. Раньше заголовок
+    /// обрывался на ней: «Совещание 27», «Переходим на версию 3».
+    func testDatesAndVersionsDoNotEndTheSentence() {
+        let meeting = "Совещание 27.08 по бюджету отдела. Дальше обсуждали найм."
+        XCTAssertEqual(TranscriptTitle.title(from: meeting), "Совещание 27.08 по бюджету отдела")
+        XCTAssertEqual(TranscriptTitle.snippet(from: meeting), "Дальше обсуждали найм.")
+
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Переходим на версию 3.5 уже в понедельник. Остальное позже."),
+            "Переходим на версию 3.5 уже в понедельник"
+        )
+        XCTAssertEqual(TranscriptTitle.title(from: "27.08 планёрка по релизу. Дальше детали."), "27.08 планёрка по релизу")
+    }
+
+    /// Двоеточие во времени — тоже не граница мысли.
+    func testTimeOfDayDoesNotEndTheSentence() {
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Созвон в 12:30 по поводу релиза. Потом обед."),
+            "Созвон в 12:30 по поводу релиза"
+        )
+    }
+
+    /// «т.е.» посреди фразы — сокращение: раньше из него выходило «Мы решили, т».
+    func testAbbreviationsDoNotEndTheSentence() {
+        let title = TranscriptTitle.title(from: "Мы решили, т.е. договорились, перенести релиз на май. Остальное потом.")
+        XCTAssertEqual(title, "Мы решили, т.е. договорились, перенести")
+        // Инициалы — тоже не конец фразы.
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Встреча с А. С. Петровым по договору аренды. Потом ремонт."),
+            "Встреча с А. С. Петровым по договору"
+        )
+    }
+
+    /// Слишком ранняя граница («Ок.») — повод взять следующую, а не резать весь
+    /// текст по длине посреди фразы, как раньше: «Ок. Итак, сегодня разбираем итоги».
+    func testTooEarlyBoundaryGivesWayToTheNextOne() {
+        let text = "Ок. Итак, сегодня разбираем итоги квартала. Начнём с продаж, потом расходы."
+        XCTAssertEqual(TranscriptTitle.title(from: text), "Ок. Итак, сегодня разбираем итоги квартала")
+        XCTAssertEqual(TranscriptTitle.snippet(from: text), "Начнём с продаж, потом расходы.")
+    }
+
+    /// Обрезка по длине не оставляет висеть предлог или союз — то же правило,
+    /// что у заголовков модели (`Summarizer.tidy`).
+    func testCutNeverEndsOnAPreposition() {
+        XCTAssertEqual(
+            TranscriptTitle.title(from: "Обсуждали структуру базы знаний вместе с командой поддержки"),
+            "Обсуждали структуру базы знаний вместе"
+        )
+        XCTAssertEqual(TranscriptTitle.tidy("Отчёт по продажам, и"), "Отчёт по продажам")
+        XCTAssertEqual(Summarizer.tidy("Разбор документов для"), "Разбор документов", "правило одно на оба заголовка")
+    }
+
+    /// Заголовок — не предложение: точка в конце короткой записи ему не нужна.
+    func testShortTranscriptTitleHasNoTrailingPeriod() {
+        XCTAssertEqual(TranscriptTitle.title(from: "**[0:00–0:02]** Коротко."), "Коротко")
+        XCTAssertEqual(TranscriptTitle.title(from: "Что дальше по проекту?"), "Что дальше по проекту")
+    }
 }
 
 /// Разбор файла расшифровки для экрана записи: по тапу на реплику плеер должен
@@ -339,7 +470,23 @@ final class ObsidianExportTests: XCTestCase {
         let content = try XCTUnwrap(items.first { $0.name == "content" }?.value)
 
         XCTAssertEqual(content.count, ObsidianExport.contentLimit)
-    }    /// Какой движок отработал — свойство конкретной расшифровки, и его показывают на
+    }
+
+    /// **Регрессия.** Имя заметки — имя файла в хранилище: «Запись 21:46» с
+    /// двоеточием файловая система не примет, а `#`, `|`, `^`, `[[ ]]` ломают ссылки.
+    func testNoteNameIsSafeForTheVault() throws {
+        let url = try XCTUnwrap(ObsidianExport.url(title: "Запись 21:46", text: "Текст", vault: "Brain"))
+        let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(items.first { $0.name == "name" }?.value, "Запись 21-46")
+
+        XCTAssertEqual(ObsidianExport.noteName(from: "План/факт: #итоги [[черновик]] | 50%% готово?"), "План-факт- итоги черновик 50% готово")
+        XCTAssertEqual(ObsidianExport.noteName(from: ".скрытая заметка"), "скрытая заметка")
+        XCTAssertEqual(ObsidianExport.noteName(from: " ### "), "Запись", "пустое имя — не имя")
+        XCTAssertEqual(ObsidianExport.noteName(from: "Совещание 27.08"), "Совещание 27.08")
+        XCTAssertLessThanOrEqual(ObsidianExport.noteName(from: String(repeating: "слово ", count: 100)).count, ObsidianExport.nameLimit)
+    }
+
+    /// Какой движок отработал — свойство конкретной расшифровки, и его показывают на
     /// экране записи. Полное имя в файле длинное, а хвост у него повторяет иконку.
     func testEngineIsShownShortWithItsLocality() {
         let local = TranscriptDocument.parse("""

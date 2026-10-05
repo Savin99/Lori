@@ -355,14 +355,11 @@ actor Summarizer {
 
     /// Убирает хвост, который остался висеть после обрезки: союз или предлог
     /// в конце названия выглядит оборванным.
+    ///
+    /// Правило общее с заголовком из первой фразы (`TranscriptTitle.tidy`):
+    /// два списка «висящих» слов однажды уже разошлись бы, и карточка резала
+    /// бы по-разному в зависимости от того, кто придумал название.
     static func tidy(_ text: String) -> String {
-        var words = text
-            .trimmingCharacters(in: CharacterSet(charactersIn: " ,;:—–-"))
-            .components(separatedBy: " ")
-        let dangling = ["и", "или", "а", "но", "в", "на", "с", "к", "по", "о", "об", "для", "из", "от"]
-        while let last = words.last?.lowercased(), dangling.contains(last), words.count > 1 {
-            words.removeLast()
-        }
-        return words.joined(separator: " ")
+        TranscriptTitle.tidy(text)
     }
 }
