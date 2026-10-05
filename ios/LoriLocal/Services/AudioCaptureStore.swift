@@ -11,7 +11,7 @@ enum AudioCaptureError: LocalizedError {
         case .microphoneDenied:
             "Разреши Lori доступ к микрофону в настройках iPhone."
         case .noRecording:
-            "Запись ещё не началась."
+            "Запись не началась: микрофон сейчас недоступен. Если звук пишет другое приложение, закрой его и попробуй снова."
         }
     }
 }
@@ -66,7 +66,15 @@ final class AudioCaptureStore: NSObject, ObservableObject {
         ]
         let recorder = try AVAudioRecorder(url: url, settings: settings)
         recorder.isMeteringEnabled = true
-        guard recorder.record() else { throw AudioCaptureError.noRecording }
+        guard recorder.record() else {
+            // Файл к этому моменту уже создан — пустой, с одним заголовком. Оставь его,
+            // и в списке появится «Запись 20:18» без звука, которую человек не делал.
+            // В корзину, как и отменённую запись: удаление в Lori всегда обратимо.
+            recorder.stop()
+            try? workspace.moveToTrash("Recordings/\(url.lastPathComponent)")
+            try? session.setActive(false, options: .notifyOthersOnDeactivation)
+            throw AudioCaptureError.noRecording
+        }
         self.recorder = recorder
         recordingURL = url
         state = .recording
