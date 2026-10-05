@@ -255,6 +255,21 @@ def seed_workspace(container, work, now):
     print(f"Added {len(RECORDS)} records to the Lori QA workspace.")
 
 
+def seed_untranscribed(container, work, now):
+    """Ещё одна запись без расшифровки — для тестов кнопки «Расшифровать».
+
+    Имя по времени посева: повторный посев не упирается в отказ перезаписи, а
+    заголовок у такой записи всё равно «Запись ЧЧ:ММ».
+    """
+    tree = work / "untranscribed" / "Recordings"
+    tree.mkdir(parents=True, exist_ok=True)
+    name = f"Новая запись {now:%H%M%S}"
+    audio("Запись без расшифровки для проверки кнопки.", 4 * 60 + 40, tree / f"{name}.m4a", work)
+    safe.copy_new(tree.parent, container, "Documents/Lori/Workspace")
+    touch(container / "Documents/Lori/Workspace/Recordings" / f"{name}.m4a", now)
+    print(f"Added «{name}» without a transcript to the Lori QA workspace.")
+
+
 def seed_inbox(container, work, now):
     tree = work / "inbox"
     tree.mkdir(parents=True, exist_ok=True)
@@ -283,11 +298,19 @@ def main():
     parser.add_argument(
         "--inbox-only", action="store_true", help="only the Documents/Inbox files"
     )
+    parser.add_argument(
+        "--untranscribed",
+        action="store_true",
+        help="only one more record without a transcript (unique name)",
+    )
     args = parser.parse_args()
     container = safe.container_for(args.device)
     now = dt.datetime.now()
     with tempfile.TemporaryDirectory() as temp:
         work = Path(temp)
+        if args.untranscribed:
+            seed_untranscribed(container, work, now)
+            return
         if not args.inbox_only:
             seed_workspace(container, work, now)
         if args.inbox or args.inbox_only:

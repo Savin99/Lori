@@ -347,24 +347,28 @@ final class TranscriptionUITests: XCTestCase {
     /// появляется сверху, а «Остановить» сначала переспрашивает.
     func testInlineTranscribeStartsQueueAndStopAsksFirst() throws {
         continueAfterFailure = false
-        let app = launch(stub: true, stubSeconds: 30)
+        // Долгая «расшифровка»: при крупном шрифте тест листает дольше, и короткая
+        // успевала кончиться раньше, чем дело доходило до «Остановить».
+        let app = launch(stub: true, stubSeconds: 90)
         stopQueueIfRunning(app)
 
         let action = startAction(in: app)
         try XCTSkipUnless(scrollUntilExists(action, in: app), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        scroll(to: action, in: app)
         tap(action)
-        // Карточка видна, пока не листали: она и говорит первой, что работа пошла.
-        XCTAssertTrue(
-            cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю")).firstMatch.waitForExistence(timeout: 5),
-            "карточка говорит, что идёт работа"
-        )
-        XCTAssertFalse(app.buttons["Слушать"].exists, "кнопка на карточке не открывает запись")
 
         // Блок очереди — первым в списке: если пришлось листать, возвращаемся наверх.
         let queue = app.descendants(matching: .any)["queueBlock"]
         XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true), "блок очереди появляется над списком")
         XCTAssertTrue(queue.label.hasPrefix("Расшифровка"), queue.label)
+        XCTAssertFalse(app.buttons["Слушать"].exists, "кнопка на карточке не открывает запись")
+        // Блок сверху сдвигает список вниз, и при крупном шрифте карточка уезжает
+        // за край экрана — к ней листаем, а не ждём на месте.
+        let running = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю")).firstMatch
+        XCTAssertTrue(scrollUntilExists(running, in: app), "карточка говорит, что идёт работа")
+
         // Блок виден целиком: при крупном шрифте он высокий, и одного «появился» мало.
+        _ = scrollUntilExists(queue, in: app, upwards: true)
         for _ in 0..<3 { app.swipeDown() }
         save(XCUIScreen.main.screenshot(), named: "home-queue-single")
 
@@ -379,11 +383,14 @@ final class TranscriptionUITests: XCTestCase {
     /// Тап по блоку очереди открывает ту запись, что считается.
     func testQueueBlockOpensTheCurrentRecord() throws {
         continueAfterFailure = false
-        let app = launch(stub: true, stubSeconds: 30)
+        // Долгая «расшифровка»: при крупном шрифте тест листает дольше, и короткая
+        // успевала кончиться раньше, чем дело доходило до «Остановить».
+        let app = launch(stub: true, stubSeconds: 90)
         stopQueueIfRunning(app)
 
         let action = startAction(in: app)
         try XCTSkipUnless(scrollUntilExists(action, in: app), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        scroll(to: action, in: app)
         tap(action)
         let queue = app.descendants(matching: .any)["queueBlock"]
         XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true))
@@ -612,13 +619,19 @@ final class TranscriptionUITests: XCTestCase {
 
     /// Лента уходит под композер, и `isHittable` перекрытой карточки всё равно true:
     /// тап в этом месте достаётся композеру.
+    ///
+    /// Листаем короткими протяжками, а не `swipeUp()`: тот уносит полэкрана за раз,
+    /// и кнопка у края проскакивала из-под панели сразу за верх экрана.
     private func scroll(to element: XCUIElement, in app: XCUIApplication) {
         let composer = app.buttons["Записать"]
         guard composer.exists else { return }
-        let composerTop = composer.frame.minY
+        // Верх панели — на пару строк выше кнопки записи.
+        let composerTop = composer.frame.minY - 16
         var attempts = 0
-        while element.frame.maxY > composerTop - 8, attempts < 10 {
-            app.swipeUp()
+        while element.exists, element.frame.maxY > composerTop - 8, attempts < 6 {
+            let from = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.62))
+            let to = app.coordinate(withNormalizedOffset: CGVector(dx: 0.97, dy: 0.42))
+            from.press(forDuration: 0.05, thenDragTo: to)
             attempts += 1
         }
     }
