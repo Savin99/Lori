@@ -37,9 +37,13 @@ struct TranscriptScreen: View {
     let isRecording: Bool
     /// Переименование делает список (`RecordRename.commit`): там все хранилища,
     /// привязанные к пути записи. nil — ни тапа по заголовку, ни пункта в «…».
-    var onRename: ((String) -> Void)? = nil
-    /// Удаление вместе с подтверждением — тоже у списка. nil — пункта нет.
-    var onDelete: (() -> Void)? = nil
+    /// Ошибку (имя занято) показывает этот экран: алерт списка под открытым листом
+    /// не показался бы, а то и закрыл бы лист.
+    var onRename: ((String) throws -> Void)? = nil
+    /// Удаление делает список — те же хранилища и корзина, что у свайпа. Спрашивает
+    /// этот экран, теми же словами (`DeleteRecordCopy`); после удаления список
+    /// закрывает лист. nil — пункта нет.
+    var onDelete: (() throws -> Void)? = nil
 
     @State private var document = TranscriptDocument.empty
     /// Из какого файла собран `document`; nil — ни из какого.
@@ -56,6 +60,7 @@ struct TranscriptScreen: View {
     @State private var notice: Notice?
     @State private var isRenaming = false
     @State private var titleDraft = ""
+    @State private var confirmingDelete = false
     /// Какого говорящего сейчас называют и как. Метка одна на всю запись,
     /// поэтому и переименование сразу по всей записи — иначе пришлось бы
     /// править каждую реплику.
@@ -864,7 +869,7 @@ struct TranscriptScreen: View {
             }
             if onDelete != nil {
                 Section {
-                    Button("Удалить запись", systemImage: "trash", role: .destructive) { onDelete?() }
+                    Button("Удалить запись", systemImage: "trash", role: .destructive) { confirmingDelete = true }
                 }
             }
         } label: {
@@ -890,6 +895,16 @@ struct TranscriptScreen: View {
             Button("Отмена", role: .cancel) {}
         } message: { kind in
             Text(retranscribeMessage(kind))
+        }
+        .confirmationDialog(
+            DeleteRecordCopy.title,
+            isPresented: $confirmingDelete,
+            titleVisibility: .visible
+        ) {
+            Button("Удалить", role: .destructive) { deleteConfirmed() }
+            Button("Отмена", role: .cancel) {}
+        } message: {
+            Text(DeleteRecordCopy.message(active: isActive))
         }
         .confirmationDialog(
             "Заголовок придумывает модель на этом iPhone",
@@ -1004,7 +1019,21 @@ struct TranscriptScreen: View {
     private func commitRename() {
         let typed = titleDraft
         guard let onRename, !RecordTitle.isNoOpRename(typed: typed, current: recordTitle.title) else { return }
-        onRename(typed)
+        do {
+            try onRename(typed)
+        } catch {
+            notice = Notice(title: "Не получилось переименовать", message: RenameFailure.message(for: error))
+        }
+    }
+
+    /// Удаление подтверждено. Лист закрывает список, когда запись ушла в корзину;
+    /// не вышло — экран остаётся и говорит почему.
+    private func deleteConfirmed() {
+        do {
+            try onDelete?()
+        } catch {
+            notice = Notice(title: "Не получилось удалить запись", message: error.localizedDescription)
+        }
     }
 
     private func beginNaming(_ label: String) {
