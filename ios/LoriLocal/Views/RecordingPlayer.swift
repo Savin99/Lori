@@ -10,6 +10,13 @@ final class AudioPlaybackStore: ObservableObject {
     @Published private(set) var duration: TimeInterval = 0
     @Published private(set) var position: TimeInterval = 0
     @Published private(set) var loadError: String?
+    /// Скорость: расшифровку часто слушают быстрее, чем говорили.
+    @Published var rate: Float = 1 {
+        didSet {
+            player?.rate = rate
+            if isPlaying { player?.play() }
+        }
+    }
 
     private var player: AVAudioPlayer?
     private var ticker: Task<Void, Never>?
@@ -18,11 +25,22 @@ final class AudioPlaybackStore: ObservableObject {
 
     var remaining: TimeInterval { max(0, duration - position) }
 
+    /// Загруженный файл. Без него повторный `load` другой записи молча
+    /// возвращался, и играла предыдущая — на экране записи это незаметно
+    /// (там файл один), а в ленте ассистента пилюли ведут в разные записи.
+    private var loaded: URL?
+
     func load(_ url: URL) {
-        guard player == nil else { return }
+        guard loaded != url else { return }
+        stop()
+        loaded = url
         do {
             let player = try AVAudioPlayer(contentsOf: url)
-            player.prepareToPlay()
+            player.enableRate = true
+            player.rate = rate
+            // `prepareToPlay` декодирует первые буферы синхронно. Для длинной
+            // записи это задерживало открытие всего экрана; подготовка теперь
+            // случается только по явному нажатию «Слушать».
             self.player = player
             duration = player.duration
             position = 0
@@ -48,6 +66,7 @@ final class AudioPlaybackStore: ObservableObject {
             loadError = "Не удалось включить звук: \(error.localizedDescription)"
             return
         }
+        player.rate = rate
         guard player.play() else { return }
         isPlaying = true
         startTicker()
@@ -64,10 +83,6 @@ final class AudioPlaybackStore: ObservableObject {
         let clamped = min(max(0, seconds), duration)
         player.currentTime = clamped
         position = clamped
-    }
-
-    func skip(_ delta: TimeInterval) {
-        seek(to: position + delta)
     }
 
     func beginScrub() {
@@ -88,6 +103,9 @@ final class AudioPlaybackStore: ObservableObject {
         stopTicker()
         player?.stop()
         player = nil
+        // Забыть файл обязательно: иначе после `stop` повторный `load` той же
+        // записи считает её уже загруженной и не создаёт проигрыватель.
+        loaded = nil
         isPlaying = false
         position = 0
         try? AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
@@ -114,155 +132,5 @@ final class AudioPlaybackStore: ObservableObject {
     private func stopTicker() {
         ticker?.cancel()
         ticker = nil
-    }
-}
-
-/// Экран записи: сначала послушать, и только потом решать про расшифровку.
-/// Раньше тап по аудио сразу запускал распознавание, и прослушать запись было нечем.
-struct RecordingSheet: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @Environment(\.dismiss) private var dismiss
-    @StateObject private var playback = AudioPlaybackStore()
-
-    let entry: WorkspaceEntry
-    @ObservedObject var transcription: TranscriptionService
-    /// Нельзя слушать и писать одновременно: аудиосессия одна.
-    let isRecording: Bool
-    let openTranscript: (String) -> Void
-
-    private var meta: String {
-        let stamp = LoriFormat.stamp(entry.modifiedAt)
-        guard playback.duration > 0 else { return "Запись · \(stamp)" }
-        return "Запись · \(stamp) · \(LoriFormat.duration(playback.duration))"
-    }
-
-    var body: some View {
-        NavigationStack {
-            VStack(alignment: .leading, spacing: 0) {
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(entry.displayName)
-                        .font(LoriFont.displaySmall)
-                        .foregroundStyle(LoriPalette.ink)
-                        .lineLimit(3)
-                    Text(meta)
-                        .font(LoriFont.meta)
-                        .foregroundStyle(LoriPalette.muted)
-                }
-                .padding(.horizontal, 20)
-                .padding(.top, 6)
-
-                if let error = playback.loadError {
-                    Text(error)
-                        .font(LoriFont.meta)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 26)
-                } else {
-                    scrubber.padding(.top, 26)
-                    transport.padding(.top, 14)
-                }
-
-                // Текст живёт на этом же экране: звук и его расшифровка —
-                // одна вещь, и низ экрана иначе остаётся пустым.
-                // Что показывать — обработанное «Важное» или дословный текст —
-                // решает переключатель внутри карточки.
-                TranscriptCard(
-                    transcription: transcription,
-                    entry: entry,
-                    openFile: { path in
-                        playback.stop()
-                        openTranscript(path)
-                    }
-                )
-                .padding(.top, 26)
-            }
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(LoriPalette.canvas)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                // «Готово» слева — как в редакторе заметки и в браузере файлов.
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Готово") { dismiss() }
-                }
-            }
-        }
-        .recordingBanner { dismiss() }
-        .task {
-            guard let url = try? workspace.fileURL(for: entry.relativePath) else { return }
-            playback.load(url)
-        }
-        .onDisappear { playback.stop() }
-    }
-
-    private var scrubber: some View {
-        VStack(spacing: 6) {
-            Slider(
-                value: Binding(
-                    get: { playback.position },
-                    set: { playback.scrub(to: $0) }
-                ),
-                in: 0...max(playback.duration, 0.01),
-                onEditingChanged: { editing in
-                    if editing { playback.beginScrub() } else { playback.endScrub() }
-                }
-            )
-            .tint(LoriPalette.lime)
-            .disabled(playback.duration == 0)
-
-            HStack {
-                Text(LoriFormat.duration(playback.position))
-                Spacer()
-                Text("−\(LoriFormat.duration(playback.remaining))")
-            }
-            .font(LoriFont.small.monospacedDigit())
-            .foregroundStyle(LoriPalette.muted)
-        }
-        .padding(.horizontal, 20)
-    }
-
-    private var transport: some View {
-        HStack(spacing: 28) {
-            Button { playback.skip(-15) } label: {
-                Image(systemName: "gobackward.15")
-                    .font(.system(size: 25, weight: .regular))
-                    .foregroundStyle(LoriPalette.ink)
-                    .frame(width: 52, height: 52)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Назад на 15 секунд")
-
-            Button(action: playback.toggle) {
-                Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                    .font(.system(size: 27, weight: .medium))
-                    .foregroundStyle(.white)
-                    // Треугольник «play» визуально смещён влево — компенсируем.
-                    .offset(x: playback.isPlaying ? 0 : 2)
-                    .frame(width: 72, height: 72)
-                    .background(LoriPalette.lime, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .disabled(isRecording || playback.duration == 0)
-            .opacity(isRecording ? 0.4 : 1)
-            .accessibilityLabel(playback.isPlaying ? "Пауза" : "Слушать")
-
-            Button { playback.skip(15) } label: {
-                Image(systemName: "goforward.15")
-                    .font(.system(size: 25, weight: .regular))
-                    .foregroundStyle(LoriPalette.ink)
-                    .frame(width: 52, height: 52)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Вперёд на 15 секунд")
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.top, 18)
-        .overlay(alignment: .bottom) {
-            if isRecording {
-                Text("Сейчас идёт запись — слушать можно после неё.")
-                    .font(LoriFont.small)
-                    .foregroundStyle(LoriPalette.muted)
-                    .offset(y: 20)
-            }
-        }
     }
 }

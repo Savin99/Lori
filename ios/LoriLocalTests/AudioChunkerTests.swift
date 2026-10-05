@@ -109,4 +109,40 @@ extension AudioChunkerTests {
         XCTAssertEqual(bounds.first?.lowerBound, 0)
         XCTAssertEqual(bounds.last?.upperBound, 3_000)
     }
+
+    // MARK: - Пауза для нарезки файла на части
+
+    /// Пауза находится там, где она есть, а не там, где минимум по счёту.
+    func testQuietestOffsetFindsThePause() {
+        let rate: Double = 1_000
+        var samples = [Float](repeating: 0.5, count: 10_000)
+        for index in 6_000..<7_000 { samples[index] = 0 }
+
+        let offset = AudioChunker.quietestOffset(
+            in: samples,
+            sampleRate: rate,
+            windowSeconds: 0.1,
+            preferring: 5.0
+        )
+
+        XCTAssertNotNil(offset)
+        XCTAssertEqual(offset ?? 0, 6.5, accuracy: 0.6, "пауза лежит на 6–7 секунде")
+    }
+
+    /// На ровной тишине минимум одинаков везде, и «самая тихая точка» —
+    /// это ловушка: без предпочтения она всегда первая, и разрез уезжает
+    /// в начало куска вместо намеченной границы.
+    func testQuietestOffsetOnFlatSilenceStaysAtThePreferredPoint() {
+        let rate: Double = 1_000
+        let samples = [Float](repeating: 0, count: 10_000)
+
+        let offset = AudioChunker.quietestOffset(
+            in: samples,
+            sampleRate: rate,
+            windowSeconds: 0.1,
+            preferring: 5.0
+        )
+
+        XCTAssertEqual(offset ?? 0, 5.0, accuracy: 0.2, "на ровной тишине граница обязана остаться на месте")
+    }
 }

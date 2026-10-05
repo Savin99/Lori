@@ -29,6 +29,30 @@ struct SentencePieceVocabulary: Equatable {
         self.pieces = pieces
     }
 
+    /// Словарь ONNX-экспорта: в строке «кусок пробел индекс», последняя строка — `<blk>`.
+    ///
+    /// Blank в проекте живёт за словарём (`blankIndex == pieces.count`), поэтому строка
+    /// `<blk>` из файла отбрасывается, а не становится куском. `<unk>` остаётся на своём
+    /// месте, но пустой строкой: служебному токену нечего делать в тексте расшифровки.
+    init(tableAt url: URL) throws {
+        let text = try String(contentsOf: url, encoding: .utf8)
+        var entries: [(piece: String, index: Int)] = []
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            let raw = String(line)
+            // Кусок может быть и пробелом, поэтому режем по последнему пробелу, а не по первому.
+            guard let separator = raw.lastIndex(of: " "),
+                  let index = Int(raw[raw.index(after: separator)...]) else { continue }
+            entries.append((String(raw[raw.startIndex..<separator]), index))
+        }
+        guard !entries.isEmpty else { throw Failure.empty }
+        entries.sort { $0.index < $1.index }
+
+        var pieces = entries.map(\.piece)
+        if pieces.last == "<blk>" { pieces.removeLast() }
+        if let unknown = pieces.firstIndex(of: "<unk>") { pieces[unknown] = "" }
+        try self.init(pieces: pieces)
+    }
+
     /// Словарь лежит рядом с моделью: один кусок на строку.
     init(contentsOf url: URL) throws {
         let text = try String(contentsOf: url, encoding: .utf8)

@@ -32,6 +32,14 @@ final class AudioCaptureStore: NSObject, ObservableObject {
     /// Длительность и громкость нужны интерфейсу: без них запись выглядит как зависшая кнопка.
     @Published private(set) var elapsed: TimeInterval = 0
     @Published private(set) var level: Double = 0
+    /// История уровней для живой волны в панели. Пять столбиков по мгновенному
+    /// значению показывали громкость, но не то, что звук вообще идёт: на ровной
+    /// речи они стояли неподвижно, и запись выглядела зависшей.
+    @Published private(set) var levels: [Double] = []
+
+    /// Длина истории при шаге замера 120 мс — около десяти секунд звука.
+    /// Сколько из них поместится в волну, решает сама панель по своей ширине.
+    static let waveSamples = 80
 
     private var recorder: AVAudioRecorder?
     private var meterTask: Task<Void, Never>?
@@ -119,17 +127,30 @@ final class AudioCaptureStore: NSObject, ObservableObject {
                 guard let self, let recorder = self.recorder, recorder.isRecording else { return }
                 recorder.updateMeters()
                 self.elapsed = recorder.currentTime
-                self.level = Self.normalizedLevel(recorder.averagePower(forChannel: 0))
+                let value = Self.normalizedLevel(recorder.averagePower(forChannel: 0))
+                self.level = value
+                self.append(value)
                 try? await Task.sleep(for: .milliseconds(120))
             }
         }
+    }
+
+    /// Кольцевой буфер: волна едет влево, старое значение уходит за край.
+    private func append(_ value: Double) {
+        levels.append(value)
+        if levels.count > Self.waveSamples { levels.removeFirst(levels.count - Self.waveSamples) }
     }
 
     private func stopMetering(resetElapsed: Bool = true) {
         meterTask?.cancel()
         meterTask = nil
         level = 0
-        if resetElapsed { elapsed = 0 }
+        // На паузе волна замирает на последнем виде, а не обнуляется: иначе пауза
+        // визуально неотличима от остановленной записи.
+        if resetElapsed {
+            elapsed = 0
+            levels = []
+        }
     }
 
     /// Средняя мощность приходит в децибелах от -160 до 0; для индикатора хватает верхних 50 дБ.

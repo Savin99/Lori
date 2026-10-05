@@ -2,16 +2,45 @@ import SwiftUI
 import UniformTypeIdentifiers
 import UIKit
 
-/// Палитра и шрифты внутренние, а не приватные: их использует и `RecordingPlayer.swift`.
+/// Палитра и шрифты внутренние, а не приватные: их используют все экраны.
 enum LoriPalette {
-    static let canvas = Color(red: 0.961, green: 0.957, blue: 0.914)
-    static let card = Color.white.opacity(0.86)
-    static let ink = Color(red: 0.12, green: 0.12, blue: 0.11)
-    static let muted = Color(red: 0.44, green: 0.44, blue: 0.41)
-    static let line = Color.black.opacity(0.12)
-    static let bubble = Color(red: 0.917, green: 0.914, blue: 0.878)
-    static let lime = Color(red: 0.36, green: 0.47, blue: 0.0)
-    static let limeSoft = Color(red: 0.89, green: 0.92, blue: 0.73)
+    /// Цвета заданы парой «светлый — тёмный»: тёмная тема не должна быть
+    /// кремовой наизнанку, у неё свои плотности. Раньше палитра была жёстко
+    /// светлой, а весь интерфейс держался на `preferredColorScheme(.light)`.
+    private static func pair(
+        light: (Double, Double, Double, Double),
+        dark: (Double, Double, Double, Double)
+    ) -> Color {
+        Color(uiColor: UIColor { traits in
+            let value = traits.userInterfaceStyle == .dark ? dark : light
+            return UIColor(red: value.0, green: value.1, blue: value.2, alpha: value.3)
+        })
+    }
+
+    static let canvas = pair(light: (0.961, 0.957, 0.914, 1), dark: (0.071, 0.071, 0.067, 1))
+    static let card = pair(light: (1, 1, 1, 0.86), dark: (1, 1, 1, 0.06))
+    static let ink = pair(light: (0.12, 0.12, 0.11, 1), dark: (0.957, 0.953, 0.925, 1))
+    /// Цвет текста на заливке `ink` и `lime`: в тёмной теме сама заливка светлая,
+    /// и белые надписи на ней исчезали.
+    static let onInk = pair(light: (1, 1, 1, 1), dark: (0.071, 0.071, 0.067, 1))
+    static let muted = pair(light: (0.44, 0.44, 0.41, 1), dark: (0.64, 0.64, 0.61, 1))
+    static let line = pair(light: (0, 0, 0, 0.12), dark: (1, 1, 1, 0.14))
+    static let bubble = pair(light: (0.917, 0.914, 0.878, 1), dark: (1, 1, 1, 0.10))
+    static let lime = pair(light: (0.36, 0.47, 0.0, 1), dark: (0.66, 0.78, 0.29, 1))
+    static let limeSoft = pair(light: (0.89, 0.92, 0.73, 1), dark: (0.24, 0.29, 0.11, 1))
+    /// Состояния в карточке: идёт работа, ждёт очереди, сорвалось.
+    /// Работа идёт: тот же оливковый, только приглушённый. Синий рядом с
+    /// оливковым читался как второй акцент — и получалось два «главных» цвета
+    /// на экране: зелёная галочка движка и синяя галочка режима.
+    static let info = pair(light: (0.42, 0.52, 0.16, 1), dark: (0.60, 0.72, 0.30, 1))
+    /// Второй говорящий и прочее, что надо просто отличить от первого.
+    /// Не акцент: приглушённый тёплый, а не спорящий с оливковым синий.
+    static let accentAlt = pair(light: (0.45, 0.36, 0.24, 1), dark: (0.78, 0.66, 0.48, 1))
+    /// Цвет чужого бренда — единственное место, где он оправдан. Пара нужна и
+    /// ему: в тёмной теме глухой фиолетовый сливался с фоном.
+    static let obsidian = pair(light: (0.42, 0.29, 0.62, 1), dark: (0.66, 0.55, 0.86, 1))
+    static let warn = pair(light: (0.62, 0.44, 0.05, 1), dark: (0.91, 0.73, 0.35, 1))
+    static let danger = pair(light: (0.66, 0.16, 0.13, 1), dark: (0.94, 0.48, 0.44, 1))
 }
 
 /// Шрифты приложения. Всё через семантические стили и `relativeTo`,
@@ -25,2107 +54,952 @@ enum LoriFont {
     static let body = Font.system(.body)
     static let bubble = Font.system(.body)
     static let small = Font.system(.footnote)
+    /// Иконки и стрелки внутри чипов: мельче подписи, но всё ещё масштабируемый.
+    static let tiny = Font.system(.caption2)
     static let control = Font.system(.body, weight: .semibold)
 }
 
+/// Главный экран: список расшифровок.
+///
+/// Карточка отвечает на вопрос «что это за запись» без открытия: заголовок из первых
+/// слов расшифровки, две строки текста, длительность и состояние. Название движка
+/// сюда не выведено — это настройка, а не свойство записи.
 struct ContentView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
-    @StateObject private var assistant = AssistantStore()
-    /// Рекордер один на приложение: раньше у главной и у чата были свои экземпляры,
-    /// и переход между экранами глушил запись на полуслове.
     @StateObject private var recorder = AudioCaptureStore()
-    @StateObject private var transcription = TranscriptionService()
-    @State private var screen: LoriScreen = .notes
+    @EnvironmentObject private var transcription: TranscriptionService
+    @EnvironmentObject private var runway: TranscriptionRunway
+    @StateObject private var search = TranscriptSearchStore()
+    @StateObject private var topics = TopicStore()
+    @StateObject private var durations = RecordingDurations()
+    @StateObject private var previews = TranscriptPreviews()
+
     @State private var showSettings = false
-    /// Путь и факт показа — одно значение. С `.sheet(isPresented:)` браузер
-    /// открывался на корне: замыкание содержимого успевало захватить пустой путь.
-    @State private var workspaceTarget: WorkspacePath?
+    @State private var opened: WorkspaceEntry?
+    @State private var showFileImporter = false
+    @State private var query = ""
+    @State private var isSearching = false
+    @State private var startError: String?
+    @State private var topicFilter: String?
+    @State private var topicTarget: WorkspaceEntry?
+    @State private var renameTarget: WorkspaceEntry?
+    @State private var renameDraft = ""
+    @State private var newTopicName = ""
+    @State private var showNewTopic = false
+    @State private var share: SharePayload?
+    /// Запись, для которой спрашивают формат экспорта.
+    @State private var shareTarget: WorkspaceEntry?
+    @State private var showAsk = false
+    /// Запись из ссылки в ответе открывается после того, как лист «Спросить»
+    /// закрылся: два листа подряд в одном такте SwiftUI просто теряет.
+    @State private var pendingOpen: WorkspaceEntry?
+    /// Секунда из ссылки в ответе: запись открывается сразу на ней.
+    @State private var pendingSeek: TimeInterval?
+    /// Вопрос, с которым открывают тред. Пустой — просто вернуться к разговору.
+    @State private var askedQuestion = ""
+    /// Секунда, на которую откроется запись из ссылки.
+    @State private var openedSeek: TimeInterval?
+    @FocusState private var searchFocused: Bool
+
+    @AppStorage(TranscriptionSettings.autoTranscribeKey) private var autoTranscribe = true
+    @AppStorage(TranscriptionSettings.engineKey) private var engineRaw = TranscriptionEngineKind.gigaam.rawValue
+    @StateObject private var engines = EngineDirectory()
+    @EnvironmentObject private var summaries: SummaryStore
+    @EnvironmentObject private var summaryModels: SummaryModelStore
+    @EnvironmentObject private var summaryRunner: SummaryRunner
+    @State private var showEnginePicker = false
+    @StateObject private var composer = ComposerModel()
+    @StateObject private var assistant = AssistantThreadStore()
+    @StateObject private var speakers = SpeakerNames()
+    @StateObject private var speed = TranscriptionSpeed()
+    @State private var importingAttached = false
+    /// Строка «Спрошу по 5 расшифровкам · 92 тыс. знаков». Считается при входе
+    /// в вопрос и при смене охвата, а не на каждое нажатие клавиши.
+    @State private var contextSummary: String?
+    @Environment(\.openURL) private var openURL
+    @Environment(\.scenePhase) private var scenePhase
 
     var body: some View {
         ZStack {
             LoriPalette.canvas.ignoresSafeArea()
 
-            switch screen {
-            case .notes:
-                NotesHomeView(
-                    recorder: recorder,
-                    transcription: transcription,
-                    openChat: { prompt in
-                        if let prompt { assistant.queue(prompt) }
-                        withAnimation(.easeOut(duration: 0.26)) { screen = .chat }
-                    },
-                    askAbout: askAbout,
-                    openWorkspace: { path in workspaceTarget = WorkspacePath(path: path) },
-                    openSettings: { showSettings = true }
+            VStack(alignment: .leading, spacing: 0) {
+                header
+                if isSearching {
+                    searchResults
+                } else {
+                    recordings
+                }
+            }
+            .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
+            .onChange(of: transcription.lastMeasure) { _, measure in
+                guard let measure else { return }
+                speed.record(
+                    audio: measure.audio,
+                    spent: measure.spent,
+                    engine: measure.engine,
+                    mode: measure.mode
                 )
-                .transition(.opacity)
-            case .chat:
-                AssistantChatView(
-                    assistant: assistant,
-                    recorder: recorder,
-                    transcription: transcription,
-                    close: { withAnimation(.easeOut(duration: 0.26)) { screen = .notes } },
-                    openSettings: { showSettings = true }
-                )
-                .transition(.move(edge: .bottom).combined(with: .opacity))
             }
         }
-        // Кремовая палитра задана явно и не имеет тёмного варианта: без этого
-        // Form и List уезжали в системные цвета, а статусная строка становилась белой на кремовом.
-        .preferredColorScheme(.light)
         .tint(LoriPalette.lime)
         .sheet(isPresented: $showSettings) {
-            SettingsView()
+            SettingsRoot(transcription: transcription, topics: topics)
         }
-        .sheet(item: $workspaceTarget) { target in
-            WorkspaceBrowserView(
-                initialPath: target.path,
+        .sheet(item: $opened) { entry in
+            TranscriptScreen(
+                entry: entry,
                 transcription: transcription,
-                recorder: recorder,
-                askAbout: askAbout
+                topics: topics,
+                previews: previews,
+                isRecording: recorder.isCapturing,
+                startAt: openedSeek
             )
+        }
+        .sheet(isPresented: $showAsk, onDismiss: openPending) {
+            AssistantThreadScreen(
+                store: assistant,
+                scopes: askScopes,
+                initialScopeID: composer.scopeID,
+                initialQuestion: askedQuestion,
+                title: title(for:),
+                detail: { summaries.detail(for: $0.relativePath) },
+                topic: { topics.topic(for: $0.relativePath) },
+                onOpen: { citation in
+                    pendingOpen = try? workspace.entry(at: citation.path)
+                    pendingSeek = citation.start
+                }
+            )
+        }
+        .sheet(item: $topicTarget) { entry in
+            TopicSheet(
+                topics: topics,
+                title: title(for: entry),
+                path: entry.relativePath,
+                suggestion: suggestion(for: entry)
+            )
+        }
+        .sheet(item: $share) { payload in
+            ShareSheet(payload: payload)
+        }
+        .confirmationDialog(
+            "Поделиться расшифровкой",
+            isPresented: isPresented($shareTarget),
+            titleVisibility: .visible,
+            presenting: shareTarget
+        ) { entry in
+            ForEach(TranscriptExportFormat.allCases) { format in
+                Button(format.title) { export(entry, as: format) }
+            }
+        } message: { _ in
+            Text("PDF удобно читать и отправлять, Markdown — работать с текстом дальше.")
+        }
+        .fileImporter(
+            isPresented: $showFileImporter,
+            allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .aiff],
+            allowsMultipleSelection: true,
+            onCompletion: attachFiles
+        )
+        .alert("Переименовать", isPresented: isPresented($renameTarget)) {
+            TextField("Название", text: $renameDraft)
+            Button("Отмена", role: .cancel) { renameTarget = nil }
+            Button("Готово") { commitRename() }
+        }
+        .alert("Новая тема", isPresented: $showNewTopic) {
+            TextField("Название темы", text: $newTopicName)
+            Button("Отмена", role: .cancel) { newTopicName = "" }
+            Button("Добавить") {
+                if let added = topics.add(newTopicName) { topicFilter = added }
+                newTopicName = ""
+            }
         }
         .alert("Lori", isPresented: Binding(
             get: { activeError != nil },
             set: { if !$0 { clearErrors() } }
         )) {
+            Button("Скопировать") {
+                UIPasteboard.general.string = activeError
+                clearErrors()
+            }
             Button("OK", role: .cancel) { clearErrors() }
         } message: {
             Text(activeError ?? "")
         }
         // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
-        // что лежит внутри обёртки. Модификатор выше по цепочке оставлял
-        // браузер и настройки без рекордера, и плашка записи роняла приложение.
+        // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
         .environmentObject(recorder)
+        .environmentObject(assistant)
+        .environmentObject(speakers)
+        .environmentObject(speed)
     }
 
-    /// SwiftUI показывает не больше одного алерта на View, поэтому ошибки
-    /// файловой части и расшифровки идут через один и тот же.
-    private var activeError: String? { workspace.lastError ?? transcription.lastError }
+    // MARK: - Шапка
 
-    private func clearErrors() {
-        workspace.lastError = nil
-        transcription.lastError = nil
-    }
-
-    /// «Спросить про заметку» и «Спросить про папку»: чат открывается с готовым вопросом
-    /// в поле ввода — отправить его решает человек.
-    private func askAbout(_ question: String) {
-        assistant.prefill(question)
-        workspaceTarget = nil
-        withAnimation(.easeOut(duration: 0.26)) { screen = .chat }
-    }
-}
-
-/// Открытая папка браузера. Обёртка нужна только чтобы лист шёл через `item`.
-private struct WorkspacePath: Identifiable, Hashable {
-    let path: String
-
-    var id: String { path }
-}
-
-private enum LoriScreen {
-    case notes
-    case chat
-}
-
-private struct NoteGroup: Identifiable {
-    let day: Date
-    let title: String
-    let notes: [WorkspaceEntry]
-
-    var id: Date { day }
-}
-
-private struct NotesHomeView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @ObservedObject var recorder: AudioCaptureStore
-    @ObservedObject var transcription: TranscriptionService
-    let openChat: (String?) -> Void
-    let askAbout: (String) -> Void
-    let openWorkspace: (String) -> Void
-    let openSettings: () -> Void
-    @State private var draft = ""
-    @State private var sheet: EntrySheet?
-    @State private var renameTarget: WorkspaceEntry?
-    @State private var deleteTarget: WorkspaceEntry?
-    @State private var showAddMenu = false
-    @State private var showFileImporter = false
-    @State private var showFolderDrawer = false
-    @StateObject private var search = NotesSearchStore()
-    @State private var query = ""
-    @State private var isSearching = false
-    @FocusState private var searchFocused: Bool
-
-    /// Служебные папки приложения уезжают в конец: они не то, что человек писал руками.
-    private var folders: [WorkspaceEntry] {
-        workspace.entries.filter(\.isDirectory).sorted { lhs, rhs in
-            let lhsGenerated = WorkspaceStore.generatedFolders.contains(lhs.name)
-            let rhsGenerated = WorkspaceStore.generatedFolders.contains(rhs.name)
-            if lhsGenerated != rhsGenerated { return !lhsGenerated }
-            return lhs.name.localizedStandardCompare(rhs.name) == .orderedAscending
-        }
-    }
-
-    /// Заметки группируются по дню правки, поэтому заголовок «Сегодня» больше не выдумка.
-    private var noteGroups: [NoteGroup] {
-        let calendar = Calendar.current
-        let notes = workspace.entries
-            .filter { !$0.isDirectory }
-            .sorted { $0.modifiedAt > $1.modifiedAt }
-        var order: [Date] = []
-        var buckets: [Date: [WorkspaceEntry]] = [:]
-        for note in notes {
-            let day = calendar.startOfDay(for: note.modifiedAt)
-            if buckets[day] == nil { order.append(day) }
-            buckets[day, default: []].append(note)
-        }
-        return order.map { day in
-            NoteGroup(day: day, title: LoriFormat.groupTitle(day), notes: buckets[day] ?? [])
-        }
-    }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 0) {
-                if isSearching {
-                    // Заголовок экрана в поиске только отнимает высоту: поле должно быть сверху.
-                    NotesSearchBar(query: $query, focus: $searchFocused, cancel: closeSearch)
-                        .padding(.horizontal, 16)
-                        .padding(.top, 4)
-                        .padding(.bottom, 4)
-                } else {
-                    HStack(spacing: 6) {
-                        CircleIconButton(symbol: "folder", label: "Открыть папки") {
-                            withAnimation(.easeOut(duration: 0.24)) { showFolderDrawer = true }
-                        }
-                        Spacer()
-                        CircleIconButton(symbol: "magnifyingglass", label: "Поиск", action: openSearch)
-                        CircleIconButton(symbol: "gearshape", label: "Настройки", action: openSettings)
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("Мои заметки")
-                            .font(LoriFont.display)
-                            .foregroundStyle(LoriPalette.ink)
-                        Text(LoriFormat.noteCount(workspace.noteTotal))
-                            .font(LoriFont.meta)
-                            .foregroundStyle(LoriPalette.muted)
-                    }
-                    .padding(.horizontal, 17)
-                    .padding(.top, 24)
-                    .padding(.bottom, 22)
-                }
-
-                if isSearching {
-                    searchResults
-                } else if folders.isEmpty, noteGroups.isEmpty {
-                    EmptyWorkspaceHint { sheet = .editor(.draft(directory: "")) }
-                        .padding(.horizontal, 17)
-                } else {
-                    if !folders.isEmpty {
-                        SectionLabel(title: "Папки")
-                        VStack(spacing: 8) {
-                            ForEach(folders) { folder in
-                                Button { openWorkspace(folder.relativePath) } label: { FolderRow(entry: folder) }
-                                    .buttonStyle(.plain)
-                                    .contextMenu {
-                                        EntryMenuButtons(
-                                            rename: { renameTarget = folder },
-                                            delete: { deleteTarget = folder }
-                                        )
-                                    }
-                            }
-                        }
-                        .padding(.horizontal, 17)
-                    }
-
-                    ForEach(noteGroups) { group in
-                        SectionLabel(title: group.title)
-                        VStack(spacing: 8) {
-                            ForEach(group.notes) { note in
-                                Button { open(note) } label: {
-                                    NoteCard(
-                                        entry: note,
-                                        isTranscribing: transcription.isRunning(note.relativePath),
-                                        progressText: transcription.progressText(for: note.relativePath)
-                                    )
-                                }
-                                .buttonStyle(.plain)
-                                .contextMenu {
-                                    EntryMenuButtons(
-                                        rename: { renameTarget = note },
-                                        delete: { deleteTarget = note },
-                                        transcribe: note.isAudio ? { transcribe(note) } : nil,
-                                        openTranscript: transcriptPath(for: note).map { path in
-                                            { openTranscript(path) }
-                                        }
-                                    )
-                                }
-                            }
-                        }
-                        .padding(.horizontal, 17)
-                    }
-                }
-
-                Color.clear.frame(height: 20)
-            }
-        }
-        .scrollIndicators(.hidden)
-        .safeAreaInset(edge: .bottom, spacing: 0) {
+    /// Шапка без названия экрана. «Расшифровки» — единственное, что здесь могло
+    /// быть написано, и это ровно то, на что человек и так смотрит: список
+    /// расшифровок занимает весь экран. Освободившуюся строку заняли темы.
+    private var header: some View {
+        Group {
             if isSearching {
-                // В поиске композер не нужен, а над клавиатурой он съедает половину результатов.
-                Color.clear.frame(height: 0)
+                TranscriptSearchBar(query: $query, focus: $searchFocused) {
+                    isSearching = false
+                    query = ""
+                    search.clear()
+                    searchFocused = false
+                }
+                .onChange(of: query) { _, value in search.apply(value) }
+                .padding(.horizontal, 20)
             } else {
-                NotesComposer(
-                    draft: $draft,
-                    recorder: recorder,
-                    transcriptionStatus: transcriptionStatus(transcription),
-                    submit: {
-                        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-                        draft = ""
-                        openChat(prompt.isEmpty ? nil : prompt)
-                    },
-                    add: { showAddMenu = true },
-                    togglePause: { recorder.isPaused ? recorder.resume() : recorder.pause() },
-                    cancelRecording: { recorder.discard(in: workspace) }
-                )
-                .padding(.horizontal, 17)
-                .padding(.vertical, 10)
-                .background(LoriPalette.canvas)
-            }
-        }
-        .sheet(item: $sheet) { target in
-            switch target {
-            case let .editor(editor):
-                NoteEditorSheet(target: editor, askAbout: askAbout)
-            case let .recording(entry):
-                RecordingSheet(
-                    entry: entry,
-                    transcription: transcription,
-                    isRecording: recorder.isCapturing,
-                    openTranscript: openTranscript
-                )
-            case .wiki:
-                WikiSheet(openNote: openTranscript)
-            }
-        }
-        .modifier(EntryMutationAlerts(
-            renameTarget: $renameTarget,
-            deleteTarget: $deleteTarget,
-            didChange: { if isSearching { search.reindex(workspace) } }
-        ))
-        .onChange(of: query) { search.apply(query) }
-        .confirmationDialog("Добавить в Lori", isPresented: $showAddMenu, titleVisibility: .visible) {
-            // Запись — единственный вход к микрофону. Кнопки микрофона в композере нет:
-            // она путала диктовку вопроса с записью материала.
-            Button("Записать") { toggleRecording() }
-            Button("Новая заметка") { sheet = .editor(.draft(directory: "")) }
-            Button("Выбрать файл") { showFileImporter = true }
-            Button("Отмена", role: .cancel) {}
-        }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
-            do {
-                guard let url = try result.get().first else { throw WorkspaceError.importFailed }
-                try workspace.importFile(from: url)
-                openWorkspace("Inbox")
-            } catch {
-                workspace.lastError = error.localizedDescription
-            }
-        }
-        .refreshable { workspace.start() }
-        .overlay {
-            if showFolderDrawer {
-                FolderDrawer(
-                    close: { withAnimation(.easeOut(duration: 0.22)) { showFolderDrawer = false } },
-                    openFolder: { path in
-                        withAnimation(.easeOut(duration: 0.22)) { showFolderDrawer = false }
-                        openWorkspace(path)
-                    },
-                    openWiki: {
-                        withAnimation(.easeOut(duration: 0.22)) { showFolderDrawer = false }
-                        sheet = .wiki
+                HStack(spacing: 8) {
+                    topicMenu
+
+                    Spacer(minLength: 0)
+
+                    CircleIconButton(symbol: "magnifyingglass", label: "Искать по расшифровкам") {
+                        isSearching = true
+                        searchFocused = true
+                        search.reindex(workspace)
                     }
-                )
-                .transition(.opacity)
-            }
-        }
-    }
-
-    /// Результаты поиска плоские: группировка по дням тут только мешает,
-    /// важнее, что совпало и в какой папке лежит.
-    @ViewBuilder
-    private var searchResults: some View {
-        if query.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-            Text("Ищет по названиям и по тексту заметок, включая вложенные папки.")
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.muted)
-                .padding(.horizontal, 20)
-                .padding(.top, 26)
-        } else if search.hits.isEmpty {
-            Text("Ничего не найдено.")
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.muted)
-                .padding(.horizontal, 20)
-                .padding(.top, 26)
-        } else {
-            SectionLabel(title: "Найдено: \(search.hits.count)")
-            VStack(spacing: 8) {
-                ForEach(search.hits) { hit in
-                    Button { openHit(hit) } label: { SearchResultRow(hit: hit) }
-                        .buttonStyle(.plain)
-                        .contextMenu {
-                            EntryMenuButtons(
-                                rename: { renameTarget = hit.entry },
-                                delete: { deleteTarget = hit.entry }
-                            )
-                        }
+                    // Вход в разговор — всегда, а не только когда он уже есть.
+                    // Иначе попасть к ассистенту можно было единственным путём:
+                    // набрать вопрос в панели, — а если поле чем-то занято, то
+                    // и вовсе никак.
+                    CircleIconButton(
+                        symbol: "sparkles",
+                        label: assistant.hasThread ? "Вернуться к разговору" : "Спросить по расшифровкам"
+                    ) {
+                        askedQuestion = ""
+                        showAsk = true
+                    }
+                    CircleIconButton(symbol: "gearshape", label: "Настройки") { showSettings = true }
                 }
+                .padding(.trailing, 14)
             }
-            .padding(.horizontal, 17)
         }
+        .padding(.top, 6)
+        .padding(.bottom, 8)
     }
 
-    private func openSearch() {
-        withAnimation(.easeOut(duration: 0.2)) { isSearching = true }
-        search.reindex(workspace)
-        searchFocused = true
-    }
-
-    private func closeSearch() {
-        searchFocused = false
-        query = ""
-        search.clear()
-        withAnimation(.easeOut(duration: 0.2)) { isSearching = false }
-    }
-
-    private func openHit(_ hit: SearchHit) {
-        if hit.entry.isDirectory {
-            openWorkspace(hit.entry.relativePath)
-        } else {
-            open(hit.entry)
-        }
-    }
-
-    private func toggleRecording() {
-        Task {
-            do {
-                if recorder.isCapturing {
-                    guard let path = recorder.stop() else { return }
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
-                    // Сначала сохранённый звук становится видимым, и только потом расшифровка:
-                    // если движок недоступен, запись всё равно остаётся на месте.
-                    try? workspace.refresh()
-                    let recording = try workspace.entry(at: path)
-                    transcribe(recording)
+    /// Темы больше не занимают шапку и не требуют горизонтального свайпа:
+    /// одна иконка открывает нативный список, а галочка сохраняет контекст выбора.
+    private var topicMenu: some View {
+        Menu {
+            Button { topicFilter = nil } label: {
+                if topicFilter == nil {
+                    Label("Все записи", systemImage: "checkmark")
                 } else {
-                    try await recorder.start(in: workspace)
-                    UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+                    Text("Все записи")
                 }
-            } catch {
-                workspace.lastError = error.localizedDescription
             }
+
+            ForEach(topics.topics, id: \.self) { topic in
+                Button { topicFilter = topic } label: {
+                    if topicFilter == topic {
+                        Label(topic, systemImage: "checkmark")
+                    } else {
+                        Text(topic)
+                    }
+                }
+            }
+
+            Divider()
+
+            Button { showNewTopic = true } label: {
+                Label("Новая тема", systemImage: "plus")
+            }
+        } label: {
+            Image(systemName: "line.3.horizontal.decrease")
+                .font(LoriFont.control)
+                .foregroundStyle(topicFilter == nil ? LoriPalette.ink : LoriPalette.lime)
+                .frame(width: 40, height: 40)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Фильтр по теме")
+        .accessibilityValue(topicFilter ?? "Все записи")
+        .accessibilityIdentifier("topicMenu")
+        .padding(.leading, 14)
+    }
+
+    // MARK: - Список записей
+
+    private var recordings: some View {
+        List {
+            if visible.isEmpty {
+                empty
+                    .listRowBackground(Color.clear)
+                    .listRowSeparator(.hidden)
+                    .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
+            }
+            ForEach(groups) { group in
+                Section {
+                    ForEach(group.items) { entry in
+                        RecordingCard(
+                            entry: entry,
+                            title: title(for: entry),
+                            snippet: snippet(for: entry),
+                            stamp: stamp(for: entry),
+                            status: status(for: entry),
+                            topic: topics.topic(for: entry.relativePath),
+                            needsTopic: needsTopic(entry)
+                        )
+                        .listRowBackground(Color.clear)
+                        .listRowSeparator(.hidden)
+                        .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
+                        .onTapGesture { opened = entry }
+                        .onLongPressGesture { topicTarget = entry }
+                        .task {
+                            previews.load(entry, in: workspace)
+                            if let url = try? workspace.fileURL(for: entry.relativePath) {
+                                durations.load(entry.relativePath, url: url)
+                            }
+                        }
+                        .swipeActions(edge: .leading, allowsFullSwipe: false) {
+                            Button { topicTarget = entry } label: {
+                                Label("Тема", systemImage: "tag")
+                            }
+                            .tint(LoriPalette.lime)
+
+                            Button {
+                                renameDraft = entry.displayName
+                                renameTarget = entry
+                            } label: {
+                                Label("Переименовать", systemImage: "pencil")
+                            }
+                            .tint(LoriPalette.muted)
+                        }
+                        .swipeActions(edge: .trailing, allowsFullSwipe: false) {
+                            Button(role: .destructive) { delete(entry) } label: {
+                                Label("Удалить", systemImage: "trash")
+                            }
+
+                            // Меню в свайп-кнопку не поставить, поэтому формат
+                            // спрашивает диалог — теми же словами, что и меню
+                            // на экране записи.
+                            Button { shareTarget = entry } label: {
+                                Label("Поделиться", systemImage: "square.and.arrow.up")
+                            }
+                            .tint(LoriPalette.lime)
+
+                            Button { sendToObsidian(entry) } label: {
+                                Label("Obsidian", systemImage: "book.closed")
+                            }
+                            .tint(LoriPalette.obsidian)
+                        }
+                    }
+                } header: {
+                    // Липкий заголовок едет поверх карточек. Без своей заливки
+                    // «Сегодня» читалось прямо по тексту первой из них, а без
+                    // отступов — вплотную к её краю.
+                    Text(group.title)
+                        .font(LoriFont.section)
+                        .foregroundStyle(LoriPalette.muted)
+                        .textCase(nil)
+                        .padding(.horizontal, 20)
+                        .padding(.top, 10)
+                        .padding(.bottom, 6)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(LoriPalette.canvas)
+                        .listRowInsets(EdgeInsets())
+                }
+            }
+        }
+        .listStyle(.plain)
+        .scrollContentBackground(.hidden)
+        .environment(\.defaultMinListRowHeight, 10)
+    }
+
+    private var searchResults: some View {
+        ScrollView {
+            LazyVStack(alignment: .leading, spacing: 10) {
+                if search.isIndexing {
+                    HStack(spacing: 8) {
+                        ProgressView().controlSize(.small)
+                        Text("Готовлю поиск…")
+                    }
+                    .font(LoriFont.meta)
+                    .foregroundStyle(LoriPalette.muted)
+                    .padding(.top, 12)
+                } else if query.trimmingCharacters(in: .whitespaces).isEmpty {
+                    Text("Поиск идёт по тексту расшифровок и по названиям записей.")
+                        .font(LoriFont.meta)
+                        .foregroundStyle(LoriPalette.muted)
+                        .padding(.top, 12)
+                } else if search.hits.isEmpty {
+                    Text("Ничего не нашлось.")
+                        .font(LoriFont.meta)
+                        .foregroundStyle(LoriPalette.muted)
+                        .padding(.top, 12)
+                } else {
+                    ForEach(search.hits) { hit in
+                        Button {
+                            searchFocused = false
+                            opened = audioEntry(for: hit)
+                        } label: {
+                            SearchResultRow(hit: hit)
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.bottom, 24)
         }
     }
 
-    /// Аудио открывается плеером: раньше тап сразу запускал распознавание,
-    /// и прослушать собственную запись было нечем.
-    private func open(_ entry: WorkspaceEntry) {
-        sheet = entry.isAudio ? .recording(entry) : .editor(.existing(entry))
-    }
-
-    private func transcriptPath(for entry: WorkspaceEntry) -> String? {
-        guard entry.isAudio else { return nil }
-        return workspace.existingTranscript(for: entry)
-    }
-
-    private func openTranscript(_ path: String) {
-        guard let entry = try? workspace.entry(at: path) else { return }
-        sheet = .editor(.existing(entry))
-    }
-
-    /// Открывается карточка записи, а не файл расшифровки: в карточке лежат оба вида
-    /// текста и переключатель между ними, и там же видно ход работы. Обработку
-    /// в «Важное» карточка запускает сама, если она включена в настройках.
-    private func transcribe(_ entry: WorkspaceEntry) {
-        sheet = .recording(entry)
-        Task { await transcription.transcribe(entry, in: workspace) }
-    }
-}
-
-private struct SectionLabel: View {
-    let title: String
-
-    var body: some View {
-        Text(title)
-            .font(LoriFont.section)
-            .foregroundStyle(LoriPalette.muted)
-            .padding(.horizontal, 20)
-            .padding(.top, 22)
-            .padding(.bottom, 10)
-    }
-}
-
-private struct EmptyWorkspaceHint: View {
-    let createNote: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text("Здесь пока пусто")
+    private var empty: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(topicFilter == nil ? "Пока ни одной записи" : "В этой теме пусто")
                 .font(LoriFont.cardTitle)
                 .foregroundStyle(LoriPalette.ink)
-            Text("Заметки, записи и добавленные файлы хранятся только на этом iPhone.")
+            Text(topicFilter == nil
+                 ? "Нажми «Записать» или принеси готовый файл. После остановки Lori сама расшифрует запись."
+                 : "Тема назначается свайпом по карточке или долгим нажатием.")
                 .font(LoriFont.meta)
                 .foregroundStyle(LoriPalette.muted)
-                .fixedSize(horizontal: false, vertical: true)
-            Button(action: createNote) {
-                Text("Создать первую заметку")
-                    .font(LoriFont.control)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 18)
-                    .padding(.vertical, 12)
-                    .background(LoriPalette.ink.opacity(0.84), in: Capsule())
-            }
-            .buttonStyle(.plain)
         }
-        .padding(18)
+        .padding(.vertical, 18)
+        .padding(.horizontal, 16)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 22))
         .overlay(RoundedRectangle(cornerRadius: 22).stroke(LoriPalette.line, lineWidth: 1))
     }
-}
 
-private struct FolderRow: View {
-    let entry: WorkspaceEntry
+    // MARK: - Низ экрана
 
-    var body: some View {
-        HStack(spacing: 13) {
-            Image(systemName: "folder.fill")
-                .font(.system(size: 17, weight: .medium))
-                .foregroundStyle(LoriPalette.lime)
-                .frame(width: 38, height: 38)
-                .background(LoriPalette.limeSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 11))
-            Text(entry.displayName)
-                .font(LoriFont.cardTitle)
-                .foregroundStyle(LoriPalette.ink)
-                .lineLimit(1)
-            Spacer(minLength: 0)
-            Image(systemName: "chevron.right")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(LoriPalette.muted.opacity(0.7))
-        }
-        .padding(.horizontal, 14)
-        .padding(.vertical, 10)
-        .frame(minHeight: 58)
-        .background(.white.opacity(0.6), in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(LoriPalette.line, lineWidth: 1))
-    }
-}
-
-private struct NoteCard: View {
-    let entry: WorkspaceEntry
-    var isTranscribing = false
-    var progressText: String?
-
-    var body: some View {
-        HStack(spacing: 13) {
-            Image(systemName: entry.isAudio ? "waveform" : "doc.text")
-                .font(.system(size: 18, weight: .medium))
-                .foregroundStyle(LoriPalette.lime)
-                .frame(width: 42, height: 42)
-                .background(LoriPalette.limeSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 12))
-            VStack(alignment: .leading, spacing: 3) {
-                Text(entry.displayName)
-                    .font(LoriFont.cardTitle)
-                    .foregroundStyle(LoriPalette.ink)
-                    .lineLimit(2)
-                    .multilineTextAlignment(.leading)
-                Text(subtitle)
-                    .font(LoriFont.meta)
-                    .foregroundStyle(LoriPalette.muted)
-            }
-            Spacer(minLength: 0)
-            if isTranscribing {
-                ProgressView().controlSize(.small)
-            }
-        }
-        .padding(.horizontal, 15)
-        .padding(.vertical, 13)
-        .frame(minHeight: 70)
-        .background(.white.opacity(0.72), in: RoundedRectangle(cornerRadius: 20))
-        .overlay(RoundedRectangle(cornerRadius: 20).stroke(LoriPalette.line, lineWidth: 1))
-    }
-
-    private var subtitle: String {
-        if isTranscribing {
-            guard let progressText else { return "Расшифровываю…" }
-            return "Расшифровываю… \(progressText)"
-        }
-        let stamp = LoriFormat.stamp(entry.modifiedAt)
-        return entry.isAudio ? "Запись · \(stamp)" : stamp
-    }
-}
-
-private struct NotesComposer: View {
-    @Binding var draft: String
-    @ObservedObject var recorder: AudioCaptureStore
-    let transcriptionStatus: String?
-    let submit: () -> Void
-    let add: () -> Void
-    let togglePause: () -> Void
-    let cancelRecording: () -> Void
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let transcriptionStatus {
-                TranscriptionStatusLine(text: transcriptionStatus)
-                    .padding(.horizontal, 8)
-            }
-
-            HStack(spacing: 12) {
-                HStack(spacing: 8) {
-                    if recorder.isCapturing {
-                        RecordingPill(recorder: recorder, togglePause: togglePause, cancel: cancelRecording)
-                    } else {
-                        TextField("Спросить Lori", text: $draft)
-                            .font(LoriFont.body)
-                            .foregroundStyle(LoriPalette.ink)
-                            .submitLabel(.send)
-                            .onSubmit(submit)
-                        Spacer(minLength: 0)
-                    }
-
-                }
-                .padding(.leading, recorder.isCapturing ? 6 : 18)
-                .padding(.trailing, 4)
-                .frame(minHeight: 62)
-                .background(.white.opacity(0.88), in: Capsule())
-
-                if !recorder.isCapturing {
-                    Button(action: add) {
-                        Image(systemName: "plus")
-                            .font(.system(size: 23, weight: .medium))
-                            .foregroundStyle(.white)
-                            .frame(width: 54, height: 54)
-                            .background(LoriPalette.ink.opacity(0.84), in: Circle())
-                    }
-                    .accessibilityLabel("Добавить заметку или файл")
-                }
-            }
-        }
-        .animation(.easeOut(duration: 0.2), value: recorder.isCapturing)
-    }
-}
-
-/// Расшифровка идёт фоном и больше не подменяет поле ввода: раньше на время
-/// распознавания нельзя было ни написать вопрос, ни отправить его.
-private struct TranscriptionStatusLine: View {
-    let text: String
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ProgressView().controlSize(.mini)
-            Text(text)
-                .font(LoriFont.small)
-                .foregroundStyle(LoriPalette.muted)
-            Spacer(minLength: 0)
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-/// Одна строка на любое число параллельных расшифровок.
-@MainActor
-private func transcriptionStatus(_ transcription: TranscriptionService) -> String? {
-    let running = transcription.running
-    guard let single = running.first else { return nil }
-    if running.count > 1 { return "Расшифровываю записи: \(running.count)" }
-    guard let progress = transcription.progressText(for: single) else { return "Расшифровываю запись…" }
-    return "Расшифровываю запись… \(progress)"
-}
-
-/// Пилюля записи: пауза, живой уровень, время и отмена.
-/// Без неё кнопка микрофона была единственным признаком, что запись вообще идёт.
-private struct RecordingPill: View {
-    @ObservedObject var recorder: AudioCaptureStore
-    let togglePause: () -> Void
-    let cancel: () -> Void
-
-    var body: some View {
-        HStack(spacing: 9) {
-            Button(action: togglePause) {
-                Image(systemName: recorder.isPaused ? "play.fill" : "pause.fill")
-                    .font(.system(size: 13, weight: .bold))
-                    .foregroundStyle(LoriPalette.ink)
-                    .frame(width: 34, height: 34)
-                    .background(LoriPalette.canvas, in: Circle())
-            }
-            .accessibilityLabel(recorder.isPaused ? "Продолжить запись" : "Поставить на паузу")
-
-            Circle()
-                .fill(recorder.isPaused ? LoriPalette.muted : Color.red)
-                .frame(width: 8, height: 8)
-                .opacity(recorder.isPaused ? 0.5 : 0.5 + 0.5 * min(1, max(0, recorder.level)))
-
-            Text(LoriFormat.duration(recorder.elapsed))
-                .font(LoriFont.meta.monospacedDigit())
-                .foregroundStyle(LoriPalette.ink)
-
-            LevelMeter(level: recorder.isPaused ? 0 : recorder.level)
-
-            Spacer(minLength: 2)
-
-            Button("Отмена", action: cancel)
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.muted)
-        }
-        .accessibilityElement(children: .contain)
-    }
-}
-
-private struct LevelMeter: View {
-    let level: Double
-
-    var body: some View {
-        HStack(alignment: .center, spacing: 3) {
-            ForEach(0..<5, id: \.self) { index in
-                Capsule()
-                    .fill(level >= Double(index + 1) / 6 ? LoriPalette.lime : LoriPalette.line)
-                    .frame(width: 3, height: 7 + CGFloat(index) * 3)
-            }
-        }
-        .animation(.easeOut(duration: 0.12), value: level)
-        .accessibilityHidden(true)
-    }
-}
-
-/// Что открыто поверх чата. Лист ровно один, как и на других экранах.
-private enum ChatSheet: Identifiable, Hashable {
-    case history
-    case entry(WorkspaceEntry)
-
-    var id: String {
-        switch self {
-        case .history: "history"
-        case let .entry(entry): "entry:\(entry.relativePath)"
-        }
-    }
-}
-
-private struct AssistantChatView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @EnvironmentObject private var digests: DigestService
-    @ObservedObject var assistant: AssistantStore
-    @ObservedObject var recorder: AudioCaptureStore
-    @ObservedObject var transcription: TranscriptionService
-    @AppStorage("allowAssistantMutations") private var allowMutations = false
-    @AppStorage("deepSeekModel") private var model = DeepSeekModel.fallback.rawValue
-    @AppStorage(TranscriptionEngineChoice.storageKey) private var transcriptionEngine = TranscriptionEngineChoice.fallback.rawValue
-    let close: () -> Void
-    let openSettings: () -> Void
-
-    @AppStorage("autoProcessTranscripts") private var autoProcess = true
-    @State private var draft = ""
-    @State private var sheet: ChatSheet?
-    @State private var showFileImporter = false
-    @FocusState private var composerFocused: Bool
-
-    private var hasConversation: Bool { !assistant.bubbles.isEmpty }
-
-    var body: some View {
-        ScrollViewReader { proxy in
-            ScrollView {
-                VStack(alignment: .leading, spacing: 0) {
-                    if hasConversation {
-                        ChatTranscript(
-                            bubbles: assistant.bubbles,
-                            isSending: assistant.isSending,
-                            transcription: transcription,
-                            openEntry: { sheet = .entry($0) }
-                        )
-                        .padding(.top, 14)
-                    } else {
-                        EmptyChatWelcome(openSettings: openSettings) { suggestion in
-                            draft = suggestion
-                            composerFocused = true
-                        }
-                        .padding(.top, 28)
-                    }
-                }
-                .padding(.bottom, 76)
-            }
-            .scrollIndicators(.hidden)
-            // Шапка приколочена сверху: внутри прокрутки она уезжала вместе с ответом,
-            // и на длинном ответе текст лез под статусную строку, а закрыть чат было нечем.
-            .safeAreaInset(edge: .top, spacing: 0) {
-                ChatToolbar(close: close, newChat: assistant.clear, history: { sheet = .history })
-                    .padding(.horizontal, 16)
-                    .padding(.top, 4)
-                    .padding(.bottom, 10)
-                    .background(LoriPalette.canvas)
-            }
-            .onChange(of: assistant.bubbles.count) { scrollToBottom(proxy) }
-            .onChange(of: assistant.isSending) { scrollToBottom(proxy) }
-        }
-        .safeAreaInset(edge: .bottom, spacing: 0) {
-            ChatComposer(
-                draft: $draft,
-                model: $model,
-                recorder: recorder,
-                transcriptionStatus: transcriptionStatus(transcription),
-                isSending: assistant.isSending,
-                focus: $composerFocused,
-                chooseFile: { showFileImporter = true },
-                primaryAction: send,
+    private var composerBar: some View {
+        ComposerBar(
+            model: composer,
+            recorder: recorder,
+            engines: engines,
+            speed: speed,
+            engine: engine,
+            mode: TranscriptionSettings.mode(for: engine.kind),
+            scopes: composerScopes,
+            contextSummary: contextSummary,
+            status: transcriptionStatus,
+            actions: ComposerActions(
+                record: startRecording,
+                stop: stopRecording,
                 togglePause: { recorder.isPaused ? recorder.resume() : recorder.pause() },
-                cancelRecording: { recorder.discard(in: workspace) }
+                cancelRecording: {
+                    recorder.discard(in: workspace)
+                    refresh()
+                },
+                pickFile: { showFileImporter = true },
+                paste: pasteAudio,
+                openSettings: { showSettings = true },
+                chooseEngine: { showEnginePicker = true },
+                setMode: { mode in
+                    TranscriptionSettings.setMode(mode, for: engine.kind)
+                    engines.refresh()
+                },
+                ask: askFromComposer,
+                transcribe: transcribeAttached
             )
-            .padding(.horizontal, 17)
-            .padding(.vertical, 10)
-            .background(LoriPalette.canvas)
+        )
+        .sheet(isPresented: $showEnginePicker) {
+            EnginePicker(directory: engines, selection: $engineRaw)
         }
-        .sheet(item: $sheet) { target in
-            switch target {
-            case .history:
-                ChatHistorySheet(
-                    conversations: assistant.history,
-                    select: { assistant.restore($0); sheet = nil },
-                    close: { sheet = nil }
-                )
-                .presentationDetents([.fraction(0.76), .large])
-                .presentationDragIndicator(.visible)
-                .presentationCornerRadius(44)
-            case let .entry(entry):
-                // Аудио открывается карточкой записи, всё остальное — редактором.
-                if entry.isAudio {
-                    RecordingSheet(
-                        entry: entry,
-                        transcription: transcription,
-                        isRecording: recorder.isCapturing,
-                        openTranscript: { path in
-                            guard let file = try? workspace.entry(at: path) else { return }
-                            sheet = .entry(file)
-                        }
-                    )
-                } else {
-                    NoteEditorSheet(target: .existing(entry), askAbout: { _ in sheet = nil })
-                }
-            }
+        .onChange(of: engineRaw) { engines.refresh() }
+        // Типы буфера читаются без содержимого, поэтому проверять их можно и на
+        // возврате в приложение: системной плашки о вставке это не вызывает.
+        .onAppear {
+            composer.refreshClipboard()
+            collectIncoming()
         }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
-            do {
-                guard let url = try result.get().first else { throw WorkspaceError.importFailed }
-                Task {
-                    await ChatIngest.bring(
-                        externalURL: url,
-                        into: workspace,
-                        assistant: assistant,
-                        transcription: transcription,
-                        digests: digests,
-                        model: model,
-                        autoProcess: autoProcess
-                    )
-                }
-            } catch {
-                workspace.lastError = error.localizedDescription
-            }
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            composer.refreshClipboard()
+            collectIncoming()
         }
-        .alert("Lori", isPresented: Binding(
-            get: { assistant.errorMessage != nil },
-            set: { if !$0 { assistant.errorMessage = nil } }
-        )) {
-            Button("Настройки") { openSettings() }
-            Button("OK", role: .cancel) { assistant.errorMessage = nil }
-        } message: {
-            Text(assistant.errorMessage ?? "")
-        }
-        .task {
-            if let prefilled = assistant.takePrefilledDraft() {
-                draft = prefilled
-                composerFocused = true
-            }
-            guard let prompt = assistant.takeQueuedPrompt() else { return }
-            await assistant.send(prompt, workspace: workspace, model: model, allowMutations: allowMutations)
-        }
+        .onOpenURL { url in receive(url) }
+        .onChange(of: composer.question.isEmpty) { _, _ in updateContextSummary() }
+        .onChange(of: composer.scopeID) { _, _ in updateContextSummary() }
     }
 
-    private func scrollToBottom(_ proxy: ScrollViewProxy) {
-        guard hasConversation else { return }
-        withAnimation(.easeOut(duration: 0.25)) {
-            proxy.scrollTo(ChatTranscript.bottomAnchor, anchor: .bottom)
+    /// Выбранный движок в терминах интерфейса.
+    private var engine: EngineDescriptor {
+        EngineCatalog.descriptor(for: TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam)
+    }
+
+    // MARK: - Состояние
+
+    private struct DayGroup: Identifiable {
+        let day: Date
+        let title: String
+        let items: [WorkspaceEntry]
+
+        var id: Date { day }
+    }
+
+    /// Охваты вопроса: весь архив и каждая заведённая тема. Полноценный выбор
+    /// отдельных записей — отдельная работа; фильтр тем уже есть и уже понятен.
+    private var askScopes: [AskScope] {
+        var result = [AskScope(id: "all", title: "Все", entries: workspace.audio)]
+        for topic in topics.topics {
+            let entries = workspace.audio.filter { topics.topic(for: $0.relativePath) == topic }
+            guard !entries.isEmpty else { continue }
+            result.append(AskScope(id: topic, title: topic, entries: entries))
         }
+        return result
     }
 
-    private func send() {
-        let prompt = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !prompt.isEmpty else { return }
-        draft = ""
-        composerFocused = false
-        Task {
-            await assistant.send(prompt, workspace: workspace, model: model, allowMutations: allowMutations)
+    /// Те же охваты, что у листа «Спросить», но в форме, понятной чипу панели:
+    /// у «Всех» показывается число записей, у темы — её название.
+    private var composerScopes: [ComposerScope] {
+        askScopes.map { ComposerScope(id: $0.id, title: $0.title, count: $0.entries.count) }
+    }
+
+    /// Сколько текста уйдёт ассистенту. Знаки оцениваются по размеру файлов, а не
+    /// чтением: расшифровок десятки, и открывать их ради строки над клавиатурой
+    /// нельзя. В кириллическом UTF-8 знак весит около 1,8 байта.
+    private func updateContextSummary() {
+        guard !composer.question.isEmpty else {
+            contextSummary = nil
+            return
         }
-    }
-}
-
-private struct ChatToolbar: View {
-    let close: () -> Void
-    let newChat: () -> Void
-    let history: () -> Void
-
-    var body: some View {
-        HStack {
-            CircleIconButton(symbol: "xmark", label: "Закрыть чат", action: close)
-            Spacer()
-            HStack(spacing: 13) {
-                Button(action: newChat) { Image(systemName: "square.and.pencil") }
-                    .accessibilityLabel("Новый чат")
-                Button(action: history) { Image(systemName: "clock.arrow.circlepath") }
-                    .accessibilityLabel("История чатов")
-            }
-            .font(.system(size: 24, weight: .regular))
-            .foregroundStyle(LoriPalette.ink)
-            .padding(.horizontal, 14)
-            .frame(height: 44)
-            .background(.white.opacity(0.88), in: Capsule())
+        let scope = askScopes.first { $0.id == composer.scopeID } ?? askScopes.first
+        let entries = scope?.entries ?? []
+        let sizes = transcriptSizes()
+        let found = entries.compactMap { entry -> Int? in
+            sizes[(entry.name as NSString).deletingPathExtension]
         }
-    }
-}
-
-private struct EmptyChatWelcome: View {
-    let openSettings: () -> Void
-    let chooseSuggestion: (String) -> Void
-    @State private var hasKey = true
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 22) {
-            Text("Привет, Илья")
-                .font(LoriFont.displaySmall)
-                .foregroundStyle(LoriPalette.ink)
-                .padding(.horizontal, 20)
-
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 8) {
-                    SuggestionChip(text: "Что у меня в заметках?", action: chooseSuggestion)
-                    SuggestionChip(text: "Какие задачи я записал?", action: chooseSuggestion)
-                    SuggestionChip(text: "Собери итоги последней записи", action: chooseSuggestion)
-                }
-                .padding(.horizontal, 17)
-            }
-
-            if !hasKey {
-                Button(action: openSettings) {
-                    Label("Подключить DeepSeek", systemImage: "key")
-                        .font(LoriFont.small)
-                        .foregroundStyle(LoriPalette.muted)
-                        .padding(.horizontal, 20)
-                }
-            }
+        guard !found.isEmpty else {
+            contextSummary = "В этом охвате пока нет расшифровок"
+            return
         }
-        .task { hasKey = (try? KeychainStore.deepSeekKey()) != nil }
-    }
-}
-
-private struct SuggestionChip: View {
-    let text: String
-    let action: (String) -> Void
-
-    var body: some View {
-        Button { action(text) } label: {
-            Text(text)
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.ink)
-                .padding(.horizontal, 14)
-                .padding(.vertical, 9)
-                .frame(minHeight: 38)
-                .background(LoriPalette.bubble, in: Capsule())
-        }
-        .buttonStyle(.plain)
-    }
-}
-
-private struct ChatTranscript: View {
-    static let bottomAnchor = "lori-transcript-bottom"
-
-    let bubbles: [ChatBubble]
-    let isSending: Bool
-    @ObservedObject var transcription: TranscriptionService
-    let openEntry: (WorkspaceEntry) -> Void
-
-    var body: some View {
-        // Новое сообщение и карточка вложения появляются движением: подстановка
-        // рывком читается как перерисовка, а не как «пришло».
-        LazyVStack(alignment: .leading, spacing: 18) {
-            ForEach(bubbles) { bubble in
-                switch bubble.role {
-                case .user:
-                    HStack {
-                        Spacer(minLength: 40)
-                        Text(bubble.text)
-                            .font(LoriFont.bubble)
-                            .foregroundStyle(LoriPalette.ink)
-                            .padding(.horizontal, 17)
-                            .padding(.vertical, 12)
-                            .background(LoriPalette.bubble, in: RoundedRectangle(cornerRadius: 20))
-                    }
-                    .id(bubble.id)
-                    .padding(.horizontal, 17)
-                case .assistant:
-                    VStack(alignment: .leading, spacing: 10) {
-                        // Модель отвечает Markdown’ом всегда. Без разбора человек читал
-                        // «**Где это записано:**» и обратные кавычки вокруг путей.
-                        MarkdownText(text: bubble.text)
-                        // Копируется исходный текст: в буфер нужен он, а не разобранный.
-                        CopyAnswerButton(text: bubble.text)
-                    }
-                    .id(bubble.id)
-                    .padding(.horizontal, 20)
-                case .system:
-                    Text(bubble.text)
-                        .font(LoriFont.small)
-                        .foregroundStyle(LoriPalette.muted)
-                        .id(bubble.id)
-                        .padding(.horizontal, 20)
-                case .attachment:
-                    // Принесённый файл — не текст, а карточка: видно и состояние
-                    // расшифровки, и что с ней стало дальше.
-                    if let path = bubble.path {
-                        ChatAttachmentCard(
-                            transcription: transcription,
-                            path: path,
-                            title: bubble.text,
-                            open: openEntry
-                        )
-                        .id(bubble.id)
-                        .padding(.horizontal, 17)
-                        .transition(.scale(scale: 0.96, anchor: .bottom).combined(with: .opacity))
-                    }
-                }
-            }
-
-            if isSending {
-                HStack(spacing: 7) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Думаю…")
-                }
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.muted)
-                .padding(.horizontal, 20)
-            }
-
-            Color.clear
-                .frame(height: 1)
-                .id(Self.bottomAnchor)
-        }
-        .animation(.easeOut(duration: 0.28), value: bubbles.count)
-    }
-}
-
-/// Единственное действие под ответом, которое действительно что-то делает.
-/// Лайк/дизлайк и «развернуть» были декорацией: их убрали.
-private struct CopyAnswerButton: View {
-    let text: String
-    @State private var copied = false
-
-    var body: some View {
-        Button {
-            UIPasteboard.general.string = text
-            copied = true
-            UIImpactFeedbackGenerator(style: .light).impactOccurred()
-            Task {
-                try? await Task.sleep(for: .seconds(2))
-                copied = false
-            }
-        } label: {
-            Label(copied ? "Скопировано" : "Скопировать", systemImage: copied ? "checkmark" : "doc.on.clipboard")
-                .font(LoriFont.small)
-                .foregroundStyle(LoriPalette.muted)
-        }
-        .buttonStyle(.plain)
-        .animation(.easeOut(duration: 0.15), value: copied)
-    }
-}
-
-private struct ChatComposer: View {
-    @Binding var draft: String
-    @Binding var model: String
-    @ObservedObject var recorder: AudioCaptureStore
-    let transcriptionStatus: String?
-    let isSending: Bool
-    var focus: FocusState<Bool>.Binding
-    let chooseFile: () -> Void
-    let primaryAction: () -> Void
-    let togglePause: () -> Void
-    let cancelRecording: () -> Void
-
-    private var selectedModel: DeepSeekModel { DeepSeekModel(storedValue: model) }
-    /// Со своим провайдером выбор моделей DeepSeek ничего не решает, поэтому вместо
-    /// меню в композере стоит имя той модели, к которой запрос действительно уйдёт.
-    /// Раньше здесь горело «V4 Flash», хотя запрос шёл в свою модель — это ложь.
-    private var customModelName: String? {
-        guard LLMSettings.isCustom else { return nil }
-        let name = LLMSettings.storedCustomModel
-        return name.isEmpty ? nil : name
+        let characters = Int(Double(found.reduce(0, +)) / 1.8)
+        let count = LoriFormat.plural(found.count, one: "расшифровке", few: "расшифровкам", many: "расшифровкам")
+        contextSummary = "Спрошу по \(count) · \(thousands(characters)) знаков"
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            if let transcriptionStatus {
-                TranscriptionStatusLine(text: transcriptionStatus)
-            }
-
-            if recorder.isCapturing {
-                RecordingPill(recorder: recorder, togglePause: togglePause, cancel: cancelRecording)
-                    .padding(.vertical, 2)
-            } else {
-                TextField("Спроси о своих заметках", text: $draft, axis: .vertical)
-                    .font(LoriFont.body)
-                    .foregroundStyle(LoriPalette.ink)
-                    .lineLimit(1...5)
-                    .focused(focus)
-                    .submitLabel(.send)
-                    .onSubmit(primaryAction)
-            }
-
-            HStack(spacing: 8) {
-                Button(action: chooseFile) {
-                    Image(systemName: "paperclip")
-                        .font(.system(size: 20, weight: .medium))
-                        .frame(width: 44, height: 44)
-                        .background(LoriPalette.canvas, in: Circle())
-                }
-                .foregroundStyle(LoriPalette.muted)
-                .accessibilityLabel("Добавить файл")
-
-                if let customModelName {
-                    Text(customModelName)
-                        .font(LoriFont.control)
-                        .foregroundStyle(LoriPalette.ink.opacity(0.82))
-                        .lineLimit(1)
-                        .padding(.horizontal, 14)
-                        .frame(height: 44)
-                        .background(LoriPalette.canvas, in: Capsule())
-                        .accessibilityIdentifier("chatModelName")
-                } else {
-                    Menu {
-                        Picker("Модель", selection: $model) {
-                            ForEach(DeepSeekModel.allCases) { option in
-                                Text(option.title).tag(option.rawValue)
-                            }
-                        }
-                    } label: {
-                        HStack(spacing: 6) {
-                            Text(selectedModel.title)
-                            Image(systemName: "chevron.down")
-                                .font(.system(size: 12, weight: .semibold))
-                        }
-                        .font(LoriFont.control)
-                        .foregroundStyle(LoriPalette.ink.opacity(0.82))
-                        .padding(.horizontal, 14)
-                        .frame(height: 44)
-                        .background(LoriPalette.canvas, in: Capsule())
-                    }
-                    .accessibilityIdentifier("chatModelName")
-                }
-
-                Spacer()
-                Button(action: primaryAction) {
-                    Image(systemName: primarySymbol)
-                        .font(.system(size: 20, weight: .medium))
-                        .foregroundStyle(LoriPalette.lime)
-                        .frame(width: 48, height: 48)
-                        .background(LoriPalette.limeSoft.opacity(0.68), in: Circle())
-                }
-                .disabled(isSending || !hasDraft)
-                .opacity(hasDraft ? 1 : 0.45)
-                .accessibilityLabel(primaryLabel)
-                // Опознаватель нужен тесту: у клавиатуры есть своя кнопка с той же
-                // подписью «Отправить», и поиск по подписи находит две.
-                .accessibilityIdentifier("chatPrimaryButton")
-            }
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 12)
-        .background(.white.opacity(0.9), in: RoundedRectangle(cornerRadius: 25))
-        .animation(.easeOut(duration: 0.2), value: recorder.isCapturing)
+    private func transcriptSizes() -> [String: Int] {
+        let files = (try? workspace.entries(at: "Transcripts")) ?? []
+        return Dictionary(
+            files.map { ((($0.name as NSString).deletingPathExtension), $0.size) },
+            uniquingKeysWith: { first, _ in first }
+        )
     }
 
-    private var hasDraft: Bool {
-        !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    private func thousands(_ value: Int) -> String {
+        value < 1_000 ? "\(value)" : "\((value + 500) / 1_000) тыс."
     }
 
-    /// Кнопка только отправляет. Микрофона в композере нет: он путал диктовку
-    /// вопроса с записью материала, а запись живёт в «+» на главной.
-    private var primarySymbol: String { "arrow.up" }
-
-    private var primaryLabel: String { "Отправить" }
-}
-
-private struct ChatHistorySheet: View {
-    let conversations: [SavedConversation]
-    let select: (SavedConversation) -> Void
-    let close: () -> Void
-    @State private var query = ""
-
-    private var filtered: [SavedConversation] {
-        guard !query.isEmpty else { return conversations }
-        return conversations.filter {
-            $0.title.localizedCaseInsensitiveContains(query) || $0.preview.localizedCaseInsensitiveContains(query)
-        }
+    private func openPending() {
+        guard let entry = pendingOpen else { return }
+        pendingOpen = nil
+        openedSeek = pendingSeek
+        pendingSeek = nil
+        opened = entry
     }
 
-    private var groups: [(title: String, items: [SavedConversation])] {
+    private var visible: [WorkspaceEntry] {
+        guard let topicFilter else { return workspace.audio }
+        return workspace.audio.filter { topics.topic(for: $0.relativePath) == topicFilter }
+    }
+
+    private var groups: [DayGroup] {
         let calendar = Calendar.current
-        var order: [Date] = []
-        var buckets: [Date: [SavedConversation]] = [:]
-        for conversation in filtered.sorted(by: { $0.updatedAt > $1.updatedAt }) {
-            let day = calendar.startOfDay(for: conversation.updatedAt)
-            if buckets[day] == nil { order.append(day) }
-            buckets[day, default: []].append(conversation)
+        let byDay = Dictionary(grouping: visible) { calendar.startOfDay(for: $0.modifiedAt) }
+        return byDay.keys.sorted(by: >).map { day in
+            DayGroup(
+                day: day,
+                title: LoriFormat.groupTitle(day),
+                items: (byDay[day] ?? []).sorted { $0.modifiedAt > $1.modifiedAt }
+            )
         }
-        return order.map { (LoriFormat.groupTitle($0), buckets[$0] ?? []) }
     }
 
-    var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 12) {
-                Button(action: close) {
-                    Image(systemName: "xmark")
-                        .font(.system(size: 17, weight: .semibold))
-                        .foregroundStyle(LoriPalette.ink)
-                        .frame(width: 44, height: 44)
-                        .background(LoriPalette.canvas, in: Circle())
-                        .overlay(Circle().stroke(LoriPalette.line, lineWidth: 1))
-                }
-                .accessibilityLabel("Закрыть историю")
-                Text("История")
-                    .font(LoriFont.displaySmall)
-                    .foregroundStyle(LoriPalette.ink)
-                Spacer(minLength: 0)
+    /// Заголовок карточки. Порядок важен: имя, заданное человеком, главнее
+    /// придуманного моделью, а оно — первой фразы расшифровки.
+    private func title(for entry: WorkspaceEntry) -> String {
+        if let title = summaries.title(for: entry.relativePath) { return title }
+        if let title = previews.preview(for: entry.relativePath)?.title, !title.isEmpty { return title }
+        return "Запись \(LoriFormat.stamp(entry.modifiedAt))"
+    }
+
+    /// Под заголовком — описание от модели, а без неё две строки расшифровки.
+    ///
+    /// Продолжение уместно только тогда, когда заголовок и правда взят из
+    /// текста. Если запись названа человеком или моделью, отрезать «то, что
+    /// ушло в заголовок» не от чего — и сниппет начинался бы с середины фразы.
+    private func snippet(for entry: WorkspaceEntry) -> String? {
+        if let detail = summaries.detail(for: entry.relativePath) { return detail }
+        guard let preview = previews.preview(for: entry.relativePath) else { return nil }
+        let titleIsFromText = summaries.title(for: entry.relativePath) == nil
+        return titleIsFromText ? preview.snippet : preview.head
+    }
+
+    /// «20:20 · 4:12»: время записи и её длительность.
+    private func stamp(for entry: WorkspaceEntry) -> String {
+        let time = LoriFormat.stamp(entry.modifiedAt)
+        guard let duration = durations.duration(for: entry.relativePath) else { return time }
+        return "\(time) · \(LoriFormat.duration(duration))"
+    }
+
+    /// Пометка «Без темы» показывается только в общем списке и только когда
+    /// темы вообще заведены — иначе она была бы на каждой карточке.
+    private func needsTopic(_ entry: WorkspaceEntry) -> Bool {
+        topicFilter == nil && !topics.topics.isEmpty && topics.topic(for: entry.relativePath) == nil
+    }
+
+    private func status(for entry: WorkspaceEntry) -> RecordingCard.Status? {
+        let path = entry.relativePath
+        if transcription.isRunning(path) {
+            if let fraction = transcription.progressFraction(for: path) {
+                return .init(text: "Расшифровывается · \(Int(fraction * 100))%", color: LoriPalette.info)
             }
-            .padding(.horizontal, 17)
-            .padding(.top, 14)
-
-            HStack(spacing: 9) {
-                Image(systemName: "magnifyingglass")
-                    .font(.system(size: 15, weight: .medium))
-                    .foregroundStyle(LoriPalette.muted)
-                TextField("Поиск по диалогам", text: $query)
-                    .font(LoriFont.body)
-            }
-            .padding(.horizontal, 16)
-            .frame(height: 46)
-            .background(LoriPalette.canvas, in: Capsule())
-            .padding(.horizontal, 17)
-            .padding(.top, 16)
-
-            if groups.isEmpty {
-                Text(query.isEmpty ? "Диалогов пока нет." : "Ничего не найдено.")
-                    .font(LoriFont.meta)
-                    .foregroundStyle(LoriPalette.muted)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 24)
-                Spacer(minLength: 0)
-            } else {
-                ScrollView {
-                    LazyVStack(alignment: .leading, spacing: 0) {
-                        ForEach(groups, id: \.title) { group in
-                            Text(group.title)
-                                .font(LoriFont.section)
-                                .foregroundStyle(LoriPalette.muted)
-                                .padding(.horizontal, 20)
-                                .padding(.top, 20)
-                                .padding(.bottom, 8)
-
-                            ForEach(group.items) { conversation in
-                                Button { select(conversation) } label: {
-                                    HStack(alignment: .top, spacing: 10) {
-                                        VStack(alignment: .leading, spacing: 4) {
-                                            Text(conversation.title)
-                                                .font(LoriFont.cardTitle)
-                                                .foregroundStyle(LoriPalette.ink)
-                                                .lineLimit(1)
-                                            Text(conversation.preview)
-                                                .font(LoriFont.meta)
-                                                .foregroundStyle(LoriPalette.muted)
-                                                .lineLimit(2)
-                                                .multilineTextAlignment(.leading)
-                                        }
-                                        Spacer(minLength: 0)
-                                        Text(LoriFormat.relative(conversation.updatedAt))
-                                            .font(LoriFont.small)
-                                            .foregroundStyle(LoriPalette.muted.opacity(0.8))
-                                    }
-                                    .padding(.horizontal, 16)
-                                    .padding(.vertical, 13)
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                                    .background(LoriPalette.canvas.opacity(0.8), in: RoundedRectangle(cornerRadius: 18))
-                                }
-                                .buttonStyle(.plain)
-                                .padding(.horizontal, 17)
-                                .padding(.bottom, 8)
-                            }
-                        }
-                    }
-                    .padding(.bottom, 24)
-                }
-            }
+            return .init(text: "Расшифровывается", color: LoriPalette.info)
         }
-        .background(.white)
-        .recordingBanner(close: close)
-    }
-}
-
-private struct FolderDrawer: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    let close: () -> Void
-    let openFolder: (String) -> Void
-    let openWiki: () -> Void
-
-    @State private var folders: [WorkspaceEntry] = []
-    @State private var query = ""
-    @State private var showCreateFolder = false
-    @State private var folderName = ""
-    @State private var loadError: String?
-
-    private var filteredFolders: [WorkspaceEntry] {
-        guard !query.isEmpty else { return folders }
-        return folders.filter { $0.name.localizedCaseInsensitiveContains(query) }
-    }
-
-    var body: some View {
-        ZStack(alignment: .leading) {
-            Color.black.opacity(0.22)
-                .ignoresSafeArea()
-                .onTapGesture(perform: close)
-
-            VStack(alignment: .leading, spacing: 0) {
-                Button {
-                    showCreateFolder = true
-                } label: {
-                    Label("Создать новую папку", systemImage: "folder.badge.plus")
-                        .font(LoriFont.control)
-                        .foregroundStyle(LoriPalette.ink)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .frame(minHeight: 58)
-                }
-                .buttonStyle(.plain)
-
-                // Вики живёт рядом с папками: это второй способ смотреть на то же
-                // хранилище — по темам, тегам и связям, а не по дереву каталогов.
-                Button(action: openWiki) {
-                    Label("Вики: темы и связи", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                        .font(LoriFont.control)
-                        .foregroundStyle(LoriPalette.ink)
-                        .padding(.horizontal, 20)
-                        .padding(.vertical, 10)
-                        .frame(minHeight: 50)
-                }
-                .buttonStyle(.plain)
-
-                Text("Папки")
-                    .font(LoriFont.section)
-                    .foregroundStyle(LoriPalette.muted)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 9)
-                    .padding(.bottom, 12)
-
-                if let loadError {
-                    Text(loadError)
-                        .font(.footnote)
-                        .foregroundStyle(.red)
-                        .padding(.horizontal, 20)
-                } else if filteredFolders.isEmpty {
-                    Text(query.isEmpty ? "Папок пока нет." : "Ничего не найдено.")
-                        .font(LoriFont.meta)
-                        .foregroundStyle(LoriPalette.muted)
-                        .padding(.horizontal, 20)
-                        .padding(.top, 8)
-                } else {
-                    ScrollView {
-                        LazyVStack(alignment: .leading, spacing: 0) {
-                            ForEach(filteredFolders) { folder in
-                                Button { openFolder(folder.relativePath) } label: {
-                                    Label(folder.name, systemImage: "folder.fill")
-                                        .font(LoriFont.body)
-                                        .foregroundStyle(LoriPalette.ink)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .padding(.horizontal, 20)
-                                        .padding(.vertical, 8)
-                                        .frame(minHeight: 50)
-                                }
-                                .buttonStyle(.plain)
-                            }
-                        }
-                    }
-                }
-
-                Spacer(minLength: 12)
-
-                HStack(spacing: 9) {
-                    Image(systemName: "magnifyingglass")
-                        .foregroundStyle(LoriPalette.muted)
-                    TextField("Поиск папок", text: $query)
-                        .textInputAutocapitalization(.never)
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 48)
-                .background(LoriPalette.canvas, in: Capsule())
-                .padding(16)
-            }
-            .frame(maxWidth: 330, maxHeight: .infinity, alignment: .leading)
-            .background(.white)
-            .transition(.move(edge: .leading))
+        if transcription.isQueued(path) {
+            // «Жду память» и «в очереди» — разные вещи: первое может и не пройти,
+            // если телефону и правда тесно, и человек вправе видеть разницу.
+            let waiting = transcription.waitingForMemory.contains(path) ? "Жду память" : "В очереди"
+            return .init(text: waiting, color: LoriPalette.warn)
         }
-        .task { reload() }
-        .alert("Новая папка", isPresented: $showCreateFolder) {
-            TextField("Название", text: $folderName)
-            Button("Создать") {
-                do {
-                    let path = try workspace.createFolder(named: folderName)
-                    folderName = ""
-                    openFolder(path)
-                } catch {
-                    workspace.lastError = error.localizedDescription
-                }
-            }
-            Button("Отмена", role: .cancel) { folderName = "" }
-        } message: {
-            Text("Папка останется локально на этом iPhone.")
+        if transcription.isInterrupted(path) {
+            return .init(text: "Прервано", color: LoriPalette.warn)
         }
-    }
-
-    private func reload() {
-        do {
-            folders = try workspace.entries(at: "").filter(\.isDirectory)
-            loadError = nil
-        } catch {
-            folders = []
-            loadError = error.localizedDescription
+        if transcription.error(for: path) != nil {
+            return .init(text: "Ошибка", color: LoriPalette.danger)
         }
-    }
-}
-
-private struct WorkspaceBrowserView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @Environment(\.dismiss) private var dismiss
-    let initialPath: String
-    @ObservedObject var transcription: TranscriptionService
-    /// Нужен только чтобы плеер знал про идущую запись: аудиосессия одна на приложение.
-    @ObservedObject var recorder: AudioCaptureStore
-    let askAbout: (String) -> Void
-
-    @State private var relativePath: String
-    @State private var items: [WorkspaceEntry] = []
-    @State private var sheet: EntrySheet?
-    @State private var renameTarget: WorkspaceEntry?
-    @State private var deleteTarget: WorkspaceEntry?
-    @State private var showAddMenu = false
-    @State private var showFileImporter = false
-    @State private var loadError: String?
-
-    init(
-        initialPath: String,
-        transcription: TranscriptionService,
-        recorder: AudioCaptureStore,
-        askAbout: @escaping (String) -> Void = { _ in }
-    ) {
-        self.initialPath = initialPath
-        self.transcription = transcription
-        self.recorder = recorder
-        self.askAbout = askAbout
-        _relativePath = State(initialValue: initialPath)
-    }
-
-    private var title: String {
-        relativePath.isEmpty ? "Мои файлы" : URL(fileURLWithPath: relativePath).lastPathComponent
-    }
-
-    private var folderQuestion: String {
-        relativePath.isEmpty
-            ? "Что у меня есть в заметках?"
-            : "Что лежит в папке «\(title)» и что там важного?"
-    }
-
-    private var parentPath: String {
-        let components = relativePath.split(separator: "/", omittingEmptySubsequences: true)
-        return components.dropLast().joined(separator: "/")
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if let loadError {
-                    ContentUnavailableView("Не удалось открыть папку", systemImage: "exclamationmark.triangle", description: Text(loadError))
-                } else if items.isEmpty {
-                    ContentUnavailableView(
-                        "Папка пуста",
-                        systemImage: "folder",
-                        description: Text("Нажми «+», чтобы создать заметку или добавить файл с iPhone.")
-                    )
-                } else {
-                    // `List` остаётся ради свайпа по строке, но строки — те же карточки,
-                    // что на главной: системный список с разделителями выпадал из языка приложения.
-                    List {
-                        folderHeader
-                            .listRowInsets(EdgeInsets(top: 4, leading: 17, bottom: 18, trailing: 17))
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .selectionDisabled()
-
-                        ForEach(items) { entry in
-                            Button { open(entry) } label: {
-                                if entry.isDirectory {
-                                    FolderRow(entry: entry)
-                                } else {
-                                    NoteCard(
-                                        entry: entry,
-                                        isTranscribing: transcription.isRunning(entry.relativePath),
-                                        progressText: transcription.progressText(for: entry.relativePath)
-                                    )
-                                }
-                            }
-                            .buttonStyle(.plain)
-                            .listRowInsets(EdgeInsets(top: 4, leading: 17, bottom: 4, trailing: 17))
-                            .listRowBackground(Color.clear)
-                            .listRowSeparator(.hidden)
-                            .swipeActions(edge: .trailing) {
-                                EntryMenuButtons(
-                                    rename: { renameTarget = entry },
-                                    delete: { deleteTarget = entry },
-                                    transcribe: entry.isAudio ? { transcribe(entry) } : nil
-                                )
-                            }
-                            .contextMenu {
-                                EntryMenuButtons(
-                                    rename: { renameTarget = entry },
-                                    delete: { deleteTarget = entry },
-                                    transcribe: entry.isAudio ? { transcribe(entry) } : nil,
-                                    openTranscript: workspace.existingTranscript(for: entry).map { path in
-                                        { openTranscript(path) }
-                                    }
-                                )
-                            }
-                        }
-                    }
-                    .listStyle(.plain)
-                    .scrollContentBackground(.hidden)
-                    .refreshable { reload() }
-                }
-            }
-            .background(LoriPalette.canvas)
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    if relativePath.isEmpty {
-                        Button("Готово") { dismiss() }
-                    } else {
-                        Button {
-                            relativePath = parentPath
-                        } label: {
-                            Label("Назад", systemImage: "chevron.left")
-                        }
-                        .accessibilityLabel("Назад")
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Button {
-                        showAddMenu = true
-                    } label: {
-                        Image(systemName: "plus")
-                    }
-                    .accessibilityLabel("Добавить в эту папку")
-                }
-            }
-            .safeAreaInset(edge: .bottom) {
-                Button { askAbout(folderQuestion) } label: {
-                    Label("Спросить про папку", systemImage: "bubble.left.and.text.bubble.right")
-                        .font(LoriFont.control)
-                        .foregroundStyle(LoriPalette.ink)
-                        .padding(.vertical, 14)
-                        .frame(maxWidth: .infinity)
-                        .background(.white.opacity(0.9), in: Capsule())
-                        .overlay(Capsule().stroke(LoriPalette.line, lineWidth: 1))
-                }
-                .buttonStyle(.plain)
-                .padding(.horizontal, 17)
-                .padding(.bottom, 8)
-                .background(LoriPalette.canvas)
-            }
+        if workspace.existingTranscript(for: entry) == nil {
+            return .init(text: "Без расшифровки", color: LoriPalette.muted)
         }
-        .recordingBanner { dismiss() }
-        .onChange(of: relativePath) { reload() }
-        .task { reload() }
-        .sheet(item: $sheet) { target in
-            switch target {
-            case let .editor(editor):
-                NoteEditorSheet(target: editor, didChange: reload, askAbout: askAbout)
-            case let .recording(entry):
-                RecordingSheet(
-                    entry: entry,
-                    transcription: transcription,
-                    isRecording: recorder.isCapturing,
-                    openTranscript: openTranscript
-                )
-            case .wiki:
-                WikiSheet(openNote: openTranscript)
-            }
-        }
-        .modifier(EntryMutationAlerts(renameTarget: $renameTarget, deleteTarget: $deleteTarget, didChange: reload))
-        .confirmationDialog("Добавить в эту папку", isPresented: $showAddMenu, titleVisibility: .visible) {
-            Button("Новая заметка") { sheet = .editor(.draft(directory: relativePath)) }
-            Button("Выбрать файл") { showFileImporter = true }
-            Button("Отмена", role: .cancel) {}
-        }
-        .fileImporter(isPresented: $showFileImporter, allowedContentTypes: [.item], allowsMultipleSelection: false) { result in
-            do {
-                guard let url = try result.get().first else { throw WorkspaceError.importFailed }
-                try workspace.importFile(from: url, into: relativePath)
-                reload()
-            } catch {
-                workspace.lastError = error.localizedDescription
-            }
-        }
+        return nil
     }
 
-    private func reload() {
-        do {
-            items = try workspace.entries(at: relativePath)
-            loadError = nil
-        } catch {
-            items = []
-            loadError = error.localizedDescription
-        }
-    }
-
-    /// Крупный заголовок папки вместо строки 17pt в навигационной панели —
-    /// шапка экрана-документа, как «Мои заметки» на главной.
-    private var folderHeader: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text(title)
-                .font(LoriFont.display)
-                .foregroundStyle(LoriPalette.ink)
-                .lineLimit(2)
-            Text(headerCount)
-                .font(LoriFont.meta)
-                .foregroundStyle(LoriPalette.muted)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    private var headerCount: String {
-        let folders = items.filter(\.isDirectory).count
-        let files = items.count - folders
-        let filesText = LoriFormat.plural(files, one: "файл", few: "файла", many: "файлов")
-        guard folders > 0 else { return filesText }
-        let foldersText = LoriFormat.plural(folders, one: "папка", few: "папки", many: "папок")
-        return files > 0 ? "\(foldersText) · \(filesText)" : foldersText
-    }
-
-    private func open(_ entry: WorkspaceEntry) {
-        if entry.isDirectory {
-            relativePath = entry.relativePath
-        } else if entry.isAudio {
-            sheet = .recording(entry)
+    /// Одна строка на любое число расшифровок в работе. Записей теперь может идти
+    /// несколько сразу, и «Расшифровываю запись…» в единственном числе врало бы.
+    private var transcriptionStatus: String? {
+        if importingAttached { return "Добавляю запись…" }
+        let running = transcription.running.sorted()
+        let queued = transcription.queued.count
+        guard let single = running.first else { return nil }
+        var base: String
+        if running.count == 1 {
+            let progress = transcription.progressText(for: single)
+            base = progress.map { "Расшифровываю запись… \($0)" } ?? "Расшифровываю запись…"
         } else {
-            sheet = .editor(.existing(entry))
+            base = "Расшифровываю \(LoriFormat.plural(running.count, one: "запись", few: "записи", many: "записей"))"
         }
+        if queued > 0 { base += " · в очереди \(queued)" }
+        // Про фон говорим только тогда, когда его действительно нет: обещать его
+        // молча нельзя, но и сообщать о нём каждый раз незачем.
+        if case let .foregroundOnly(reason) = runway.state, !reason.isEmpty {
+            base += " · только пока приложение открыто"
+        }
+        return base
     }
 
-    private func openTranscript(_ path: String) {
-        guard let entry = try? workspace.entry(at: path) else { return }
-        sheet = .editor(.existing(entry))
+    private var activeError: String? { workspace.lastError ?? transcription.lastError ?? startError }
+
+    private func clearErrors() {
+        workspace.lastError = nil
+        transcription.lastError = nil
+        startError = nil
     }
 
-    /// Как и на главной: результат показывает карточка записи с переключателем
-    /// «Важное ↔ Расшифровка», а не сразу файл расшифровки.
-    private func transcribe(_ entry: WorkspaceEntry) {
-        sheet = .recording(entry)
-        Task {
-            await transcription.transcribe(entry, in: workspace)
-            reload()
-        }
-    }
-}
-
-/// Что открыто поверх списка. Лист на экране ровно один: два модификатора
-/// `.sheet` на одной View гасят друг друга так же, как два `.alert`.
-private enum EntrySheet: Identifiable, Hashable {
-    case editor(NoteEditorTarget)
-    case recording(WorkspaceEntry)
-    case wiki
-
-    var id: String {
-        switch self {
-        case let .editor(target): target.id
-        case let .recording(entry): "audio:\(entry.relativePath)"
-        case .wiki: "wiki"
-        }
-    }
-}
-
-private enum NoteEditorTarget: Identifiable, Hashable {
-    case existing(WorkspaceEntry)
-    case draft(directory: String)
-
-    var id: String {
-        switch self {
-        case let .existing(entry): "file:\(entry.relativePath)"
-        case let .draft(directory): "draft:\(directory)"
-        }
-    }
-}
-
-/// Редактор заметки. Текст сохраняется по «Готово» и при закрытии свайпом,
-/// поэтому набранное не теряется. Пустой черновик файла не создаёт.
-private struct NoteEditorSheet: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @Environment(\.dismiss) private var dismiss
-
-    let target: NoteEditorTarget
-    let didChange: () -> Void
-    let askAbout: ((String) -> Void)?
-
-    @State private var text = ""
-    @State private var loadedText = ""
-    @State private var path: String?
-    @State private var title: String
-    @State private var loadError: String?
-    @State private var showRename = false
-    @State private var draftName = ""
-    @State private var confirmDelete = false
-    @FocusState private var focused: Bool
-
-    init(
-        target: NoteEditorTarget,
-        didChange: @escaping () -> Void = {},
-        askAbout: ((String) -> Void)? = nil
-    ) {
-        self.target = target
-        self.didChange = didChange
-        self.askAbout = askAbout
-        switch target {
-        case let .existing(entry):
-            _path = State(initialValue: entry.relativePath)
-            _title = State(initialValue: entry.name)
-        case .draft:
-            _path = State(initialValue: nil)
-            _title = State(initialValue: "Новая заметка")
-        }
+    private func suggestion(for entry: WorkspaceEntry) -> String? {
+        let text = previews.preview(for: entry.relativePath)?.snippet ?? ""
+        return topics.suggestion(for: text)
     }
 
-    private var isDirty: Bool { text != loadedText }
-
-    private var displayTitle: String { (title as NSString).deletingPathExtension }
-
-    private var subtitle: String? {
-        guard case let .existing(entry) = target else { return nil }
-        return LoriFormat.stamp(entry.modifiedAt)
-    }
-
-    private var draftDirectory: String {
-        switch target {
-        case .existing: ""
-        case let .draft(directory): directory
-        }
-    }
-
-    var body: some View {
-        NavigationStack {
-            Group {
-                if let loadError {
-                    ContentUnavailableView(
-                        "Не удалось открыть",
-                        systemImage: "exclamationmark.triangle",
-                        description: Text(loadError)
-                    )
-                } else {
-                    VStack(alignment: .leading, spacing: 0) {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text(displayTitle)
-                                .font(LoriFont.displaySmall)
-                                .foregroundStyle(LoriPalette.ink)
-                            if let subtitle {
-                                Text(subtitle)
-                                    .font(LoriFont.meta)
-                                    .foregroundStyle(LoriPalette.muted)
-                            }
-                        }
-                        .padding(.horizontal, 20)
-                        .padding(.top, 6)
-                        .padding(.bottom, 8)
-
-                        TextEditor(text: $text)
-                            .font(LoriFont.body)
-                            .foregroundStyle(LoriPalette.ink)
-                            .lineSpacing(4)
-                            .scrollContentBackground(.hidden)
-                            .focused($focused)
-                            .padding(.horizontal, 16)
-                    }
-                }
-            }
-            .background(LoriPalette.canvas)
-            .navigationBarTitleDisplayMode(.inline)
-            .safeAreaInset(edge: .bottom) {
-                if let askAbout, path != nil {
-                    Button {
-                        askAbout("Что важного в заметке «\(displayTitle)»?")
-                        save()
-                        dismiss()
-                    } label: {
-                        Label("Спросить про заметку", systemImage: "bubble.left.and.text.bubble.right")
-                            .font(LoriFont.control)
-                            .foregroundStyle(LoriPalette.ink)
-                            .padding(.vertical, 14)
-                            .frame(maxWidth: .infinity)
-                            .background(.white.opacity(0.9), in: Capsule())
-                            .overlay(Capsule().stroke(LoriPalette.line, lineWidth: 1))
-                    }
-                    .buttonStyle(.plain)
-                    .padding(.horizontal, 17)
-                    .padding(.bottom, 8)
-                    .background(LoriPalette.canvas)
-                }
-            }
-            .toolbar {
-                ToolbarItem(placement: .topBarLeading) {
-                    Button("Готово") {
-                        save()
-                        dismiss()
-                    }
-                }
-                ToolbarItem(placement: .topBarTrailing) {
-                    Menu {
-                        Button {
-                            draftName = (title as NSString).deletingPathExtension
-                            showRename = true
-                        } label: { Label("Переименовать", systemImage: "pencil") }
-                        Button(role: .destructive) { confirmDelete = true } label: {
-                            Label("В корзину Lori", systemImage: "trash")
-                        }
-                    } label: {
-                        Image(systemName: "ellipsis.circle")
-                    }
-                    .disabled(path == nil)
-                }
-            }
-            .alert("Переименовать", isPresented: $showRename) {
-                TextField("Название", text: $draftName)
-                Button("Сохранить") { rename() }
-                Button("Отмена", role: .cancel) {}
-            } message: {
-                Text("Заметка останется в той же папке Lori.")
-            }
-            .confirmationDialog("Удалить заметку?", isPresented: $confirmDelete, titleVisibility: .visible) {
-                Button("Перенести в корзину Lori", role: .destructive) { moveToTrash() }
-                Button("Отмена", role: .cancel) {}
-            } message: {
-                Text("Файл переедет в локальную корзину, а не удалится безвозвратно.")
-            }
-        }
-        .recordingBanner {
-            save()
-            dismiss()
-        }
-        .task {
-            guard case let .existing(entry) = target else {
-                focused = true
-                return
-            }
-            do {
-                let loaded = try workspace.readText(at: entry.relativePath)
-                text = loaded
-                loadedText = loaded
-            } catch {
-                loadError = error.localizedDescription
-            }
-        }
-        .onDisappear { save() }
-    }
-
-    private func save() {
-        guard loadError == nil, isDirty else { return }
-        do {
-            if let path {
-                try workspace.writeText(text, at: path)
-            } else {
-                guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
-                let created = try workspace.createNote(in: draftDirectory, content: text)
-                path = created
-                title = URL(fileURLWithPath: created).lastPathComponent
-            }
-            loadedText = text
-            didChange()
-        } catch {
-            workspace.lastError = error.localizedDescription
-        }
-    }
-
-    private func rename() {
-        guard let current = path else { return }
-        do {
-            let updated = try workspace.renameItem(at: current, toName: draftName)
-            path = updated
-            title = URL(fileURLWithPath: updated).lastPathComponent
-            didChange()
-        } catch {
-            workspace.lastError = error.localizedDescription
-        }
-    }
-
-    private func moveToTrash() {
-        guard let current = path else { return }
-        do {
-            try workspace.moveToTrash(current)
-            loadedText = text
-            didChange()
-            dismiss()
-        } catch {
-            workspace.lastError = error.localizedDescription
-        }
-    }
-}
-
-private struct EntryMenuButtons: View {
-    let rename: () -> Void
-    let delete: () -> Void
-    var transcribe: (() -> Void)?
-    var openTranscript: (() -> Void)?
-
-    var body: some View {
-        if let openTranscript {
-            Button(action: openTranscript) { Label("Открыть расшифровку", systemImage: "doc.text") }
-        }
-        if let transcribe {
-            Button(action: transcribe) { Label("Расшифровать", systemImage: "waveform.badge.magnifyingglass") }
-        }
-        Button(action: rename) { Label("Переименовать", systemImage: "pencil") }
-        Button(role: .destructive, action: delete) { Label("В корзину Lori", systemImage: "trash") }
-    }
-}
-
-/// Диалоги переименования и удаления живут на контейнере, а не на строке списка:
-/// строка исчезает вместе с файлом и увела бы диалог за собой.
-private struct EntryMutationAlerts: ViewModifier {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @Binding var renameTarget: WorkspaceEntry?
-    @Binding var deleteTarget: WorkspaceEntry?
-    let didChange: () -> Void
-    @State private var draftName = ""
-
-    func body(content: Content) -> some View {
-        content
-            .onChange(of: renameTarget) { _, target in
-                guard let target else { return }
-                draftName = target.isDirectory ? target.name : (target.name as NSString).deletingPathExtension
-            }
-            .alert("Переименовать", isPresented: isPresented($renameTarget), presenting: renameTarget) { entry in
-                TextField("Название", text: $draftName)
-                Button("Сохранить") {
-                    do {
-                        _ = try workspace.renameItem(at: entry.relativePath, toName: draftName)
-                        didChange()
-                    } catch {
-                        workspace.lastError = error.localizedDescription
-                    }
-                }
-                Button("Отмена", role: .cancel) {}
-            } message: { _ in
-                Text("Элемент останется в той же папке Lori.")
-            }
-            .confirmationDialog(
-                "Удалить?",
-                isPresented: isPresented($deleteTarget),
-                titleVisibility: .visible,
-                presenting: deleteTarget
-            ) { entry in
-                Button("Перенести в корзину Lori", role: .destructive) {
-                    do {
-                        try workspace.moveToTrash(entry.relativePath)
-                        didChange()
-                    } catch {
-                        workspace.lastError = error.localizedDescription
-                    }
-                }
-                Button("Отмена", role: .cancel) {}
-            } message: { entry in
-                Text("«\(entry.name)» переедет в локальную корзину Lori, а не удалится безвозвратно.")
-            }
+    /// Находка поиска — это расшифровка, а открывать нужно запись, к которой она относится.
+    private func audioEntry(for hit: SearchHit) -> WorkspaceEntry? {
+        guard hit.entry.relativePath.hasPrefix("Transcripts/") else { return hit.entry }
+        let base = (hit.entry.name as NSString).deletingPathExtension
+        return workspace.audio.first { ($0.name as NSString).deletingPathExtension == base }
     }
 
     private func isPresented(_ target: Binding<WorkspaceEntry?>) -> Binding<Bool> {
         Binding(get: { target.wrappedValue != nil }, set: { if !$0 { target.wrappedValue = nil } })
     }
+
+    // MARK: - Действия
+
+    private func startRecording() {
+        Task {
+            do {
+                try await recorder.start(in: workspace)
+            } catch {
+                startError = error.localizedDescription
+            }
+        }
+    }
+
+    private func stopRecording() {
+        guard let path = recorder.stop() else { return }
+        refresh()
+        guard autoTranscribe, let entry = try? workspace.entry(at: path) else { return }
+        transcription.enqueue(entry, in: workspace)
+    }
+
+    /// Выбранный файл прикрепляется к панели, а не уходит в работу сам.
+    /// Человек должен увидеть движок и цену до запуска, а не после.
+    private func attachFiles(_ result: Result<[URL], Error>) {
+        do {
+            // Копия снимается сразу: доступ к чужому файлу живёт, пока держат
+            // security scope, а до нажатия «Расшифровать» проходит сколько угодно.
+            composer.attach(try result.get().map { try ImportInbox.stage($0) })
+        } catch {
+            workspace.lastError = error.localizedDescription
+        }
+    }
+
+    /// «Поделиться» → Lori и Быстрые команды: файл уже лежит в промежуточной
+    /// папке, панели остаётся его показать.
+    private func collectIncoming() {
+        ImportInbox.drainSystemInbox()
+        let waiting = ImportInbox.waiting()
+        guard !waiting.isEmpty else { return }
+        composer.attach(waiting)
+    }
+
+    private func receive(_ url: URL) {
+        do {
+            composer.attach([try ImportInbox.stage(url)])
+        } catch {
+            workspace.lastError = error.localizedDescription
+        }
+    }
+
+    /// Ленивый поставщик отдаёт файл асинхронно, поэтому вставка — задача,
+    /// а не мгновенное действие.
+    private func pasteAudio() {
+        Task {
+            do {
+                composer.attach([try await ClipboardAudio.take()])
+            } catch {
+                workspace.lastError = error.localizedDescription
+            }
+            composer.refreshClipboard()
+        }
+    }
+
+    /// Прикреплённое уходит в рабочую папку и в очередь — по явному нажатию.
+    private func transcribeAttached() {
+        let files = composer.attached
+        guard !files.isEmpty, !importingAttached else { return }
+        importingAttached = true
+        Task {
+            defer { importingAttached = false }
+            do {
+                var imported: [String] = []
+                for file in files {
+                    let path = try await workspace.importFileAsync(from: file.url)
+                    // Пока модель не посчитала заголовок, сохраняем понятное имя
+                    // файла. Это не запрет модели впоследствии назвать запись.
+                    summaries.setImported(title: (file.name as NSString).deletingPathExtension, for: path)
+                    imported.append(path)
+                }
+                // Только теперь: `clear` убирает файлы из промежуточной папки, и
+                // сделай он это раньше — импортировать было бы уже нечего.
+                composer.clear()
+                refresh()
+                for path in imported {
+                    guard let entry = try? workspace.entry(at: path) else { continue }
+                    transcription.enqueue(entry, in: workspace)
+                }
+            } catch {
+                workspace.lastError = error.localizedDescription
+            }
+        }
+    }
+
+    private func askFromComposer() {
+        let asked = composer.question.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !asked.isEmpty else { return }
+        askedQuestion = asked
+        composer.question = ""
+        showAsk = true
+    }
+
+    /// Заголовок от локальной модели — после того, как расшифровка легла на диск.
+    private func requestSummary(for relativePath: String) {
+        let runner = summaryRunner
+        guard let entry = try? workspace.entry(at: relativePath),
+              let transcript = workspace.existingTranscript(for: entry),
+              let markdown = try? workspace.readText(at: transcript) else { return }
+        runner.summarize(path: relativePath, text: TranscriptTitle.plain(from: markdown))
+    }
+
+    private func delete(_ entry: WorkspaceEntry) {
+        do {
+            // Расшифровка уходит в корзину вместе с записью: одна без другой не нужна.
+            if let transcript = workspace.existingTranscript(for: entry) {
+                try workspace.moveToTrash(transcript)
+            }
+            try workspace.moveToTrash(entry.relativePath)
+            topics.forget(entry.relativePath)
+            summaries.forget(entry.relativePath)
+            speakers.forget(entry.relativePath)
+            previews.invalidate(entry.relativePath)
+        } catch {
+            workspace.lastError = error.localizedDescription
+        }
+    }
+
+    private func commitRename() {
+        guard let entry = renameTarget else { return }
+        renameTarget = nil
+        do {
+            // Расшифровка переезжает вместе с записью: иначе текст остаётся
+            // сиротой и на экране выглядит пропавшим.
+            let path = try workspace.renameRecording(at: entry.relativePath, toName: renameDraft)
+            // Тема привязана к пути, поэтому при переименовании её нужно перенести.
+            if let topic = topics.topic(for: entry.relativePath) {
+                topics.assign(topic, to: path)
+                topics.forget(entry.relativePath)
+            }
+            summaries.move(from: entry.relativePath, to: path)
+            speakers.move(from: entry.relativePath, to: path)
+            summaries.setManual(title: renameDraft, for: path)
+            previews.invalidate(entry.relativePath)
+        } catch {
+            workspace.lastError = error.localizedDescription
+        }
+    }
+
+    /// Из списка расшифровка уходит тем же файлом, что и с экрана записи:
+    /// раньше здесь наружу отдавался сырой текст `.md` — с решётками,
+    /// звёздочками и метками «S1» вместо имён.
+    private func export(_ entry: WorkspaceEntry, as format: TranscriptExportFormat) {
+        shareTarget = nil
+        guard let text = transcriptText(entry) else {
+            workspace.lastError = "У этой записи ещё нет расшифровки."
+            return
+        }
+        let payload = TranscriptExport.make(
+            markdown: text,
+            title: title(for: entry),
+            recordedAt: entry.modifiedAt,
+            duration: durations.duration(for: entry.relativePath),
+            detail: summaries.detail(for: entry.relativePath),
+            topic: topics.topic(for: entry.relativePath),
+            names: speakers.names[entry.relativePath] ?? [:]
+        )
+        Task {
+            do {
+                share = SharePayload(url: try await payload.file(as: format), subject: payload.title)
+            } catch {
+                workspace.lastError = "Не удалось собрать файл: \(error.localizedDescription)"
+            }
+        }
+    }
+
+    private func sendToObsidian(_ entry: WorkspaceEntry) {
+        guard let text = transcriptText(entry) else {
+            workspace.lastError = "У этой записи ещё нет расшифровки."
+            return
+        }
+        guard let url = ObsidianExport.url(title: title(for: entry), text: text) else {
+            workspace.lastError = "Укажи название хранилища Obsidian: Настройки → Хранилище."
+            return
+        }
+        openURL(url)
+    }
+
+    private func transcriptText(_ entry: WorkspaceEntry) -> String? {
+        guard let path = workspace.existingTranscript(for: entry),
+              let text = try? workspace.readText(at: path), !text.isEmpty else { return nil }
+        return text
+    }
+
+    private func refresh() {
+        workspace.requestRefresh()
+    }
 }
 
-private struct SettingsView: View {
-    @EnvironmentObject private var workspace: WorkspaceStore
-    @Environment(\.dismiss) private var dismiss
-    @State private var transcriptionEngineName = "—"
-    @State private var key = ""
-    @State private var hasKey = false
-    @State private var result: String?
-    @State private var isCheckingKey = false
-    @AppStorage("deepSeekModel") private var model = DeepSeekModel.fallback.rawValue
-    @AppStorage(TranscriptionEngineChoice.storageKey) private var transcriptionEngine = TranscriptionEngineChoice.fallback.rawValue
-    @AppStorage("allowAssistantMutations") private var allowMutations = false
-    @AppStorage("autoProcessTranscripts") private var autoProcess = true
-    @AppStorage("loriMemory") private var memoryEnabled = true
-    @AppStorage(LLMSettings.baseURLKey) private var llmBaseURL = ""
-    @AppStorage(LLMSettings.customModelKey) private var llmCustomModel = ""
+/// Карточка записи: заголовок, две строки текста, время с длительностью,
+/// состояние и тема.
+struct RecordingCard: View {
+    struct Status {
+        let text: String
+        let color: Color
+    }
+
+    let entry: WorkspaceEntry
+    let title: String
+    let snippet: String?
+    let stamp: String
+    let status: Status?
+    let topic: String?
+    /// Запись без темы в общем списке. Это инбокс разбора: пометка нужна,
+    /// чтобы такие записи не терялись среди разложенных.
+    let needsTopic: Bool
 
     var body: some View {
-        NavigationStack {
-            Form {
-                Section("Рабочая папка") {
-                    LabeledContent("Расположение", value: workspace.rootPath)
-                    Text("Открой «Файлы» → «На моём iPhone» → Lori, чтобы видеть документы приложения.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section("DeepSeek API") {
-                    Picker("Модель", selection: $model) {
-                        ForEach(DeepSeekModel.allCases) { option in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.title)
-                                Text(option.detail)
-                                    .font(LoriFont.small)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .tag(option.rawValue)
-                        }
-                    }
-                    if LLMSettings.isCustom {
-                        Text("Сейчас работает свой провайдер (ниже), и выбор модели DeepSeek ни на что не влияет.")
-                            .font(.footnote)
-                            .foregroundStyle(.secondary)
-                    }
-                    SecureField("API-ключ", text: $key)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .accessibilityIdentifier("apiKeyField")
-                    Button("Сохранить в Keychain") {
-                        do {
-                            try KeychainStore.saveDeepSeekKey(key.trimmingCharacters(in: .whitespacesAndNewlines))
-                            key = ""
-                            hasKey = true
-                            result = "Ключ сохранён в Keychain этого iPhone."
-                        } catch {
-                            result = error.localizedDescription
-                        }
-                    }
-                    if hasKey {
-                        LabeledContent("Статус", value: "Ключ сохранён на этом iPhone")
-                        Button(isCheckingKey ? "Проверяю подключение…" : "Проверить подключение") {
-                            validateDeepSeekKey()
-                        }
-                        .disabled(isCheckingKey)
-                        Button("Удалить ключ", role: .destructive) {
-                            do {
-                                try KeychainStore.deleteDeepSeekKey()
-                                hasKey = false
-                                result = "Ключ удалён."
-                            } catch { result = error.localizedDescription }
-                        }
-                    }
-                }
-                Section("Расшифровка") {
-                    Picker("Движок", selection: $transcriptionEngine) {
-                        ForEach(TranscriptionEngineChoice.allCases) { option in
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(option.title)
-                                Text(option.detail)
-                                    .font(LoriFont.small)
-                                    .foregroundStyle(.secondary)
-                            }
-                            .tag(option.rawValue)
-                        }
-                    }
-                    .accessibilityIdentifier("transcriptionEnginePicker")
-                    // Выбор и работающий движок — разные вещи: моделей выбранного может
-                    // не оказаться на устройстве, и тогда работает следующий по порядку.
-                    LabeledContent("Работает", value: transcriptionEngineName)
-                        .accessibilityIdentifier("transcriptionEngineName")
-                    Text("Аудио и расшифровка остаются на этом iPhone. GigaAM и Whisper расставляют знаки препинания сами; их модели кладут в «Файлы» → Lori → Models, и без них работает движок Apple — текст без пунктуации.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section("Свой провайдер модели") {
-                    TextField("Адрес API, например http://192.168.1.10:1234/v1", text: $llmBaseURL)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .keyboardType(.URL)
-                        .accessibilityIdentifier("llmBaseURLField")
-                    TextField("Имя модели у этого провайдера", text: $llmCustomModel)
-                        .textInputAutocapitalization(.never)
-                        .autocorrectionDisabled()
-                        .accessibilityIdentifier("llmModelField")
-                    LabeledContent("Запросы идут в", value: LLMSettings.describedTarget)
-                    Text("Пусто — работает DeepSeek с моделью выше. Указан адрес — Lori обращается туда: любой сервис с API как у OpenAI, в том числе модель, поднятая на своём компьютере в домашней сети. Аудио и расшифровка остаются на iPhone в любом случае; наружу уходит только текст запроса.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section("Обработка расшифровки") {
-                    Toggle("Сразу делать «Важное»", isOn: $autoProcess)
-                    Text("После расшифровки Lori просит модель собрать читаемую заметку — заголовок, суть, важное, решения и задачи — и кладёт её в тематическую папку. Дословный текст остаётся в «Transcripts» и открывается переключателем в карточке. Обработка идёт через модель из настроек выше, то есть текст расшифровки уходит в неё; аудио с телефона не уходит никогда.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section("Память") {
-                    Toggle("Использовать память", isOn: $memoryEnabled)
-                    Text("Что запомнили, лежит в заметке «Память Lori» — её видно в списке, можно править и чистить руками. Память подставляется в каждый диалог, поэтому Lori помнит сказанное раньше. Выключить — значит и не запоминать, и не подставлять уже запомненное. Поиск по всем заметкам работает всегда, независимо от этого переключателя.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-                Section("Работа ИИ с файлами") {
-                    Toggle("Разрешить ИИ создавать и изменять файлы", isOn: $allowMutations)
-                    Text("По умолчанию ИИ может только читать список и содержимое файлов. Удаление переносит файл в локальную корзину Lori.")
-                        .font(.footnote)
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .scrollContentBackground(.hidden)
-            .background(LoriPalette.canvas)
-            .navigationTitle("Настройки")
-            .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
-            .recordingBanner { dismiss() }
-            .task(id: transcriptionEngine) {
-                hasKey = (try? KeychainStore.deepSeekKey()) != nil
-                // Пересчитывается на каждую смену выбора: иначе строка «Работает»
-                // осталась бы от прошлого движка и врала бы.
-                let choice = TranscriptionEngineChoice(storedValue: transcriptionEngine)
-                transcriptionEngineName = await TranscriptionEngines.resolve(for: choice).name
-            }
-            .alert("Lori", isPresented: Binding(get: { result != nil }, set: { if !$0 { result = nil } })) {
-                Button("OK", role: .cancel) { result = nil }
-            } message: {
-                Text(result ?? "")
-            }
-        }
-    }
+        HStack(alignment: .top, spacing: 13) {
+            Image(systemName: "waveform")
+                .font(LoriFont.control)
+                .foregroundStyle(LoriPalette.lime)
+                .frame(width: 38, height: 38)
+                .background(LoriPalette.limeSoft.opacity(0.55), in: RoundedRectangle(cornerRadius: 11))
 
-    private func validateDeepSeekKey() {
-        Task {
-            isCheckingKey = true
-            defer { isCheckingKey = false }
-            do {
-                guard let savedKey = try KeychainStore.deepSeekKey(), !savedKey.isEmpty else {
-                    throw AgentError.missingKey
+            VStack(alignment: .leading, spacing: 5) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(title)
+                        .font(LoriFont.cardTitle)
+                        .foregroundStyle(LoriPalette.ink)
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    Text(stamp)
+                        .font(LoriFont.small.monospacedDigit())
+                        .foregroundStyle(LoriPalette.muted)
                 }
-                try await DeepSeekClient().validate(apiKey: savedKey)
-                result = "Подключение работает: \(LLMSettings.describedTarget)."
-            } catch {
-                result = error.localizedDescription
+
+                if let snippet {
+                    Text(snippet)
+                        .font(LoriFont.meta)
+                        .foregroundStyle(LoriPalette.muted)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.leading)
+                }
+
+                HStack(spacing: 6) {
+                    if let status {
+                        Text(status.text)
+                            .font(LoriFont.small)
+                            .foregroundStyle(status.color)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(status.color.opacity(0.12), in: Capsule())
+                    }
+                    if needsTopic {
+                        Text("Без темы")
+                            .font(LoriFont.small)
+                            .foregroundStyle(LoriPalette.muted)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(LoriPalette.bubble, in: Capsule())
+                            .accessibilityIdentifier("noTopicBadge")
+                    }
+                    if let topic {
+                        Text(topic)
+                            .font(LoriFont.small)
+                            .foregroundStyle(LoriPalette.lime)
+                            .padding(.horizontal, 8)
+                            .padding(.vertical, 3)
+                            .background(LoriPalette.limeSoft.opacity(0.6), in: Capsule())
+                    }
+                    Spacer(minLength: 0)
+                }
             }
         }
+        .padding(.horizontal, 15)
+        .padding(.vertical, 12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20))
+        .overlay(RoundedRectangle(cornerRadius: 20).stroke(LoriPalette.line, lineWidth: 1))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("recordingCard")
     }
 }
 
-private struct CircleIconButton: View {
+struct CircleIconButton: View {
     let symbol: String
     let label: String
     let action: () -> Void
@@ -2133,17 +1007,12 @@ private struct CircleIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: symbol)
-                .font(.system(size: 24, weight: .medium))
+                .font(LoriFont.control)
                 .foregroundStyle(LoriPalette.ink)
-                .frame(width: 44, height: 44)
-                .background(.white.opacity(0.9), in: Circle())
-                .overlay(Circle().stroke(LoriPalette.line, lineWidth: 1))
+                .frame(width: 40, height: 40)
+                .contentShape(Circle())
         }
         .accessibilityLabel(label)
         .buttonStyle(.plain)
     }
-}
-
-#Preview {
-    ContentView().environmentObject(WorkspaceStore())
 }

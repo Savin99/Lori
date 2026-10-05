@@ -1,401 +1,771 @@
 # Lori iOS — working rules
 
+## IPA release destination
+
+Owner configuration (2026-09-22): release IPA files go to iCloud Drive → **IPA Shelf** via `tools/release-ipa.sh`; see [IPA_RELEASE.md](IPA_RELEASE.md). For an existing IPA use `python3 tools/ipa-release.py --publish-only <path>`. Publish atomically and replace only previous managed files with the same Bundle ID. Never delete other apps from the shared folder. These are unsigned artifacts for later signing, not proof of installability.
+
 ## Scope
 
 Work only in this native iOS project unless the user explicitly asks otherwise:
 
 ```text
-/Users/ilyaqa/Projects/Lori/ios
+<repo>/ios
 ```
 
-Do not modify the legacy web/bridge project in the parent `Lori` directory for an iOS task.
+Do not modify the Mac side of the repository (`lori/ingest.py`, `ui/server.mjs`, `launchd/`) for an
+iOS task. It is a separate program with its own life.
 
 ## Product intent
 
-Lori is a personal iPhone app, not a desktop or calling app. Its core loop is:
+Lori for iPhone is a **transcription app** with exactly one layer on top of it. Its whole loop:
 
-1. The user creates a note, creates/selects a local folder, or imports a file.
-2. The user can record audio from the iPhone microphone.
-3. Lori stores its own files locally and an optional DeepSeek chat can inspect them.
-4. The assistant may create/edit/move local files only when the visible settings toggle permits it.
+1. The user records audio from the iPhone microphone, or brings in an audio file through the iOS picker.
+2. Lori transcribes it with the engine chosen in settings and saves `Transcripts/<name>.md`.
+3. The user listens, reads, fixes the text by hand, copies it, or shares it as a file — PDF или
+   Markdown, формат выбирается при нажатии («Экспорт расшифровки» ниже).
+4. The user asks a question about the transcripts and gets an answer with links back to the recordings.
 
-The app must never claim access to arbitrary iPhone storage. Its writable sandbox is:
+Step 4 — «Спроси свой архив» — was added on 28 August 2026 at the owner's explicit request; see
+«The assistant layer» below. Everything else that was removed on 27 August 2026 stays removed: no wiki,
+no digests, no autonomous agent, no note editor, no folder browser. Do not bring any of it back without
+an explicit request, and do not let the assistant grow into any of them.
+
+The writable sandbox stays:
 
 ```text
 Documents/Lori/Workspace
 ```
 
-External documents enter it only through the iOS file picker. The user can also expose this app folder through the Files app because file sharing is enabled.
+with `Recordings/` (microphone), `Imported/` (brought from outside), `Transcripts/` (results) and
+`.LoriTrash/`. The folder is visible in «Файлы» because file sharing is enabled in `Info.plist`.
 
-## Privacy and security
+Внешнее аудио входит четырьмя дорогами, и все они сходятся в одном месте — прикреплённым файлом
+в нижней панели (`ImportInbox`, промежуточная папка `tmp/Принесённое`):
 
-- DeepSeek keys live only in the iPhone Keychain. Never print, log, commit, copy, request, or inspect a key.
-- Do not add a key to source, `Info.plist`, test fixtures, README, or shell commands.
-- Keep all workspace paths sandboxed. Do not weaken traversal or symbolic-link checks in `WorkspaceStore`.
-- File mutations remain an explicit in-app user choice. A model must not silently overwrite or delete a file.
-- “Delete” means move to `.LoriTrash`, not irreversible deletion.
-- Personal development signing is for the owner’s connected device. Do not create a fake distributable IPA or import/export certificates unless the user explicitly asks.
+- «Аудио из Файлов» — системный пикер;
+- **«Поделиться» → Lori** из Диктофона, Telegram, почты — через `CFBundleDocumentTypes`, а не через
+  Share Extension: расширению нужен общий контейнер App Group, а **App Groups бесплатная команда
+  разработчика не подписывает**. Система кладёт копию в `Documents/Inbox` и будит приложение;
+- «Вставить аудио» из буфера обмена (`ClipboardAudio`);
+- действие «Расшифровать в Lori» для Быстрых команд (`TranscribeInLoriIntent`).
 
-## Current UX requirements (do not regress)
+Жёсткие правила этого слоя:
 
-- Home is the notes screen (**Мои заметки**) in the cream visual language from the supplied mobile references.
-- There is no `Get desktop` chip and no call button.
-- Settings remain in the top-right corner.
-- The bottom `+` is a separate circular control, not part of the chat composer.
-- Tapping `+` opens **Записать / Новая заметка / Выбрать файл**. It must not open or send a chat.
-- **There is no microphone button anywhere.** Recording starts only from `+` → «Записать». The
-  composer mic meant «record material» on home and «dictate a question» in the chat, and nothing on
-  the button told you which — so dictation-as-a-question is gone with it. The chat's primary button
-  only sends and is disabled without a draft. The recording pill still lives in both composers while
-  a recording runs: it is the live state and the only way to pause, stop or cancel.
-- Tapping the top-left folder opens the lightweight folder drawer: create/select/search folders. Selecting a folder opens its local contents.
-- Chat is opened by sending a non-empty text prompt; it is not the default action of `+`.
-- Before reading or changing a file, the DeepSeek system prompt requires `list_files` and exact returned relative paths. Do not reintroduce invented file paths.
-- A note opens in an editable `TextEditor`, not a read-only view. Text is saved by **Готово** and also on swipe-to-dismiss, so typing is never lost.
-- **Новая заметка** opens the editor for an unsaved draft. The file is created only when non-empty text is saved, and its name comes from the first line (date fallback). Never create an empty placeholder file.
-- The user can rename and move to trash from the UI: context menu on the home card, swipe or context menu in the browser, `…` menu in the editor. Do not leave file mutations available only to the model.
-- The agent loop runs up to `AssistantStore.maxToolRounds` tool rounds per message and reports the limit to the user. One round is not enough for the `list_files` → `list_files` → read sequence the system prompt demands.
-- Chat history is persisted by `ConversationArchive` to Application Support, not `Documents` — `UIFileSharingEnabled` would otherwise expose the JSON in «Файлы» next to notes.
-- Chat autoscroll targets `ChatTranscript.bottomAnchor`. Do not scroll to `bubbles.last?.id`: user bubbles need their own `.id` and the sending indicator sits below them.
-- The composer background is opaque. A translucent one let cards show through and read as tappable while the tap went to the composer.
-- The interface language is Russian, including headings. `My notes` / `Today` / `Ask anything` / `Hi Илья, ask anything` came from the Granola reference and were the app's most visible defect: English chrome around Russian content. Reverting to English is a per-string change, not an architectural one — ask the owner before doing either.
-- Note rows show the name without its extension and the modification time. No file sizes (`ByteCountFormatter` printed «56 bytes» in the system locale) and no `lock.fill`: Lori has no sharing, so a padlock on every row means nothing. The «everything stays on this iPhone» fact is stated once, in the header.
-- Home groups content: a `Папки` section (app-generated `Recordings` / `Transcripts` last) and then notes under real date headers. Never reintroduce a static `Today` header over an unfiltered list.
-- No fake calendar card. `UpcomingCard` always said «No upcoming events» and there is no calendar integration. If one is wanted, it needs EventKit, not a placeholder.
-- Under an assistant answer there is one action — copy. Thumbs up/down wrote to a local `@State` and «развернуть» printed a hardcoded sentence about sources.
-- All text uses semantic fonts or `relativeTo:` (`LoriFont`), and rows size from padding, not fixed heights, so Dynamic Type works. The palette is cream-only and the app pins `.preferredColorScheme(.light)`: without it `Form`/`List` followed system colors and the status bar went white on cream.
-- There is exactly one `AudioCaptureStore`, owned by `ContentView`. Home and chat had separate instances plus `onDisappear { cancel() }`, so recording died on every screen switch.
-- The recording pill shows pause, live level, elapsed time and «Отмена». Cancelling moves the partial `.m4a` to `.LoriTrash` rather than deleting it.
-- `Спросить про заметку` / `Спросить про папку` prefill the chat composer and let the human press send. Do not make them send on their own.
-- Audio rows show a `waveform` icon and a «Запись · <дата>» subtitle. Tapping one opens `RecordingSheet` — the player. It must not start recognition on its own: before the player existed there was no way to hear your own recording at all, because the tap went straight to transcription. The sheet holds playback (play/pause, ±15 s, scrubber) and, below it, `TranscriptCard` — the segmented «Важное ↔ Расшифровка» switch with one bottom action («Расшифровать» → «Обработать» → «Открыть заметку», whichever is next). The row context menu keeps the transcription commands as shortcuts.
-- One `.sheet` per screen, driven by the `EntrySheet` enum (`editor` / `recording`). Two `.sheet` modifiers on one view are as unreliable as two `.alert` modifiers; do not add a second one.
-- «Готово» sits top-leading in every sheet — editor, browser, recording. Do not move one of them to the trailing side.
-- A running transcription must never take the composer away. It shows as `TranscriptionStatusLine` above the field; typing and sending stay available. The old «microphone disabled while transcribing» rule went away with the microphone button: recognition reads a file (Core ML for GigaAM, `SFSpeechURLRecognitionRequest` for Apple) and does not hold the input session, so a new recording during transcription is safe.
-- While recording, every sheet carries `RecordingBanner` at the top: the composer pill is hidden behind the sheet, and without the banner the user edits a note not knowing the microphone is live. Tapping the banner closes the sheet (saving the note first) and returns to the pill.
-- Stopping a recording on the home screen opens the recording card and starts transcription there, so the progress is visible on the screen the result lands on. It does not open the raw transcript file and does not send the text to the model as a question. Recording is always material, never a question — there is no dictation path into the chat any more.
-- Only one `.alert` per SwiftUI view is presented. Workspace and transcription errors share one alert in `ContentView`; adding a second one silently kills both.
-- `.environmentObject` must sit **outside** every `.sheet` on the same view. The recorder was injected before the `.sheet(isPresented:)` modifiers, so the browser and the settings sheet opened without it and `RecordingBanner` crashed the app on `EnvironmentObject.error()`. `WorkspaceStore` never showed the problem because the app injects it above `ContentView`.
-- A sheet that carries a value uses `.sheet(item:)`, never `.sheet(isPresented:)` plus a separate `@State` path. Tapping a folder opened the workspace root: the content closure captured the path from the body evaluated *before* the tap. `WorkspacePath` exists only to make the browser's sheet `item`-driven.
-- Home has search — the magnifier next to the settings gear. It walks the whole workspace, not just the root, and matches names **and** note text; a result row shows the matching line and the folder it lives in. The composer is hidden while searching: over the keyboard it ate half the results. Notes inside folders were invisible from home before this.
-- The folder browser uses `List` rows styled as the home cards (`FolderRow` / `NoteCard`), with `listRowSeparator(.hidden)` and a clear row background. `List` stays for the swipe actions — a plain `ScrollView` would drop them, and swipe is a required mutation entry point. A folder opens under a big Georgia header with a `2 папки · 4 файла` count line; the 17 pt inline navigation title was the thing that read as a web view.
-- The app icon is a Georgia capital `L` on the cream canvas, in the exact `LoriPalette` colours. It is generated by `design/icon/RenderIcon.swift` (CoreText, glyph-path centring) as a full-bleed 1024×1024 PNG with no alpha and no pre-rounded corners. Keep `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon` in `project.yml`; without it the asset catalog is built but never referenced.
+- **Принесённый файл никогда не уходит в расшифровку сам.** Он показывается в панели с движком и
+  оценкой времени («в облако · примерно 3 минуты» против «на телефоне · примерно 12 минут»), и в
+  работу его отправляет нажатие. Тумблер «Расшифровывать запись сразу» относится только к диктофону.
+- **Имя принесённого файла сохраняется как заданное вручную**: человек уже назвал запись
+  «Совещание 27.08», и подменять это на «Запись 22:22» — значит терять единственную примету.
+- `Documents/Inbox` **удаляется целиком** после разбора: `Documents` виден в «Файлах», и пустая
+  служебная папка не должна там стоять рядом с рабочей.
+- Наличие аудио в буфере определяется **по типам** (`UIPasteboard.types`), а не чтением: чтение
+  показывает системную плашку о вставке, и делать это без просьбы человека нельзя.
 
-The interaction references are the owner's screen recordings of **Granola for iPhone**, the app
-Lori's interface is modelled on:
+## The assistant layer («Спроси свой архив»)
 
-```text
-/Users/ilyaqa/Downloads/ScreenRecording_08-24-2026 16-36-42_1.MP4
-/Users/ilyaqa/Downloads/ScreenRecording_08-24-2026 18-03-21_1.MP4
-```
+Разговор по расшифровкам: вопрос по-русски, ответ со ссылками на **секунды** записей.
+Два входа (панель на главном — по архиву или теме; «Спросить» в «…» на экране записи — по одной),
+один экран `AssistantThreadScreen`, один движок `AssistantService`, который про интерфейс ничего
+не знает.
 
-Read them with `ffmpeg -i <file> -vf "fps=1/6,scale=300:-1,tile=5x3" sheet.jpg` and inspect the sheet.
-Adopted from them: date-grouped note list with times, recording pill with pause/level/cancel,
-`Chat with note` / `Chat with folder`, note detail as a serif title plus metadata line, history rows
-with a right-aligned relative time.
-Deliberately **not** adopted: the calendar card (Granola has a real calendar, Lori does not),
-per-row padlocks (Granola shows sharing state, Lori has no sharing), thumbs up/down (Granola sends
-feedback to its own backend), `Get desktop` and the call button (removed by the owner earlier).
-Still missing versus the reference: folder description and access fields. The folder hero header exists now.
-The persistent recording bar exists now — `RecordingBanner`, on every sheet.
+**Тред один.** Список разговоров — это отдельный экран, отдельное удаление и отдельная миграция,
+а ценность в том, чтобы вернуться к вчерашней ветке, а не листать сорок. «Новый разговор»
+заменяет текущий; открытие по другому охвату — тоже новый разговор.
+
+Hard rules:
+
+- **Запрос растёт только в конец.** Инвариант, из которого следует всё остальное: запрос N
+  обязан быть побайтовым префиксом запроса N+1 (`AssistantPrefixTests` проверяет это тестом, а не
+  надеждой). Это не про интерфейс, а про деньги: в треде каждое сообщение пересылает всё
+  отправленное заново, и ветка из десяти вопросов стоила бы дороже месяца расшифровок. Спасает
+  автоматический кэш префикса у OpenAI и DeepSeek — но только пока начало запроса байт в байт то
+  же. Отсюда: системное сообщение (правила + оглавление + замороженные тексты) не меняется
+  **никогда**; тексты записей дописываются в то же сообщение, что и вопрос; уже отправленная
+  запись не отправляется повторно — на неё ссылаются номером; порядок дописки — по номеру записи,
+  а не по тому, как их назвала модель. Дописанное хранится в самом `ThreadMessage.added`, а не
+  перечитывается с диска: правка расшифровки изменила бы уже отправленное и развалила бы кэш.
+- **Какие записи нужны — решает модель, а не лексика.** Когда охват не влез целиком, отдельный
+  дешёвый запрос (`AssistantService.route`) отдаёт оглавление и вопрос и получает номера записей.
+  Это берёт синонимы и смысл, которых совпадение по словам не берёт. Роутер не зовётся вовсе,
+  когда охват влез: спрашивать, какие записи взять, когда взяты все, — лишний запрос.
+- **Модель умеет попросить ещё.** Не хватает текстов — она отвечает строкой `НУЖНЫ: 3, 7`,
+  приложение дописывает названные записи и переспрашивает **в том же ходе**: человек видит один
+  ответ. Дозаход ровно один: два подряд означают, что вопрос не про этот архив. Служебная строка
+  до человека не доходит; а если дать тексты неоткуда, она превращается в человеческую фразу
+  «Для ответа не хватает текста: «…»» — «Сервис вернул пустой ответ» тут было бы враньём.
+- **Кэш проверяется, а не предполагается.** В запросе идёт `prompt_cache_key` (хэш снимка), из
+  ответа читается `usage.prompt_tokens_details.cached_tokens` (OpenAI) или
+  `usage.prompt_cache_hit_tokens` (DeepSeek) — `AssistantUsage`. Число видно в меню «…».
+- **Ссылки структурированные.** Модель просят вернуть `[номер записи@секунда]`, а в каждой строке
+  первым идёт число — секунда от начала записи. Секунду обязательно **проверять**, и проверять по
+  реальным началам реплик, а не диапазоном: диапазон пропускает любое число внутри, в том числе
+  то, которого в записи нет вовсе. Близкая секунда притягивается к настоящему началу, далёкая
+  отбрасывается. Голое `[3]` временем **не** дополняется: начало записи всегда ноль, и подстановка
+  давала ленту пилюль «0:00». Ссылка без времени честна, ссылка в неверную секунду — нет.
+- **Пилюля ссылки играет кусок на месте, а не уводит с экрана.** Нажатие открывало запись — и
+  человек терял место в разговоре, а попадал в начало расшифровки. Теперь у ленты свой
+  проигрыватель: тап включает запись с той самой секунды, повторный тап ставит на паузу, а
+  «Открыть запись» живёт в долгом нажатии. `AudioPlaybackStore` поэтому обязан уметь менять файл:
+  раньше повторный `load` другой записи молча возвращался, и играла предыдущая.
+- **Разговор не стирается при открытии экрана.** Смена охвата — новый разговор, но случается она
+  от нового вопроса, а не от того, что открыли «Спросить» по одной записи поверх разговора про
+  архив. Раньше тред умирал молча, ещё до того как человек что-то спросил: он возвращался в чат и
+  находил пустоту. Про предстоящую смену охвата шапка предупреждает заранее.
+- Маркеры в показанном тексте не остаются: ответ раскладывается на абзацы, пилюли встают под тем
+  абзацем, к которому относятся (`AssistantService.paragraphs`), а сам маркер снимается
+  (`withoutMarkers`, и только числовой — «[смотри запись]» это часть речи).
+- **Only transcript text leaves the phone, and only on a button press.** No audio, no file names,
+  nothing else from the workspace. Строка сверху говорит, сколько расшифровок и знаков ушло.
+- **Оглавление уходит всегда** (`AssistantOutline`): строка на **каждую** запись охвата — номер,
+  дата, заголовок, тема, длительность, первые фразы и пометка, дан ли её текст. Без оглавления
+  «в записях этого нет» — не вывод из архива, а следствие того, что модели показали выборку и не
+  сказали об этом. Номер записи из оглавления — он же номер в ссылке `[3@218]`.
+- **Влезает целиком — отдаём целиком.** Пока охват укладывается в
+  `AssistantSettings.contextCharacters` (120 тысяч знаков, около тридцати тысяч токенов), отбор не
+  запускается вовсе: он режет разговор на куски и теряет связь между ними, а платим мы за то же
+  самое. Отбор — запасной путь, и в нём куски идут вместе с соседями, а остаток бюджета
+  добивается подряд: недобранный бюджет — это молча выброшенные знаки.
+- **The context is chosen locally** (`AssistantRetrieval`): lexical overlap, русское склонение —
+  обрезкой слова до шести знаков, термины из `TranscriptionSettings.vocabulary` весят вдвое.
+  Никаких эмбеддингов, индекса и второй модели.
+- **No silent trimming.** Шапка говорит, чем ассистент **располагает**: «Все 14 записей целиком ·
+  76 тыс. знаков» или «6 записей из 14». Раньше там стояло «49 кусков не поместилось» — факт тот
+  же, а читается как «приложение не справилось», и человек узнавал, что потерял, вместо того что
+  у него на руках. Урезанное оглавление тоже говорит о себе прямо, внутри самого оглавления.
+- **Без ключа вопрос не уходит вовсе**: на месте кнопки отправки прямо написано, чего не хватает.
+  Раньше это была мелкая строка выше, а кнопка молча не работала.
+- **The assistant's key is its own Keychain account** (`.assistant`), separate from the
+  transcription engines: DeepSeek for questions and OpenAI for transcription is the normal case.
+- Any OpenAI-shaped `POST /chat/completions` works — the address is a plain setting. Model names
+  come from the service (`ModelCatalog.chat`), filtered by a **blacklist**: a whitelist would drop
+  every model released after the build.
+- Ответ в файл расшифровки не дописывается: этот файл — текст записи, а не блокнот. Тред живёт
+  своим `Application Support/Lori/thread.json`.
+
+## Six engines, chosen by hand
+
+| Engine | Where it runs | Needs |
+| --- | --- | --- |
+| `GigaAM v3` (`GigaAMTranscriber`) | on the iPhone, ONNX Runtime | model downloaded in one tap into `Lori/Models` |
+| `Whisper large-v3 turbo` (`WhisperKitTranscriber`) | on the iPhone, Core ML через WhisperKit | папку модели кладут руками в `Lori/Models`, приложение её не качает |
+| Apple (`AppleSpeechTranscriber`) | on the iPhone | system speech models for the locale |
+| OpenAI (`OpenAITranscriber`) | in the cloud | key in Keychain; any OpenAI-shaped `/audio/transcriptions` |
+| Gemini (`GeminiTranscriber`) | in the cloud | key in Keychain |
+| ElevenLabs Scribe (`ElevenLabsTranscriber`) | in the cloud | key in Keychain |
+
+Hard rules:
+
+- **The engine is never substituted silently.** If the chosen one is unavailable, `TranscriptionService`
+  reports why (`unavailability(of:)`) and stops. The old behaviour — falling back from GigaAM to Apple —
+  is gone on purpose: a fallback that sends audio somewhere else is a privacy bug, not a convenience.
+- Cloud engines send the whole recording to a third party. The settings screen says so in plain Russian,
+  and the transcript card repeats it before the first run.
+- Owner request (2026-09-24): personal device builds may include fallback API keys from
+  `Secrets/APIKeys.local.json` (ignored by Git; see `Secrets/README.md`). Manual Keychain values
+  take priority. Never print, log or commit key values. QA and simulator builds must exclude
+  personal bundled keys; tests use fixtures and injected `keyProvider` values.
+- Word timings exist only where the engine really gives them: GigaAM, whisper models и Gemini
+  с включёнными таймкодами (нативные `word_info` через `timestamp_granularities`). Придумывать
+  таймкоды нельзя: границы отправленного куска — это не время речи, такие реплики помечаются
+  `isApproximate`.
+- **Whisper large-v3 turbo идёт через WhisperKit** (`argmaxinc/argmax-oss-swift`) — первая и пока
+  единственная сторонняя зависимость приложения, версия закреплена в `Package.resolved`. Свой экспорт
+  в Core ML отвергнут: у Whisper авторегрессивный декодер с KV-кешем и словарь на 51866 токенов.
+- **Модель Whisper приложение не качает — и это не недоделка.** `download: false` в
+  `WhisperKitTranscriber` — единственная защита от того, чтобы 618 МБ уехали по мобильной сети;
+  папку кладут руками в `Lori/Models` через «Файлы» (`design/whisper/fetch_model.py` собирает её на
+  Mac, `seed-model.sh` — в симулятор). Поэтому пометка готовности у него **«Нет модели»**, а не
+  «Скачать модель»: кнопки скачивания нет и обещать её нельзя.
+- **Рядом с весами обязаны лежать `tokenizer.json` и `tokenizer_config.json`** из
+  `openai/whisper-large-v3`: по первому WhisperKit решает, что токенизатор локальный, из второго
+  читает класс токенизатора. Без них пакет уходит за токенизатором в сеть — а расшифровка обязана
+  работать офлайн. Нехватка файла — это ошибка `modelIncomplete` с именем файла, а не докачка.
+- **Куски у Whisper — 28 секунд** при окне модели в 30: кусок обязан проходить одним окном.
+  Нарезка и перекрытие — общий `AudioChunker`, дубли из перекрытия отбрасываются по времени
+  в `TranscriptAssembler.merge`, как у GigaAM.
+- **Whisper даёт таймкоды слов и не различает говорящих** — так и записано в `EngineToggles`.
+  Пословные времена считает отдельный проход по вниманию, и он может не дать результата: тогда
+  словом становится целая реплика, потому что текст важнее точности времени.
+- **Whisper выдумывает текст на тишине** — это свойство модели, а не приложения, и его проверяет
+  `WhisperKitIntegrationTests.testSilenceDoesNotBecomeInventedText`: тишина обязана давать честную
+  `emptyResult`, а не выдуманную реплику в расшифровке.
+- **ElevenLabs Scribe отправляет запись целиком, одним запросом, и нарезки у него нет вовсе.**
+  Это не упрощение: сервис берёт до 5 ГБ и 10 часов на запрос (`openapi.json`), тайминги слов
+  приходят нативно на всю запись, а **говорящих сервис нумерует внутри запроса** — разрезать
+  запись значит выдать «S1» из первой части и «S1» из второй за одного человека. Расплата —
+  минуты тишины на экране, поэтому движок докладывает словами через `note`, а полоса честно
+  показывает только 0 из 1 и 1 из 1. Своя сессия (`CloudSession.patient`) нужна потому, что
+  `timeoutIntervalForResource` — потолок на всю задачу и из `URLRequest` не поднимается.
+- **`tag_audio_events` отправляется всегда, даже выключенным**: у сервиса это поле по умолчанию
+  **включено**, и промолчать значит получить «(laughter)» в расшифровке, не спросив человека.
+  Режим движка отвечает ровно за то, что словами не является: «Дословно», «Со звуками»
+  (`tag_audio_events`), «Причёсанный текст» (`no_verbatim`, только у `scribe_v2`).
+- **Это единственный движок, где оба переключателя «Расшифровки» настоящие и независимые**:
+  таймкоды — `timestamps_granularity` (`word` или `none`, оба значения документированы),
+  говорящие — `diarize`. Режим их не отменяет и не подменяет; на это есть тест.
+- **Метки говорящих у ElevenLabs считаются с нуля** (`speaker_0`), а в приложении с единицы:
+  `ElevenLabsTranscriber.label` прибавляет один. Не переиспользуй `GeminiAnnotations.label` —
+  она трактует `speaker_N` как счёт с единицы и дала бы «S0».
+- **Списка моделей распознавания у ElevenLabs нет.** `GET /v1/models` отвечает моделями синтеза
+  речи, признака «умеет распознавать» в ответе не существует. Поэтому у этого движка в
+  `ProviderScreen` нет кнопки «Обновить список моделей», а выбор идёт из
+  `ModelCatalog.elevenLabsSuggestions`. Ключ проверяется самым дешёвым `GET /v1/user`.
+- У Gemini есть **специализированная модель распознавания речи** `gemini-3.5-transcribe`
+  (с 26 августа 2026), она и стоит по умолчанию. Фильтр списка моделей не имеет права её
+  выбрасывать: всё, что похоже на распознаватель (`transcribe` в имени, «speech» в описании),
+  остаётся в выборе независимо от заявленных методов.
+
+## Какой движок отработал — видно на экране записи
+
+Полное имя движка уже писалось в файл (`_Расшифровано: …_`) и разбиралось
+(`TranscriptDocument.engine`), но нигде не показывалось. Теперь оно стоит своей строкой под
+датой: короткое имя (всё до первой запятой) плюс иконка «телефон / облако».
+
+- **На карточке в списке движка по-прежнему нет, и это не забывчивость.** Там он был убран
+  намеренно: в списке это выглядит как настройка, а не свойство записи. На экране записи наоборот —
+  расшифровку можно перезапустить другим движком, и какой отработал, относится именно к этому тексту.
+- **Своей строкой, а не в ряду с датой и темой.** Первая версия стояла в том ряду, и он переполнился:
+  дата переехала на две строки, имя движка ушло в многоточие. Та же ловушка, что и с чипами панели.
+- **Иконка кодирует не бренд, а локальность** — уходила ли запись с телефона. Она же стоит у каждого
+  движка в подменю «Расшифровать заново»: выбор там делается в один тап, и цена ошибки — отправленный
+  наружу звук. Локальность разбирается по хвосту имени, и это надёжно: строку писали мы сами
+  (`Transcribing.name`). Незнакомое имя иконки не получает вовсе — соврать про то, уходила ли запись
+  наружу, хуже, чем промолчать.
+
+## Nothing to type in
+
+The owner's rule, stated plainly: «почему я должен это всё вписывать? в нормальных продуктах
+такого нет». So:
+
+- The GigaAM model is downloaded by one button. The address is in the code
+  (`GigaAMCatalog.swift`), not in a text field.
+- Cloud model names come from the service itself (`ModelCatalog`): `GET /v1/models` for OpenAI,
+  `GET /v1beta/models` for Gemini, filtered to what can handle audio. The picker is the interface;
+  a hand-typed name is a fallback, not the norm.
+- What still has to be typed is only the API key and the vocabulary — a key cannot be guessed, and
+  the vocabulary is the owner's own words.
+
+When adding anything new, ask first whether the app can find it out by itself.
+
+## Vocabulary
+
+`TranscriptionSettings.vocabulary` is the owner's list of names and terms, edited as plain text in
+settings. OpenAI receives it in the official `prompt` field; Gemini gets it appended to the prompt;
+ElevenLabs receives it in the official `keyterms` field — **and that field costs +20% of the
+transcription price**, so it is sent only when the vocabulary is actually filled in, the help text on
+the provider screen says so, and a service complaint about `keyterms` retries the request without them
+rather than failing the transcription. The terms are cleaned to the service's own rules first (≤50
+characters, ≤5 words, none of `< > { } [ ] \`): one bad term rejects the whole request.
+The list is cut at `vocabularyLimit` characters — with whisper the hint shares the same 224 tokens as
+the transcript, and a long dictionary starts crowding out the result. Local engines ignore it, and the
+settings text says that.
+
+## Model installation
+
+Models are not bundled (~225 MB per variant) and not exported by hand. Two variants of the open ONNX
+export live in `GigaAMCatalog.swift` with their sizes and SHA-256:
+`istupakov/gigaam-v3-onnx`, files `v3_e2e_rnnt_*` and `v3_e2e_ctc.*`. `ModelDownloadWorker` downloads
+them into a staging directory, verifies size and checksum, and only then swaps the variant's directory
+in `Application Support/Lori/Models`. Rules that matter:
+
+- No zip: iOS has no public unzip API. These are plain files, so there is nothing to unpack.
+- All or nothing. A failure removes the staging directory and leaves the installed model untouched —
+  half a model is worse than none, the engine would not start anyway.
+- Progress is reported inside a file, not per file: 225 MB arrive as one file, and «файл 1 из 4» would
+  leave the bar at zero and then jump to a hundred (`DownloadProgress` delegate).
+- Why not Core ML: nobody publishes a Core ML export of GigaAM, and converting the 845 MB fp32 model
+  needs a Mac with `coremltools` and more RAM than the owner's — measured 27 August 2026, 8 GB.
+  Details and the verified graph interface are in `design/gigaam/README.md`.
 
 ## Audio and transcription truth
 
-- `AudioCaptureStore` records `.m4a` files into `Workspace/Recordings` and does **nothing else**. It asks
-  for the microphone only. Recording used to be gated behind `speech.prepare()`, so a device without
+- `AudioCaptureStore` records `.m4a` into `Workspace/Recordings` and does **nothing else**. It asks for
+  the microphone only. Recording used to be gated behind speech preparation, so a device without
   recognition models could not even save audio — never reintroduce that coupling.
-- Transcription is a separate step in `TranscriptionService`, works on any audio file already in the
-  workspace (recorded or imported), and writes `Transcripts/<name>.md`. A failed transcription must
-  leave the audio in place.
+- Transcription is a separate step in `TranscriptionService`, works on any audio already in the
+  workspace, and writes `Transcripts/<name>.md`. A failed transcription must leave the audio in place.
+- One transcript per recording: re-running another engine **replaces** the file (and stamps
+  `_Расшифровано: <движок>_` into it). Earlier it created «Встреча 2.md», and three attempts left a mess.
+- **Записи идут по одной, остальные ждут в очереди** — `TranscriptionSettings.concurrency`,
+  умолчание 1, предел общий (облачная запись занимает то же место, что и локальная).
+  Настройка 1–3 осталась: планировщик её держит, и поднять её — одна строка на экране
+  «Расшифровка». История такая: владелец попросил «два разных аудио одновременно», это было
+  сделано и работает, а посмотрев — сказал «пофиг на асинхрон, пусть в очередь встают».
+  Умолчание вернули, машинерию оставили. **Не выкидывать её**: на ней держится фоновая
+  задача (`waitForDrain`) и отмена по конкретной записи, а параллель включается настройкой.
+  Разрезать **одну** запись между локальными движками нельзя и незачем — они делят один
+  процессор, и сумма времени от этого не уменьшается.
+- **Веса локальной модели общие на всю очередь** (`EngineSessionCache`). Раньше каждый вызов
+  `transcribe()` собирал модель заново: 618 МБ Core ML у Whisper, три сессии ONNX у GigaAM — то есть
+  пять записей подряд означали пять загрузок. Это главный выигрыш по времени, и он остаётся в силе
+  при очереди по одной. Он же делает две записи сразу безопасными, когда настройку поднимают:
+  вторая копия весов не влезла бы в потолок памяти (право `increased-memory-limit` бесплатная
+  команда не подписывает).
+  **Сам счёт через модель сериализован, и это не лень:** у `OnnxSession` есть изменяемое поле, а
+  буфер выхода ORT переиспользуется следующим вызовом; одновременный `transcribe` на одном
+  `WhisperKit` нигде не обещан. Куски двух записей чередуются — обе двигаются, память как на одну.
+- **Перед второй локальной записью проверяется свободная память** (только когда настройку
+  подняли выше единицы; `MemoryReport.availableBytes`,
+  запас в `deviceHeadroomBytes`). Не хватило — запись ждёт со строкой «Жду память», а не роняет
+  процесс. Ноль означает «система не сказала» (симулятор) и запретом не считается.
+- **Работа продолжается в фоне** — `BGContinuedProcessingTask` (iOS 26), `TranscriptionRunway`.
+  Задача **одна на всю очередь** и сама ничего не считает: считает `TranscriptionService` в своём
+  процессе, а задача держит процесс живым и ведёт системную полосу в Dynamic Island и на локскрине.
+  Своего Live Activity нет и не должно быть: ему нужен отдельный таргет расширения (ещё один App ID
+  против лимита бесплатной команды), фонового времени он не даёт, а полоса вышла бы второй рядом с
+  системной. Ресурс `.gpu` не просим — он требует entitlement, который бесплатная команда не
+  подписывает, как и App Groups. Нет фона (симулятор, отказ, iOS ниже 26) — приложение говорит об
+  этом строкой состояния, а не обещает молча.
+- **Идентификатор фоновой задачи один и тот же в трёх местах, и форма у него базовая, без `.*`:**
+  `BGTaskSchedulerPermittedIdentifiers`, `register` и заявка — везде `ru.ilyaqa.lori.local.transcribe`.
+  Заголовок `BGTaskRequest.h` описывает другое (шаблон в регистрации, `<база>.<uuid>` в заявке), и
+  первая версия следовала ему — на телефоне это дало отказ без единого внятного слова. Замер
+  подставными идентификаторами на iOS 26.5:
+
+  | В `Info.plist` | `register` | `submit` | Ответ рантайма |
+  | --- | --- | --- | --- |
+  | `…probewild.*` | любая | — | «Registration rejected; … is not advertised» |
+  | `…probea` | `…probea` | `…probea` | **принята** |
+  | `…probea` | `…probea` | `…probea.<uuid>` | код 3, «Unrecognized Identifier» |
+
+  То есть форма с шаблоном в plist ломает регистрацию целиком, а составная заявка к базовой
+  регистрации **не привязывается**. Подавать надо ровно то, что зарегистрировано. Нам этого хватает:
+  задача одна на всю очередь, а повторная заявка с тем же идентификатором заменяет предыдущую.
+- **`submit` незарегистрированного идентификатора не возвращает ошибку, а роняет процесс:**
+  `*** Assertion failure in -[BGTaskScheduler _handleSubmissionWithoutRegistrationForTaskRequest:error:]`.
+  Поэтому результат `register` обязательно запоминается (`TranscriptionRunway.isRegistered`), и без
+  принятой регистрации заявка не подаётся вовсе. Обе вещи стерегут тесты
+  `testTaskIdentifierIsTheBaseFormAndMatchesTheBundle` и `testHandlerRegistrationIsAccepted`.
+- **Обработчики планировщика обязаны быть `nonisolated` и `@Sendable`.** `TranscriptionRunway` —
+  `@MainActor`-класс, и замыкание, созданное внутри него, наследует изоляцию главного актора.
+  Планировщик зовёт обработчик со своей очереди `com.apple.BGTaskScheduler` — рантайм Swift 6 бьёт
+  `dispatch_assert_queue` и роняет процесс **ровно в тот момент, когда фон наконец заработал**:
+  `EXC_BREAKPOINT` в `closure #1 in static TranscriptionRunway.register()`. Отсюда
+  `nonisolated static func register()`, `nonisolated static let` у того, к чему она обращается,
+  и `@Sendable` на самом замыкании и на `expirationHandler`. Задача переезжает на главный актор
+  в явной коробке (`TaskBox`): `BGTask` — класс Objective-C и `Sendable` не является.
+- **Отказ планировщика разбирается по `userInfo`, а не по коду.** Код 3 (`notPermitted`) означает
+  четыре разные вещи, и три круга переспросов ушло на то, чтобы это понять. Теперь при отказе в
+  журнал пишется полный `NSError` (домен, код, `userInfo`) и состояние приложения, а
+  `TranscriptionRunway.remedy()` спрашивает систему сам (`backgroundRefreshStatus`,
+  `isLowPowerModeEnabled`). Именно `userInfo` и назвал причину: «Unrecognized Identifier».
+- **Заявка не подаётся, пока приложение не активно.** Она создаётся «от имени приложения на
+  переднем плане», а `resumeInterrupted` дёргает очередь прямо на запуске. Такая заявка
+  откладывается до `didBecomeActive` (`applicationDidBecomeActive`), а не тратится впустую.
+- **У движка есть колбэк `note`** — сказать словами, чем он занят, пока процентов ещё нет. Whisper
+  готовит 618 МБ весов под Neural Engine **минуты**, и всё это время «готовлю аудио» на экране
+  читается как зависание. Реализуют только те, кому есть что сказать, — как и `partial`.
+- **Полоса прогресса считает сделанное, а не начатое** (`TranscriptionService.fraction`). Движок
+  сообщает номер куска, за который только берётся; раньше он засчитывался как готовый (`done + 1`),
+  и на записи из двух кусков «100%» стояло ровно с середины работы. На Whisper, где кусок идёт
+  минутами, владелец увидел это и решил, что приложение зависло. Ноль в начале честнее сотни
+  в середине; сотню ставит последний вызов `progress(total, total)`.
+- **Обрыв системой — не ошибка движка.** Записи в работе пишутся в
+  `Application Support/Lori/interrupted.json` на старте и стираются на конце: смахнули приложение
+  из переключателя задач — обработчик истечения не позовут вовсе, и файл остаётся единственным
+  следом. Что осталось в файле, помечается «Прервано» и считается заново, с нуля. Чекпоинтов по
+  кускам у движков нет, и половину текста мы не сохраняем — так решил владелец.
+- **В файле прерванных лежит путь ВМЕСТЕ С ДВИЖКОМ, и перезапуск идёт тем же движком.** Первая
+  версия хранила только пути и ставила запись «текущим движком из настроек». На живом прогоне это
+  дало ровно то, что запрещено в этом файле двумя разными правилами: запись, прерванная на GigaAM,
+  при следующем запуске ушла в **Gemini**, потому что в настройках к тому моменту стоял он — молча
+  подменённый движок плюс 22 МБ звука третьей стороне без единого нажатия.
+- **Облачные записи не перезапускаются автоматически вовсе.** Автоперезапуск отправляет звук наружу
+  и тратит деньги без нажатия. Такая запись остаётся помеченной «Прервано», и решает человек.
+  Локальные перезапускаются сами: с телефона ничего не уходит и денег не стоит.
+- **Прогресс фоновой задачи обязан двигаться, даже когда доли нет.** Планировщик снимает задачу,
+  которая стоит на месте, и на первом живом прогоне снял: облачный запрос идёт одним куском, доли
+  у него нет, ноль простоял две с половиной минуты. Записи без доли отдают оценку по времени
+  (`TranscriptionService.elapsedShare`), заведомо приблизительную и с потолком ниже единицы —
+  «готово» ставит только настоящее завершение.
 - `AppleSpeechTranscriber` uses iOS 26 `SpeechAnalyzer` + `SpeechTranscriber` (built for long files) and
   falls back to `SFSpeechURLRecognitionRequest` below iOS 26. Two hard-won details:
   - the locale must be reserved with `AssetInventory.reserve(locale:)` **before**
     `assetInstallationRequest(supporting:)`, otherwise the system answers
     `Cannot check the download status, … is not subscribed to transcription.<lang>`;
   - do **not** call `SFSpeechRecognizer.requestAuthorization` on the `SpeechAnalyzer` path. It shows a
-    system dialog that nothing answers in tests and the call then hangs forever. The old permission is
-    only needed by the legacy path.
+    system dialog that nothing answers in tests and the call then hangs forever.
 - `SpeechTranscriber.supportedLocale(equivalentTo:)` returns a locale even where no models exist, so
-  availability is decided by `SpeechTranscriber.supportedLocales` being non-empty.
-- **The iOS Simulator has no speech models at all** — `supportedLocales` is empty for every language,
-  so transcription can only be verified on a physical iPhone. Measured on 24 August 2026 on
-  iPhone 17 Pro Max / iOS 26.5. In the simulator the app must say so plainly, which is what
-  `TranscriptionError.assetsUnavailable` is for.
-- `GigaAMCoreMLTranscriber` is only a stub. Do not say GigaAM runs on the iPhone until a real Core ML
-  model is bundled, loaded, and tested on device. The owner's GigaAM v3 lives at
-  `/Users/ilyaqa/Projects/GigaAM` (428 MB checkpoint, production model `v3_e2e_rnnt`, no ONNX export —
-  `triton_scripts/repos/*_onnx` hold only `config.pbtxt`). Resource check of 24 August 2026: 16 GB RAM
-  with 0.7 GB free and 11 GB free disk — **not enough to start a Core ML conversion**. Re-measure before
-  trying, and get the owner's word first. The prepared route is in `design/gigaam/`: take the CTC
-  variant, keep the log-mel front end on the Swift side, and read the preprocessing numbers from the
-  model config — `gigaam/preprocess.py` defaults (win 400, `center=True`) do **not** match v3
-  (win 320, `center=false`).
-- Long audio is chunked by `AudioChunker` before the legacy recognizer sees it, and **all** recognition
-  results are collected through `SFSpeechRecognitionTaskDelegate`, not just the first `isFinal` one.
-  Resuming on the first result cost a 346-second recording 90% of its text (132 characters instead of 1233).
+  availability is decided by `SpeechTranscriber.supportedLocales` being non-empty. Russian is not in
+  that list — for Russian the classic `SFSpeechRecognizer` is the only on-device path.
+- **The iOS Simulator has no speech models at all**, so Apple-engine transcription can only be verified
+  on a physical iPhone (`TranscriptionError.assetsUnavailable` says this plainly).
 - Тайминги слов считаются как в `gigaam/timestamps_utils.py`: слово открывает кусок с `▁`,
-  начало — кадр первого токена, конец — кадр последнего плюс один, шаг кадра берётся
-  по факту (длительность куска / число кадров энкодера), без поправки на задержку RNN-T.
-- Куски аудио **перекрываются** (`AudioChunker.overlapSeconds`), иначе слово на стыке
-  теряется целиком. Перекрытие ограничено половиной цели: иначе нарезка не продвигается
-  и плодит куски по одному отсчёту. Дубли из перекрытия отбрасываются по времени
-  в `TranscriptAssembler.merge`, а не сравнением строк.
-- **Core ML переиспользует буферы своих выходов.** Состояние LSTM предсказательной сети
-  нельзя передавать обратно тем же `MLMultiArray`, который вернула модель: оно затирается
-  при следующем вызове. `GigaAMCoreMLNetwork.State` хранит собственные копии `[Float]`.
-  Симптом был обманчивым: декодер надолго уходил в blank и терял начало записи.
-- **Окно энкодера — 25 секунд**, это `LONGFORM_THRESHOLD` из библиотеки GigaAM. На окне
-  45 секунд модель теряла начало: дольше 25 секунд за раз она не рассчитана обрабатывать.
+  начало — кадр первого токена, конец — кадр последнего плюс один, шаг кадра берётся по факту
+  (длительность куска / число кадров энкодера), без поправки на задержку RNN-T.
+- Куски аудио **перекрываются** (`AudioChunker.overlapSeconds`), иначе слово на стыке теряется целиком.
+  Дубли из перекрытия отбрасываются по времени в `TranscriptAssembler.merge`, а не сравнением строк.
+- **Core ML EP у ONNX Runtime не подключается.** На квантованном графе он всё равно отдаёт
+  почти всё CPU, зато на компиляции модели удваивает расход памяти — и в симуляторе этого не
+  видно, потому что провайдера там нет. Приложение падало только на телефоне.
+- **Прогресс загрузки — только через делегата уровня сессии.** У асинхронного
+  `session.download(from:delegate:)` колбэки не приходят вовсе (проверено и на подставном
+  транспорте, и на настоящем HTTP): полоса стояла на нуле, пока 226 МБ качались.
+- **Буфер выхода принадлежит рантайму и переиспользуется.** И Core ML, и ORT отдают память, которую
+  затирает следующий вызов: состояние LSTM копируется сразу (`OnnxSession.Tensor` держит свою `Data`).
+  Симптом был обманчивым: декодер уходил в blank и терял начало записи.
+- **Длины у графов GigaAM объявлены int64, но встречаются сборки с int32.** `OnnxSession` пробует
+  второй тип и запоминает удачный, а не гадает на каждом кадре.
+- **Порядок осей `log_probs` у CTC проверяется по числу классов**, а не берётся на веру: `[1,T,C]`
+  и `[1,C,T]` отличаются только этим, а перепутать — получить кашу вместо текста.
+- **Куски по 20 секунд** — это память, а не требование графа: входы динамические, но внимание в
+  Conformer глобальное и растёт квадратично.
 - **Настоящую длину куска обязательно передавать в энкодер**: из неё строится маска паддинга,
-  а внимание в Conformer глобальное. С константной длиной паддинг портил реальные кадры.
-- **Движков расшифровки три, и выбирает человек.** `TranscriptionEngineChoice` (настройки →
-  «Расшифровка») хранится в `UserDefaults` и читается **в момент расшифровки**, а не в `init`
-  сервиса: иначе смена движка не подхватывалась бы без перезапуска. Выбранный движок идёт первым,
-  но список на нём не обрывается — его моделей может не оказаться на устройстве, и человек не
-  должен остаться вовсе без расшифровки. Порядок и резолвинг живут в `TranscriptionEngines`
-  отдельно от сервиса, потому что имя работающего движка показывают ещё и настройки.
-- **Whisper large-v3 turbo идёт через WhisperKit** (`argmaxinc/argmax-oss-swift`) — первая сторонняя
-  зависимость проекта. Модель кладут руками в `Lori/Models`, как и GigaAM: `download: false`
-  в `WhisperKitTranscriber` — единственная защита от того, чтобы приложение утянуло 600 МБ само.
-  Рядом с весами обязаны лежать `tokenizer.json` и `tokenizer_config.json` из `openai/whisper-large-v3`:
-  без них WhisperKit пойдёт за токенизатором в сеть. Подробности и скрипт — в `design/whisper/`.
-- Audio must stay local in the current path; do not add cloud ASR as a fallback without explicit user
-  approval. Handing audio to the owner's own Mac over the LAN is also "leaving the device" and needs
-  the same explicit approval.
+  а внимание в Conformer глобальное.
+- Гео-отказ (`User location is not supported`, `Country, region, or territory not supported`) —
+  это про регион запроса, а не про ключ, и лечится своим адресом API: на Mac лежит
+  `ui/api-proxy.mjs`, телефон ходит через него. Ключ в прокси не хранится, его присылает клиент.
+- Тексты для человека пишутся одной строкой: склейка многострочных литералов уже протащила
+  в интерфейс дорожку пробелов.
+- Gemini пробует `interactions`, а при «нет такого метода» повторяет через классический
+  `models/<модель>:generateContent`: новый интерфейс включён не у каждого ключа. Ошибку про
+  неверный ключ повторять другим адресом нельзя — она должна дойти как есть.
+- **Движок, модель и режим — три разных уровня** (`EngineCatalog`). Движок отвечает на вопрос
+  «кто считает» и несёт локальность (`iphone` или облако); модель — техническая строка вроде
+  `gemini-3.5-transcribe`, она живёт в настройках; режим — осознанный выбор человека, и он
+  раскрывается в модель плюс поля запроса. Экраны читают только `EngineDescriptor`, поэтому
+  новый движок не требует правок в интерфейсе. Режим хранится в тех же ключах, что и раньше
+  (вариант GigaAM, режим Gemini, модель OpenAI), поэтому возврат к движку восстанавливает его
+  режим сам собой. У движка с пустым списком режимов чип режима в панели исчезает.
+- **Палитра адаптивная** (`LoriPalette.pair`). Цвета заданы парой «светлый — тёмный», а не
+  жёстко кремовыми, и `preferredColorScheme(.light)` больше нет. Белый в разметке запрещён:
+  для текста на тёмной заливке есть `onInk`, иначе в тёмной теме надписи исчезают.
+- **MLX работает только на устройстве.** В симуляторе нет Metal-устройства, и библиотека не
+  бросает ошибку, а гасит процесс в `mlx::core::metal::Device::Device()`. Поэтому в симуляторе
+  генерация заголовков не вызывается вовсе (`#if targetEnvironment(simulator)`), а человек видит
+  объяснение. Скачивание весов в симуляторе при этом работает и проверяется.
+- **Заголовки делает локальная модель** (`Summarizer`, MLX, Qwen3 4B или 1.7B в четырёх битах).
+  Веса скачиваются по желанию в «Настройки → Заголовки»; без них заголовком служит первая фраза.
+  Имя, заданное человеком, модель не переписывает — это проверяется тестом. Крупная модель
+  запускается только когда `os_proc_available_memory()` показывает запас: права
+  `com.apple.developer.kernel.increased-memory-limit` бесплатная команда разработчика не
+  подписывает (проверено сборкой), поэтому потолок у приложения около трёх гигабайт.
+- Имя импортированного файла — временный заголовок (`SummaryStore.setImported`), а не ручное
+  переименование. Автогенерация может его заменить. Ручное имя защищается `setManual`, но явная
+  команда «Придумать заголовок» снимает эту защиту через `allowGeneratedTitle` и запускает `force`:
+  это исправляет и старые импорты, ошибочно помеченные как ручные. До успешного ответа имя остаётся.
+- **Перед отправкой в облако запись переводится в FLAC 16 кГц моно** (`CloudAudio`).
+  Диктофон пишет ALAC (Apple Lossless) 48 кГц — такого формата нет среди тех, что принимают
+  сервисы расшифровки (у Google это WAV, MP3, AIFF, AAC, OGG, FLAC). Файл уходил без возражений,
+  а ответ приходил пустой: сервис не мог его раскодировать. Именно так пропала расшифровка записи
+  11:32. Побочная польза — запрос весит примерно в десять раз меньше (54 МБ → 5 МБ).
+- **Приложение ведёт свой журнал** (`Journal`, файл `Documents/Lori/journal.txt`). Системный журнал
+  устройства с Mac без пароля не забрать: `log collect` требует root, `sysdiagnose` — согласия на
+  самом телефоне. Поэтому всё важное пишется в файл: поля запроса, размер ответа, сколько разобрано
+  слов, попытки, срывы. Файл виден в «Хранилище → Журнал работы» и забирается через
+  `devicectl device copy from --domain-type appDataContainer`.
+- **Нарезка у Gemini есть, и она не про предел сервиса, а про время в расшифровке.**
+  Документация Google говорит прямо: `timestamp_granularities` документированы только как
+  `["word"]`, они несовместимы с `custom_vocabulary` и «degrade transcription accuracy».
+  Значит в режиме «Точность» время из сервиса не достать вовсе, и единственное честное время —
+  границы того куска, который отправили мы сами. Отсюда `TranscriptionSettings.geminiPartSeconds`
+  (по умолчанию 10 минут, потолок — предел режима: час, а с таймкодами 30 минут): длина части
+  это и есть частота отметок времени. Границы **садятся на паузы**
+  (`AudioSplitter.split(alignToSilence:)` → `AudioChunker.quietestOffset`) — разрез по таймеру
+  попадает в середину слова, и человек видит это прямо в тексте.
+  Урок прошлой пятиминутной нарезки учтён, а не забыт: части перекрываются, дубли снимает
+  `SegmentMerge`, а мельчить нельзя — каждый стык это шанс потерять слово.
+- **Сорвавшийся участок переспрашивается половинами, а не списывается.** Где начался повтор,
+  в «Точности» узнать неоткуда — времени внутри ответа нет, а считать позицию по доле знаков
+  значило бы назвать выдуманную секунду. Зато срыв — свойство длинного запроса, и та же речь
+  куском вдвое короче обычно проходит. Заход ровно один (`GeminiTranscriber.recover`): два
+  подряд означают, что дело не в длине. Половины принимаются, как только дали текст — сравнивать
+  с усечённым началом по длине неверно, в нём заведомо нет всего, что шло после срыва.
+- **Имена говорящих живут отдельно от расшифровки** (`SpeakerNames`,
+  `Application Support/Lori/speakers.json`). Метка в файле остаётся «S1:» — это то, что сказал
+  движок, и подменять её в `.md` нельзя: перерасшифровка вернула бы «S1», а правка имени задним
+  числом переписывала бы файл целиком. Долгое нажатие на кружок называет говорящего сразу по всей
+  записи (метка одна на запись), а в «Скопировать», шаринг и Obsidian уходит уже имя: снаружи
+  приложения кружков нет и «S1» ничего не значит. Имена переезжают и удаляются вместе с записью.
+- **Расшифровка режется на абзацы** (`TranscriptDocument.paragraphs`, по границам предложений) —
+  и та, что без таймкодов, и та, что с ними. Движок без таймкодов отдаёт текст одним куском, а у
+  Gemini в «Точности» одна реплика — это целая отправленная часть, десять минут речи: и то и
+  другое на экране простыня в несколько экранов высотой. Сверху при этом стоит плашка с причиной,
+  когда таймкодов нет вовсе — режим «Причёсанный текст», выключенный тумблер или движок, который
+  их не даёт. Молчать нельзя: пропажу перемотки человек примет за поломку.
+- **Абзацам время не раздаётся.** Секунда абзаца считалась бы по доле знаков, а речь идёт
+  неравномерно: подпись «≈12:30» под абзацем читается как факт и указывает не туда. Время стоит
+  у первого абзаца реплики — там, где оно настоящее, — а продолжения держат пустую колонку той
+  же ширины, иначе абзацы одной реплики разъезжаются и читаются как разные реплики.
+- **Тайминги — нативные.** `timestamp_granularities: ["word"]` даёт время каждого слова
+  (`start_offset`/`end_offset`) и говорящего; `GeminiAnnotations` ищет их в ответе по смыслу
+  полей, а не по угаданному пути. Границы отправленного фрагмента таймкодом речи не считаются:
+  такие реплики помечены `isApproximate` и пишутся в файл как «**[кусок 0:00–5:00]**».
+- **Форма запроса Gemini — из документации, а не из догадок.** Настройки лежат внутри
+  `generation_config.transcription_config`: `language_codes` (список BCP-47), `custom_vocabulary`
+  (до 1000 терминов, лучше до 100), `mode` — строка `"smart"` либо объект
+  `{"type": "verbatim", "timestamp_granularities": ["word"], "diarization_mode": "speaker"}`.
+  Верхним уровнем эти поля отправлять нельзя: сервис отвечает «Unknown parameter» на каждое по
+  очереди. Полный текст ответа — в `output_text`, слова с таймингами — в аннотациях `word_info`
+  (`text`, `speaker`, `start_offset`, `end_offset`). Пределы: час аудио, 30 минут с таймкодами
+  или диаризацией, до восьми говорящих.
+- **Язык уходит в оба сервиса.** Документация OpenAI прямо говорит, что язык улучшает точность и
+  скорость; у `gpt-transcribe` поле называется `languages[]` (список), у whisper и `gpt-4o-…` —
+  одиночное `language`. «Определяй сам» означает, что поле не отправляется вовсе.
+- **Набор полей запроса подстраивается под сервис.** На «Unknown name "x"» приложение убирает
+  именно это поле и повторяет запрос (`GeminiTranscriber.unknownField`), а словарь при отказе
+  штатного поля уходит в текст подсказки. Гадать форму настроек по названиям кнопок в AI Studio
+  нельзя — это уже приводило к ошибкам.
+- **Режим решает всё, тумблеры только показывают.** Режимы Gemini — «Точность» (дословно, час
+  одним запросом), «Спикеры и таймкоды» (`timestamp_granularities` + `diarization_mode`, предел
+  падает до 30 минут) и «Причёсанный текст» (`smart`). Пара «режим плюс независимые тумблеры»
+  позволяла собрать состояние, которого у сервиса не бывает: режим «Точность» с подписью «без
+  таймкодов» — и рядом включённый тумблер «Таймкоды реплик». Теперь `geminiWantsWordTimestamps`
+  и `geminiWantsDiarization` смотрят **только** на режим, а «Таймкоды реплик» и «Разделять
+  говорящих» в «Расшифровке» — индикаторы: они показывают, что даёт режим, и гаснут с
+  объяснением (`EngineToggles`). Порядок режимов один и тот же везде (`GeminiMode.ordered`).
+  Миграция приводит обе прошлые формы (старое `timecodes`; «точность» с двумя включёнными
+  тумблерами) к нынешнему `speakers`.
+- **Строкой в `mode` отправляется только `smart`.** Проверка «всё, кроме accuracy → smart»
+  однажды уже сломалась: появился третий режим и молча уехал в smart, то есть ровно в тот
+  режим, который несовместим с тем, что он должен включать.
+- **Один компонент выбора движка** (`EngineSections`) на шит из панели и экран настроек. До
+  этого их было два, и они разошлись: имя «GigaAM v3» было записано в четырёх местах по-разному,
+  готовность в одном показывалась бейджем, в другом строкой «Состояние». Режим живёт в настройках
+  своего движка — там же, где движок выбран, — а не в общей «Расшифровке».
+- **Проверено на живом API 28 августа 2026** (все пять комбинаций, `/v1beta/interactions`):
+  - `custom_vocabulary` **несовместим** с таймкодами и с диаризацией — сервис отвечает 400
+    «custom_vocabulary is incompatible with timestamps/diarization» (без кавычек, виновник
+    первым словом — эту форму разбирает `unknownField`). Приложение снимает словарь и
+    повторяет запрос; словарь при этом доходит текстом подсказки. Со `smart` словарь совместим.
+  - Говорящие приходят **только** в `word_info` вместе с таймингами: `diarization_mode` без
+    `timestamp_granularities` сервис принимает, но говорящих не присылает вовсе. Поэтому
+    включённые говорящие тянут за собой тайминги слов в запросе; писать ли время в файл —
+    отдельное решение тумблера таймкодов (`Transcript.markdown(stamps:)`).
+  - Метки говорящих сервис отдаёт в форме `spk:0`, `spk:1` — счёт с нуля;
+    `GeminiAnnotations.label` переводит их в «S1», «S2» (владелец выбрал латиницу).
+    В файле метка — текст «S1: …», на экране записи — цветной кружок (`SpeakerDot`),
+    сам текст реплики без метки (`TranscriptDocument.speakerMark`). Старые файлы
+    с «Г1:» читаются и показываются так же.
+- **Зацикливание ловится детектором** (`RepetitionCheck`): повторы слов и n-грамм, доля
+  уникальных слов, невозможная скорость речи. Сорвавшийся ответ не принимается: один настойчивый
+  повтор запроса, затем речь до срыва сохраняется, остаток помечается предупреждением с таймкодом.
+  Проверяется каждая реплика отдельно — иначе сегмент с циклом внутри тянулся в расшифровку целиком.
+- **Полнота расшифровки проверяется, а не предполагается.** Gemini молча пропускает участки
+  записи (на реальной записи владельца первые 1:40 просто отсутствовали, при том что GigaAM их
+  распознал). Поэтому `TranscriptCoverage` считает покрытие по нативным таймингам слов — там,
+  где они запрошены и пришли. Без таймингов покрытие не считается вовсе: пустой список —
+  это «время не пришло», а не «текста нет».
+- **О пропуске судит переспрос, а не громкость.** «Слов на этот участок не пришло» — это ещё не
+  потеря: в разговоре молчат минутами, и на одной записи владельца так получились четыре ложные
+  плашки разом. Порядок такой (`settleGaps`):
+  - `AudioLoudness` слушает пропуск окнами по десять секунд — это **дешёвый предварительный
+    фильтр**, чтобы не платить за тишину. Тихо — ни плашки, ни запроса;
+  - есть звук — участок **переспрашивается отдельным куском**. Спрашиваем шире найденного звука
+    (перекрытие ради контекста), а **берём только то, что попало внутрь пропуска**: расшифровка
+    краёв у нас уже есть, и вторая версия тех же слов — дубль в тексте, а не находка. Формулировки
+    у двух ответов разные, и `SegmentMerge` такой дубль не ловит — на экране получились две реплики
+    на одной секунде с разными говорящими;
+  - переспросили, внутри пусто — **плашки нет**: два независимых вопроса об одном участке ответили
+    одно и то же, и настаивать на потерянной речи нечем;
+  - переспросить не успели (предел `maxGapReasks`, каждый переспрос оплачен) — плашка говорит
+    ровно факт: `> Пропуск 32:20–33:37: слов для этого участка сервис не дал`.
+  Заход ровно один. **Порог считается от уровня речи этой же записи** (медиана пиков по
+  расшифрованному времени, −12 dB) и требует полминуты звука подряд: абсолютный порог ловил бы шум
+  комнаты, а одиночный скрип стула — не пропущенный разговор. Числа выставлены по живому прогону:
+  уровень речи 0,307, шум в «пропусках» проходил порог −20 dB и не проходит −12 dB.
+  Абсолютный −60 dBFS остался страховкой на случай, когда уровень речи не измерить.
+- **Метки говорящих у Gemini живут внутри одного запроса.** `spk:0` во второй части — не обязательно
+  тот же человек, что в первой: диаризация считается на присланном куске. Приложение это пока не
+  сводит, и на длинной записи номера могут разъезжаться между частями.
+- **`finishReason` читается и на удачном ответе.** `MAX_TOKENS` при непустом тексте — это
+  расшифровка, оборванная посреди участка: текст выглядит нормальным, а всё, что шло после
+  обрыва, не пришло. Повтор того же запроса это не лечит, поэтому участок сразу уходит в
+  `recover` (половины), а причина остановки пишется в файл журнала строкой `остановка=…`.
+  На живом прогоне записи 41:09 во всех пяти частях стоит `остановка=—`, то есть это страховка
+  на будущее, а не объяснение уже виденных пропусков.
+- Пустой ответ на часть — не повод её потерять молча: один повтор с настойчивой просьбой,
+  а если и он пуст — предупреждение с таймкодом участка в файле расшифровки. Ответ без
+  разбивки на реплики привязывается ко всему участку целиком.
+- Дубли из перекрытия отбрасываются **по доле уже покрытого времени**, а не по «максимальному
+  дошедшему времени»: переспрос по пропуску приходит после более поздних частей, и наивная
+  проверка выбрасывала именно его.
+- Cloud engines cut long audio themselves (`AudioSplitter`, `AVAssetExportSession`): OpenAI by request
+  size (25 МБ limit), Gemini by duration — настройка длины части, но не больше предела режима:
+  час одним запросом, 30 минут с таймкодами или говорящими. Part offsets are added back to word timings; the
+  temporary parts directory is always removed, and the original file is never touched.
+- Gemini inline audio is capped at 20 МБ per request, so anything above ~12 МБ goes through the Files
+  API (resumable upload, wait for `ACTIVE`, delete after use).
 
-## Files brought into the chat
+## Сколько займёт расшифровка
 
-- The paperclip **brings a file into the conversation**, it does not quietly copy it away. Before
-  this, it imported into `Inbox` and left no message, no card and no transcript — the file simply
-  vanished. Never restore that behaviour.
-- **Motion in the chat follows what the owner picked** on the live mockups
-  (`design/motion/index.html`, variants 1Б / 4В): a real progress ring with percentages while
-  transcription runs, a shimmering status line where there is no honest number (a digest is one
-  request), and text that reveals line by line instead of landing as a wall. All of it is native
-  SwiftUI — `trim`, `TimelineView`, `transition`; the project has no animation dependency and does
-  not need one. `TranscriptionService.progressFraction` exists so the ring never parses «3 из 10»
-  back out of a localized string.
-- Preview lines in the card are **real text**, not grey placeholder bars, and the cut is marked with
-  an ellipsis. Drawing bars over text that already exists hides content for decoration.
-- A brought file appears as `ChatBubble.Role.attachment` with the workspace `path`, rendered by
-  `ChatAttachmentCard`: state («Расшифровываю… 3 из 10» → «Расшифровка готова» → «Важное готово ·
-  тема»), a three-line preview and at most two actions. Reading in full happens in the recording card
-  or the note, not inside the bubble — no nested scroll views.
-- `ChatIngest.decide` is the only fork: audio → transcribe, readable text → straight to context,
-  anything else → an honest line in the chat that Lori cannot read it. Do not pretend an image was
-  understood.
-- The text of an attachment goes to the model as a **system message** (`AssistantStore.addContext`),
-  capped at `maxContextCharacters`, and the cap is stated inside the message. It is never a user
-  bubble: the human already sees the card, and a wall of transcript in the feed is noise.
-- Restoring a conversation from history does **not** put attachment text back into the model context
-  (`case .system, .attachment: nil`). Bring the file again rather than inventing history.
-- An audio attachment follows the same road as a recording: transcript in `Transcripts/`, digest in a
-  theme folder, front matter pointing back at the file wherever it lies (`Inbox/…` included).
-- The chat has exactly one sheet, driven by `ChatSheet` (`history` / `entry`). Audio opens
-  `RecordingSheet`, everything else the note editor.
+`TranscriptionSpeed` помнит скорость по факту прошлых прогонов на этом телефоне (секунд работы на
+секунду звука, скользящее среднее, `Application Support/Lori/speed.json`), отдельно для каждого
+движка и режима. Умолчания в коде живут ровно до первого замера: телефоны различаются в разы, а
+сеть — на порядок, и гадать по названию движка нельзя. Для облака к оценке добавляется отправка:
+запись уходит уже сжатой в FLAC 16 кГц моно (`CloudAudio`), это около 32 КБ на секунду звука.
+Формулировка всегда со словом «примерно» — это оценка, а не обещание.
 
-## Digest, memory, wiki — the second-brain layer
+## UX requirements (do not regress)
 
-- A recording produces **two** texts, and both stay: the verbatim transcript in `Transcripts/`
-  and the processed note in a **theme folder** at the workspace root. The card switches between
-  them; the note links back through front matter.
-- The processed note is written by `DigestService` through the same model as the chat, so it needs
-  a key. `autoProcessTranscripts` (on by default) runs it right after transcription; `TranscriptCard`
-  also offers «Обработать» by hand. Without a key the card still shows the transcript, split into
-  paragraphs locally by `TranscriptReadability` — never an empty screen when text exists.
-- **Front matter is the source of truth for the audio ↔ transcript ↔ note link** (`lori: digest`,
-  `audio:`, `transcript:`, `theme:`, `tags:`). Do not replace it with an external index: front matter
-  survives renaming, moving and hand-editing, and an index does not. `DigestService` only caches the
-  scan and re-scans when a cached path is gone.
-- The theme folder is chosen by the model **out of the existing top-level folders**, matched
-  case-insensitively, or a new one-to-two-word name. `Recordings` / `Transcripts` / `Inbox` / `Models`
-  can never be themes.
-- `TranscriptReadability` must not change words. It only drops the title line and `**[00:00–00:04]**`
-  marks and groups sentences into paragraphs, and it breaks only at sentence ends — text without
-  punctuation (the Apple engine) stays one paragraph rather than being cut mid-phrase.
-- Memory is a **visible note**, `Память Lori.md`, not a hidden store: the owner must be able to read,
-  fix and delete what was remembered. `MemoryStore.promptBlock` is injected into the system message
-  before every send. The `loriMemory` toggle governs the whole feature — off means neither `remember`
-  / `forget` tools nor the facts in the prompt.
-- `search_notes` searches the whole workspace at once and is the agent's first step for any question
-  about content; `list_topics` / `topic_notes` navigate themes and tags. It is honest keyword search
-  by five-letter stems, not embeddings — do not describe it as vector RAG.
-- The wiki (`WikiIndex`, `WikiSheet`) is derived, never stored: themes are folders, tags come from
-  front matter and `#решётки`, links from `[[двойных скобок]]`, and backlinks are computed from the
-  forward ones. `Recordings` / `Transcripts` / `Models` are excluded — that is raw material, not
-  knowledge. A `[[link]]` with no note is a future topic, shown as such, not an error.
-- `LLMSettings` decides where requests go. Empty settings mean DeepSeek; a valid `http`/`https`
-  address with a host switches the whole app — chat, digest and the connection check — to that
-  provider, with its own model name. Garbage in the field must fall back to DeepSeek instead of
-  silently breaking the chat. `NSAllowsLocalNetworking` plus `NSLocalNetworkUsageDescription` exist
-  only so a model on the owner's own Mac can be reached over the LAN.
-- Audio still never leaves the iPhone. What can leave is text: the transcript on processing and the
-  question in the chat. Say this plainly in the UI; do not weaken it.
-- **Model answers are Markdown and must be rendered as such.** `MarkdownText` splits blocks
-  (headings, lists, quotes, fenced code) and hands inline markup to `AttributedString`. Real DeepSeek
-  answers arrived as raw «**Где это записано:**» with backticks around paths until this existed.
-  Copy still copies the raw text — that is the source.
-- **The chat header is pinned** (`safeAreaInset(edge: .top)`), not part of the scrolling content: a
-  long answer slid under the status bar and took the close button with it.
-- **The interface must name the model the request actually goes to.** With a custom provider the
-  composer shows that provider's model name instead of the DeepSeek picker, the connection check
-  reports the host it reached, and the settings say the DeepSeek model choice is inert. The chip used
-  to read «V4 Flash» while requests went somewhere else entirely.
-- A service folder can never become a theme, even if the model answers «Transcripts»: such an answer
-  falls back to «Заметки». Otherwise the note lands in raw material that the wiki hides.
+- Home is the list of recordings, newest first, grouped by day, in the cream visual language.
+  Шапка без названия экрана: меню фильтра тем слева, поиск, ассистент и настройки справа.
+- **Акцент один — оливковый, и задаётся на уровне окна** (`.tint` в `LoriLocalApp` плюс
+  `AccentColor` в ассетах). Системный синий рядом с оливковым читался вторым акцентом: зелёная
+  галочка движка и синяя галочка режима на одном экране. `.tint`, поставленный внутри
+  `ContentView`, до UIKit-презентаций (пикер файлов, шит «Поделиться») не доходит — только ассет.
+- **Сниппет карточки продолжает заголовок, а не повторяет его** — но только когда заголовок
+  и правда взят из расшифровки. У записи с именем от человека или от модели отрезать «то, что
+  ушло в заголовок» не от чего, и сниппет начинался бы с середины фразы (`TranscriptPreviews`
+  держит оба варианта).
+- **Словарь зеркалится в `Documents/Lori/vocabulary.txt`.** Файл настроек пуст, пока приложение
+  работает, и наполняется при уходе в фон: настройка, сделанная перед жёстким завершением
+  процесса, пропадает целиком — так и исчезли 52 слова. Восстановление только в одну сторону:
+  пусто в настройках и есть в файле. Обратное значило бы спорить с человеком, который слова удалил.
+- Нижняя панель (`Composer.swift`) — двухстрочная и обслуживает три сценария: записать голос,
+  прикрепить файл, спросить ассистента. Поле сверху, `+` и чипы снизу, справа одна круглая кнопка
+  на все состояния (микрофон → стрелка → стоп): смена состояния должна читаться как превращение,
+  а не как подмена одной кнопки другой. Состояний пять (`ComposerState`), они взаимоисключающие.
+  Во время записи панель схлопывается в строку: таймер, живая волна, пауза, красная кнопка стоп.
+  «Отмена» отправляет запись в `.LoriTrash`, стоп сохраняет файл.
+- **Волна рисуется в `Canvas`, а не стопкой вью.** `HStack` из полусотни столбиков требует свою
+  ширину целиком и не сжимается — панель распирало шире экрана, и весь список уезжал влево.
+- Чипы рисуются на 32pt, а нажимаются на 44pt (тот же приём, что у круглых кнопок): крупные пилюли
+  перетягивали внимание с текста вопроса, ради которого панель и существует.
+- Tapping a recording opens the player first; transcription starts by button or automatically after
+  recording, if «Расшифровывать сразу» is on.
+- The recording banner (`.recordingBanner`) goes **outside** `NavigationStack`, not inside: inside, a
+  large navigation title covers it and the tap lands on the title instead of the banner.
+- «Удалить запись» moves both the audio and its transcript to `.LoriTrash`. «Delete» never means
+  irreversible deletion.
+- Search covers transcript text and recording names; a hit on a transcript opens its recording.
 
-## Source map
+## Экспорт расшифровки
 
-- `LoriLocal/Views/ContentView.swift` — home, chat, folder drawer/browser, import UI, settings.
-- `LoriLocal/Services/WorkspaceStore.swift` — sandboxed local file access and tools.
-- `LoriLocal/Services/DeepSeekAgent.swift` — DeepSeek Chat Completions client and file tools.
-- `LoriLocal/Services/KeychainStore.swift` — DeepSeek key persistence.
-- `LoriLocal/Services/AudioCaptureStore.swift` — microphone recording, metering, pause/cancel. No transcription.
-- `LoriLocal/Services/Transcription.swift` — `LocalTranscribing`, `AppleSpeechTranscriber`, `TranscriptionService`.
-- `LoriLocal/Services/NoteDigest.swift` — the digest model, its markdown and front matter, `NoteMeta`, `TranscriptReadability`.
-- `LoriLocal/Services/DigestService.swift` — transcript → note through the model, theme folders, the front-matter scan.
-- `LoriLocal/Views/DigestCard.swift` — `TranscriptCard`: the «Важное ↔ Расшифровка» switch and its single action.
-- `LoriLocal/Views/MarkdownText.swift` — `MarkdownBlock` / `MarkdownText`: the model's Markdown, rendered.
-- `LoriLocal/Views/ChatAttachment.swift` — `ChatIngest` (bring a file in: import, transcribe, context, digest) and `ChatAttachmentCard` (the card in the feed).
-- `LoriLocal/Views/MotionBits.swift` — `ProgressRing`, `ShimmerLabel`, `RevealedLines`, `MotionText`: the chosen motion, native only.
-- `design/motion/index.html` — the animated mockups the owner chose from (published as an artifact); keep it in step with what the app actually does.
-- `LoriLocal/Services/Brain.swift` — `NoteSearchIndex`, `MemoryStore`, `BrainTools` (search, topics, memory).
-- `LoriLocal/Services/Wiki.swift` — `WikiIndex`: themes, tags, links, backlinks; derived from files.
-- `LoriLocal/Views/WikiSheet.swift` — the wiki screen: themes, tags, note page with connections.
-- `LoriLocal/Services/LLMSettings.swift` — provider address and model name, with validation.
-- `LoriLocal/Services/LocalTranscriber.swift` — the GigaAM connection point, still an explicit stub.
-- `LoriLocal/Services/ConversationArchive.swift` — chat history persistence in Application Support.
-- `LoriLocal/Views/LoriFormat.swift` — dates, Russian plurals, durations, with the locale pinned to `ru_RU`.
-- `LoriLocal/Views/RecordingPlayer.swift` — `AudioPlaybackStore` (playback only, no delegate: the ticker catches the end) and `RecordingSheet`. `LoriPalette` / `LoriFont` are internal, not private, so this file can use them.
-- `LoriLocal/Views/RecordingBanner.swift` — the «идёт запись» bar and the `.recordingBanner { }` modifier; the recorder comes from the environment (`ContentView` injects it as its outermost modifier), not through every initializer.
-- `LoriLocal/Views/NotesSearch.swift` — `NotesSearchStore` (one breadth-first pass over the workspace, content read once per search session), `SearchResultRow`, `NotesSearchBar`.
-- `LoriLocal/Assets.xcassets/AppIcon.appiconset` — the app icon, one 1024×1024 universal image.
-- `design/gigaam/export_coreml.py` — GigaAM → Core ML export, with a resource preflight that refuses to run on a loaded Mac; `design/gigaam/README.md` — the measured model and preprocessing spec, and the remaining steps.
-- `design/icon/RenderIcon.swift` — renders the icon variants; `design/icon/*.png` holds them plus the Higgsfield concept sketches.
-- `LoriLocalTests/WorkspaceStoreTests.swift` — sandbox/file tests.
-- `LoriLocalTests/AssistantStoreTests.swift` — agent tool loop, round limit, history persistence, via a scripted `ChatCompleting`.
-- `LoriLocalTests/ConversationArchiveTests.swift` — history round-trip, broken file, cap.
-- `LoriLocalTests/LoriFormatTests.swift` — date and plural formatting.
-- `LoriLocalTests/TranscriptionServiceTests.swift` — transcript naming, engine failure, non-audio refusal, audio detection, all with a stub engine.
-- `LoriLocalUITests/LoriLocalUITests.swift` — real simulator taps: folder, `+`, and the full note lifecycle.
-- `LoriLocalUITests/NotesSearchUITests.swift` — finds a note by a word that exists only inside its text, opens the hit, cleans up after itself.
-- `LoriLocalUITests/WorkspaceBrowserUITests.swift` — the folder opens as itself and not as the root, and the settings sheet opens. Both sheets are attached to `ContentView`, and both crashed on the missing environment object; keep these two tests as the guard for that.
-- `LoriLocalUITests/RecordingPlayerUITests.swift` — the player screen and the recording banner. Both need a seeded audio file: `design/qa/seed-audio.sh` puts «UI sample.m4a» into the app container. Without it the test skips instead of failing. The banner test also skips in the simulator, which does not start a recording.
-- `design/qa/seed-audio.sh` — makes the fixture with `say -v Milena` + `afconvert` and copies it into `Documents/Lori/Workspace`.
-- `design/qa/seed-digest.sh` — the full card fixture: recording, its transcript and a processed note in `Работа/`, plus an unprocessed pair and two controlled-failure pairs. Needed by `DigestCardUITests`, `WikiUITests` and `LiveModelUITests`; without it they skip.
-- `design/qa/mock-llm.py` — the stand-in provider with an OpenAI-shaped API: digest answers, tool calls, memory, and the controlled failures.
-- `LoriLocalTests/NoteDigestTests.swift`, `DigestServiceTests.swift`, `BrainTests.swift`, `WikiTests.swift`, `LLMSettingsTests.swift` — the second-brain layer, all with stub clients and no network.
-- `LoriLocalUITests/DigestCardUITests.swift`, `WikiUITests.swift` — real simulator taps on the card switch and the wiki.
-- `LoriLocalUITests/RecordingEntryUITests.swift` — guards the single recording entry: no mic button on home or in the chat, «Записать» inside `+`, chat button sends only.
-- `LoriLocalUITests/ChatAttachmentUITests.swift` — the attachment card in the chat. The document picker cannot be driven from a test, so the attachment is seeded straight into chat history by `design/qa/seed-digest.sh`; what stays unproven is only the picker → `ChatIngest.bring` glue.
-- `LoriLocalTests/ChatIngestTests.swift` — the ingest fork, transcription of a brought recording, context injection and its cap, the digest of an attachment.
-- `LoriLocalUITests/LiveModelUITests.swift` — the same flows against real HTTP: digest into a theme folder, chat search, memory, bad answer, provider error, tool-round limit.
-- `project.yml` — XcodeGen source of truth. Regenerate the project after changing it.
+«Поделиться» отдаёт **файл**, а не строку, и формат выбирается на месте: `TranscriptExport`
+(модель и Markdown), `TranscriptPDF` (страницы A4), `ShareSheet` (лист с файлом).
+
+- **Голая строка в `UIActivityItem` — это и была та самая жалоба «отправляет кракозябры».**
+  Получатель вставлял её текстом в тело сообщения вместе со всей разметкой: `# Запись 22:22`,
+  `_Расшифровано: …_`, `**[0:00–0:12]** S1: …`. Ошибки кодировки в файлах не было и нет —
+  чтение и запись честно UTF-8; лечит именно **файл с расширением**, у которого получателю
+  нечего угадывать. `TranscriptPDFTests.testRussianTextIsReadableBack` держит это тестом:
+  русский текст обязан читаться обратно из готового PDF.
+- **Формат спрашивается каждый раз, а не живёт в настройках**: PDF нужен, когда расшифровку
+  отправляют человеку, Markdown — когда её несут в свой редактор. На экране записи это `Menu`
+  на кнопке, в свайпе по карточке — `confirmationDialog` (меню в свайп-кнопку не поставить).
+  Формулировки те же, что в веб-интерфейсе: «PDF · Удобно читать и отправлять»,
+  «Markdown (.md) · Текст для дальнейшей работы». Продукт один, и на телефоне формат не должен
+  называться иначе, чем на Маке.
+- **Оба входа отдают один и тот же документ.** Раньше список шарил сырой текст `.md`, а экран
+  записи — разобранный текст без таймкодов: два «Поделиться» для одной записи давали разное.
+  Теперь оба собирают `TranscriptExport` из `TranscriptDocument`.
+- **В файл уходит всё, что есть**: заголовок, абсолютная дата и время, длительность, тема,
+  описание записи, «Расшифровано: движок», замечания, реплики с диапазонами времени и именами
+  говорящих. Дата абсолютная (`d MMMM yyyy, HH:mm`), а не «сегодня, 22:22»: файл переживёт день.
+- **Имена говорящих подставляются на границе** (`SpeakerNames`), как в «Скопировать» и Obsidian —
+  в самом `.md` рабочей папки метка остаётся «S1:».
+- **`isApproximate` и замечания доезжают до файла.** «кусок 0:00–5:00» — это границы
+  отправленного фрагмента, а не время речи; человек, получивший расшифровку, должен знать
+  и об этом, и о пропусках. В PDF замечания стоят в шапке, а не в конце: узнать о дырах
+  надо до чтения, а не после.
+- **`TranscriptDocument.Line` хранит и конец диапазона.** Экрану он не нужен — перематывают по
+  началу, — но в файле на диске диапазон есть, и экспорт не имеет права быть беднее источника.
+- **Страница PDF белая, а не кремовая, и цвета в рендере свои.** Кремовый холст — язык экрана,
+  на печати он съедает тонер. А `LoriPalette` динамическая: лист, собранный в тёмной теме,
+  вышел бы белым по белому. Цвет в тексте проставляется **двумя** ключами: шапку рисует UIKit
+  и читает `.foregroundColor`, тело — CoreText, и у него для цвета свой ключ с `CGColor`.
+- **`cg.textMatrix = .identity` перед каждым `CTFrameDraw` — не украшение.** Текстовая матрица
+  **не входит в графическое состояние**: `saveGState`/`restoreGState` её не возвращают, и та,
+  которую оставил после себя предыдущий `CTFrameDraw`, достаётся следующей странице. Живой
+  экспорт с телефона вышел с одной верной страницей и 63 зеркальными
+  (`testEveryPageStartsAtTheTopMargin` меряет это растром: 62 точки от верха у правильной
+  страницы против 67 у зеркальной).
+- **Страницы нарезает CoreText, и куски считаются заранее** — иначе в подписи не написать
+  «стр. 2 из 5», а номер без общего числа не говорит, кончился ли документ. Взятая длина
+  никогда не ноль: страница, на которую ничего не влезло, дала бы вечный цикл.
+- **Файл ложится в `temporaryDirectory/LoriExport`, и папка чистится перед записью, а не после
+  закрытия листа.** «Сохранить в Файлы» читает файл уже после того, как лист закрылся, и
+  уборка «на выходе» выдёргивала бы его из-под получателя. Рабочая папка для экспорта не
+  годится вовсе: она видна в «Файлах», и служебные копии стояли бы там рядом с записями.
+- **Имя файла — заголовок записи** с вычищенными `/` и `:`, а не `lori-20260904-slug.pdf`:
+  имя видит получатель. Оно же уходит темой письма через `UIActivityItemSource` — без него
+  Почта отправляла бы расшифровку без темы.
+- **PDF считается вне главного актора** (`Task.detached`): часовая расшифровка — это десятки
+  страниц вёрстки, и кнопка не должна на них подвисать.
+- **`UIActivityItemSource` нельзя изолировать главным актором**: протокол изоляции не
+  объявляет, и Swift 6 отвечает ошибкой о пересечении границы.
+- Экран правки текста делится **своим буфером** файлом `.md` и без выбора формата: он про сам
+  текстовый файл, а PDF собирают с экрана записи, где есть шапка и имена.
+
+## Data safety after the 7 September incident
+
+- Never use the personal `ru.ilyaqa.lori.local` app as a test host on a physical device. Use the `LoriQA` scheme / `QA` configuration: separate bundle `ru.ilyaqa.lori.local.qa`, display name `Lori QA`, sandbox, defaults and Keychain access group. Simulator tests also default to this scheme.
+- Never issue `devicectl copy to --remove-existing-content`, uninstall, container replacement or simulator erase against a user-data installation. A diagnostic subdirectory is not sufficient isolation.
+- Use `design/qa/install-qa.py` for test installation: it checks the actual built Info.plist and refuses the personal app. Fixture scripts use `safe-container.py`, require an explicit simulator UUID, verify QA container metadata and refuse overwrites and symlinks. An existing fixture is a refusal, not permission to delete it.
+- No direct copy-to operations into the personal phone container for QA. Test audio enters the separate QA app by normal import. Do not reuse personal keys or personal recordings for automated tests.
+- Before an explicitly requested update to the personal app, obtain and verify a complete external copy of its audio, transcripts and metadata. Preserve existing backups; a copy inside the same app container does not protect against container deletion. Installation failure is not permission to uninstall.
+- The incident's sole cause remains unproven between installation and copying. These guards remove the hazardous test workflow; they do not claim that an app can prevent external deletion of its sandbox. See `design/recovery-2026-09-07/INCIDENT.md`.
 
 ## Verification
 
-The native simulator integration used by Claude Code needs a selected Xcode. If it reports
-`Xcode is installed but not selected`, the owner must run
-`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer` — an agent cannot.
-Without it, use `xcodebuild` plus `xcrun simctl io <udid> screenshot`; interface taps are
-only available through UI tests. UI tests that tap a list card must scroll it clear of the
-composer first: `isHittable` is true even for a card covered by the composer, and the tap
-is swallowed there.
-
-Run from this directory:
+Unit tests and UI tests run in the simulator. Only three simulators may be booted at once and `booted`
+is then ambiguous — address the device by id:
 
 ```bash
-xcodebuild -quiet -project LoriLocal.xcodeproj -scheme LoriLocal \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro Max,OS=26.5' \
+xcodebuild -project LoriLocal.xcodeproj -scheme LoriQA \
+  -destination 'id=<simulator-udid>' -derivedDataPath <scratch>/dd \
   CODE_SIGNING_ALLOWED=NO test
 ```
 
-If `project.yml` changes:
+If `project.yml` or the file list changes: `/opt/homebrew/bin/xcodegen generate`.
+
+**Симулятор обязан быть на iOS 26**: `id=<udid>` молча уводит на любой установленный рантайм, и
+на iOS 18 весь фоновый путь `BGContinuedProcessingTask` просто не выполняется — тесты про него
+пропускаются, а прогон выглядит зелёным. Проверять так:
 
 ```bash
-/opt/homebrew/bin/xcodegen generate
+xcrun simctl list devices available | awk '/^-- /{rt=$0} /iPhone/{print rt, $0}'
 ```
 
-For a physical phone, discover it first with `xcrun devicectl list devices`. Use Xcode automatic signing with the owner’s already-configured Personal Team. Do not write a team identifier into source control or documentation. A connected phone must be unlocked before remote launch works.
+**Фоновую задачу в симуляторе не проверить вообще**: `BGTaskScheduler` там отвечает
+`unavailable`. В симуляторе проверяется только запасной путь (состояние `foregroundOnly` и
+честная строка о нём), сама полоса в Dynamic Island — только на телефоне.
 
-A SpringBoard icon cache can show a grey placeholder right after `simctl install`. Restart it with
-`xcrun simctl spawn <udid> launchctl kickstart -k system/com.apple.SpringBoard`. To see the icon
-without the simulator panel, drive SpringBoard from a UI test
-(`XCUIApplication(bundleIdentifier: "com.apple.springboard")`) — or just inspect
-`AppIcon60x60@2x.png` inside the built `.app`, which is what the build actually produced.
-
-Two agent sessions must not run `xcodebuild ... test` on the same simulator at the same time.
-Each run terminates and relaunches `ru.ilyaqa.lori.local`, so the other run's app dies mid-test and
-XCTest reports `Test crashed with signal kill` — which reads exactly like a real regression and costs
-an hour of bisecting. Check first: `ps aux | grep xcodebuild`. Use a separate `-derivedDataPath`
-so the two runs do not fight over build products either.
-
-Clean up after a UI-test run: notes left in `Documents/Lori/Workspace` accumulate, push cards under
-the composer and break later taps. A crashed run leaves them behind — remove them by hand.
-
-### Model paths: test them against a local server, not only stubs
-
-Unit tests inject `ChatCompleting`, so they never touch the network, the answer parsing or the
-provider settings. Everything that involves a model is therefore also driven end-to-end through a
-stand-in server with an OpenAI-shaped API, with no key and no billing:
+Настоящую модель Whisper проверяет `WhisperKitIntegrationTests` (короткая фраза, тишина и замер
+двух движков на одном файле). Модель кладётся так:
 
 ```bash
-python3 design/qa/mock-llm.py 8765 &
-./design/qa/seed-digest.sh <udid>
-xcodebuild -project LoriLocal.xcodeproj -scheme LoriLocal \
-  -destination 'platform=iOS Simulator,name=iPhone 17 Pro,OS=26.5' \
-  -only-testing:LoriLocalUITests/LiveModelUITests test
+python3 design/whisper/fetch_model.py   # кэш ~/Library/Caches/lori-models, качает только раз
+./design/whisper/seed-model.sh <udid>
 ```
 
-- **Do not pass `CODE_SIGNING_ALLOWED=NO` for anything that touches the Keychain.** An unsigned
-  build has no entitlements at all, and `SecItemAdd` fails with «A required entitlement isn't
-  present» — so the key cannot be saved and every model path is untestable. Default signing
-  («Sign to Run Locally») is enough on the simulator.
-- The stand-in server drives the failure modes on purpose: a transcript containing `СБОЙ` makes it
-  answer prose instead of JSON, `ПЯТЬСОТ` makes it return HTTP 500, and a chat message containing
-  `ЦИКЛ` makes it call a tool forever so the `maxToolRounds` limit is actually exercised.
-- **The mode is chosen by whether the stand-in server is listening**, not by an environment variable:
-  `TEST_RUNNER_…` never reaches the runner, and a run that looked real was silently going to the
-  stand-in. `LiveModelUITests` prints which provider it used — read that line before trusting a green
-  run. Stop the server and the same tests run against whatever provider the owner configured; the
-  failure-mode tests skip, because only the stand-in can fail on command.
-- **A stand-in run refuses to start while a key is saved in the app**: the app reads the key from the
-  Keychain for every request, so the owner's key would be sent to the local server. Delete the key in
-  settings first, or run against the real provider.
-- Never ask the owner for a key and never type one into a command. The owner enters it in the app;
-  in real-provider mode the test only presses «Проверить подключение» and reads the answer.
-- `design/qa/seed-digest.sh` is idempotent: it deletes notes whose front matter points at its own
-  fixture audio, so the «process it» test can run again. Re-seed before each run.
-- The provider address and model name reach the app as launch arguments (`-llmBaseURL`,
-  `-llmCustomModel`), which land in the argument domain of `UserDefaults`. Nothing is left behind in
-  the app's own settings. The fake key is removed in a teardown block.
-- Four UI-test traps, all of which read as app bugs: a sheet leaves same-named buttons of the screen
-  underneath in the tree (`firstMatch` picks the invisible one — filter by `isHittable`); the
-  folder browser shows «Готово» only at the workspace root, so leaving a nested folder takes
-  «Назад» first; a `LazyVStack` keeps off-screen rows out of the element tree entirely, so scroll back
-  to the top before looking for a row near it; and a note's file name is not its title — characters
-  forbidden in a path («Тема: смысл» → «Тема смысл») are stripped, so a list row and a heading differ.
-- What a simulator still cannot prove: transcription itself, and therefore the automatic digest right
-  after it. The rule behind that branch is `DigestService.shouldProcess`, unit-tested separately —
-  keep it that way instead of burying the condition in the view again.
-- Assertions must not depend on the model's wording. Read the title from `digestTitle` and the theme
-  from the «Тема · …» line and use those; an arrived answer is proven by the «Скопировать» action
-  appearing under it, not by matching text — «заметк» also matches the app's own «ищу по заметкам».
-- Facts to remember must be unique per run. A fact already in `Память Lori.md` is in the system
-  message, so the model answers from it and correctly does **not** call `remember` — which reads like
-  a broken tool loop but is not.
+**Путь контейнера обязательно перечитывать `simctl get_app_container`**: после переустановки
+приложения каталог контейнера получает новый UUID (данные при этом переносятся), и сохранённый
+путь перестаёт существовать.
 
-Manual acceptance on iPhone is required after functional changes:
+Настоящую модель GigaAM проверяет `GigaAMOnnxIntegrationTests` — заглушкой имена входов, типы длин и
+порядок осей не проверить. Модель кладётся в контейнер приложения
+(`design/gigaam/seed-models.sh <udid> <папка>`), без неё тест пропускается. Прогон 27 августа 2026
+на симуляторе iPhone 17 Pro: оба варианта дали «Проверка плеера записи. Раз, два, три, четыре, пять.»
 
-1. `+` shows the add menu, not chat.
-2. Folder opens the drawer; create a folder and open it.
-3. Import a harmless text file and verify it is visible in the chosen local folder.
-4. In settings, save the DeepSeek key and use **Проверить подключение**. Inspect only the success/error message, never the key.
-5. Ask: `Перечисли файлы в рабочей папке` and verify the answer uses actual files.
-6. Record a short sample and verify the `.m4a` and transcript appear locally.
+UI tests need seeding, because the simulator neither records nor recognizes:
+
+```bash
+xcrun simctl install <udid> <built .app>
+xcrun simctl privacy <udid> grant microphone ru.ilyaqa.lori.local
+./design/qa/seed-audio.sh <udid>
+```
+
+`Form` rows below the fold do not exist in the accessibility tree — a UI test must scroll to a field
+before asking `exists`, and it cannot scroll back up to a field it passed. A sheet dismissing with an
+animation leaves buttons under it existing but not hittable: wait for `isHittable` before tapping.
+
+Two agent sessions must not run `xcodebuild … test` on the same simulator: each run relaunches
+`ru.ilyaqa.lori.local`, the other run's app dies mid-test and XCTest reports `Test crashed with signal
+kill`. Check `ps aux | grep xcodebuild` first and use separate `-derivedDataPath`.
+
+For physical QA, build the `LoriQA` scheme with configuration `QA`, keeping the
+owner's signing team only in local command arguments. Install with
+`python3 design/qa/install-qa.py <QA-app-path> <device-uuid>`. The helper rejects
+an artifact with the personal bundle ID. Never uninstall the personal app to
+work around installation/signing errors. Keep physical tests within the separate
+QA app; use normal import for synthetic audio. Simulator results do not verify
+physical background execution or GPU lifecycle.
 
 ## Working style
 
 - Inspect before editing and preserve unrelated user changes.
-- Use `apply_patch` for source/doc edits.
-- Keep the Mac lightweight: do not download or compile large ASR/LLM models for this app during routine work.
+- Comments explain **why**, in Russian, next to the decision they justify.
+- Keep the Mac lightweight: do not download or compile large ASR models during routine work.
 - Report only proven runtime/device results. A successful build does not prove the installed app works.

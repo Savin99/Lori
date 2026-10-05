@@ -152,3 +152,22 @@ enum MotionText {
         return lines.dropLast() + ["\(last)…"]
     }
 }
+
+/// Заглушка на месте текста, который ещё считается. Не крутится и не мигает:
+/// её задача — показать, что список не кончился, а не привлечь внимание.
+struct Skeleton: View {
+    var lines: Int = 3
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            ForEach(0..<lines, id: \.self) { index in
+                RoundedRectangle(cornerRadius: 5)
+                    .fill(LoriPalette.bubble)
+                    .frame(height: 12)
+                    .frame(maxWidth: index == lines - 1 ? 180 : .infinity, alignment: .leading)
+            }
+        }
+        .padding(.leading, 58)
+        .accessibilityElement(children: .ignore)
+    }
+}

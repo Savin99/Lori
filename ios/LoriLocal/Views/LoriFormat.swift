@@ -60,6 +60,23 @@ enum LoriFormat {
     }
 
     /// Длительность записи: «0:07», «12:03».
+    /// Грубая оценка времени: «40 сек», «2 мин». Секундная точность в ожидании
+    /// только раздражает — числа всё равно скачут.
+    static func approximate(_ seconds: TimeInterval) -> String {
+        let value = max(1, seconds.rounded())
+        if value < 60 {
+            // Ниже пяти секунд округление давало «0 сек» — оценка, которая
+            // выглядит как ошибка. Пять секунд — честная нижняя граница.
+            return "\(max(5, Int((value / 5).rounded() * 5))) сек"
+        }
+        let minutes = Int((value / 60).rounded())
+        switch minutes % 10 {
+        case 1 where minutes != 11: return "\(minutes) минута"
+        case 2...4 where !(12...14).contains(minutes): return "\(minutes) минуты"
+        default: return "\(minutes) минут"
+        }
+    }
+
     static func duration(_ seconds: TimeInterval) -> String {
         let total = Int(max(0, seconds.rounded(.down)))
         return String(format: "%d:%02d", total / 60, total % 60)

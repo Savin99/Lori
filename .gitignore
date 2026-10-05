@@ -1,6 +1,7 @@
 # Секреты и локальные настройки
 .env
 .env.local
+ios/Secrets/*.local.json
 *.pem
 
 # Рабочие артефакты

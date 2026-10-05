@@ -49,10 +49,22 @@ struct CTCGreedyDecoder {
 
     /// Идентификаторы токенов без склейки в текст: нужны для отладки и для таймингов.
     func tokens(logits: [Float], frames: Int, classes: Int, encodedLength: Int? = nil) -> [Int] {
+        tokensWithFrames(logits: logits, frames: frames, classes: classes, encodedLength: encodedLength).tokens
+    }
+
+    /// Токены вместе с кадрами, на которых они выпущены: из кадров считаются
+    /// тайминги слов, и без них расшифровка CTC осталась бы без таймкодов.
+    func tokensWithFrames(
+        logits: [Float],
+        frames: Int,
+        classes: Int,
+        encodedLength: Int? = nil
+    ) -> (tokens: [Int], frames: [Int]) {
         let limit = min(max(encodedLength ?? frames, 0), frames)
-        guard limit > 0, classes > 0 else { return [] }
+        guard limit > 0, classes > 0 else { return ([], []) }
 
         var result: [Int] = []
+        var emitted: [Int] = []
         var previous = -1
         for frame in 0..<limit {
             let offset = frame * classes
@@ -67,10 +79,11 @@ struct CTCGreedyDecoder {
             }
             if best != blankIndex, best != previous {
                 result.append(best)
+                emitted.append(frame)
             }
             previous = best
         }
-        return result
+        return (result, emitted)
     }
 
     func detokenize(_ tokens: [Int]) -> String {

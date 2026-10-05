@@ -92,7 +92,13 @@ struct AudioChunker {
     }
 
     private func windowEnergies(_ samples: [Float]) -> [Float] {
-        let window = max(1, Int(configuration.windowSeconds * sampleRate))
+        Self.energies(of: samples, window: max(1, Int(configuration.windowSeconds * sampleRate)))
+    }
+
+    /// Средний квадрат по окнам подряд. Считается один раз и переиспользуется:
+    /// и нарезкой по энкодеру, и поиском паузы для нарезки файла на части.
+    static func energies(of samples: [Float], window: Int) -> [Float] {
+        let window = max(1, window)
         let count = samples.count / window
         guard count > 0 else { return [] }
         var energies = [Float](repeating: 0, count: count)
@@ -106,6 +112,62 @@ struct AudioChunker {
             energies[index] = sum / Float(window)
         }
         return energies
+    }
+
+    /// Порог тишины по энергии: −60 dBFS. Это тот же порог, которым
+    /// `WhisperKitTranscriber` отличает тишину от речи, только выраженный
+    /// энергией: там сравнивается амплитуда 0,001, здесь её квадрат.
+    static let silenceFloor: Float = 1e-6
+
+    /// Пауза внутри куска отсчётов — секунды от его начала.
+    ///
+    /// Нужна нарезке записи на части для облачных движков: разрез по таймеру
+    /// приходится на середину слова, разрез по паузе — между фразами.
+    ///
+    /// **Окно тут длиннее, чем при нарезке по энкодеру, и это не произвол.**
+    /// Провал энергии в двадцать миллисекунд бывает и посреди слова — между
+    /// смычкой и взрывом согласного; паузе между фразами нужны сотни
+    /// миллисекунд. По короткому окну разрез сел бы внутрь слова, формально
+    /// попав в самое тихое место.
+    ///
+    /// **Ищется не абсолютный минимум, а ближайшая достаточная пауза.** Минимум
+    /// сам по себе выбирает случайное место: на записи с длинной тишиной
+    /// подходящих точек сотни, и та, что тише на волос, может лежать на двадцать
+    /// секунд дальше нужной. А на ровной тишине минимум и вовсе всегда первый —
+    /// разрез уехал бы в самое начало куска. Поэтому среди достаточно тихих
+    /// окон берётся ближайшее к `preferred` (по умолчанию — к середине куска,
+    /// куда и метил таймер).
+    static func quietestOffset(
+        in samples: [Float],
+        sampleRate: Double = AudioSamples.sampleRate,
+        windowSeconds: Double = 0.3,
+        preferring preferred: TimeInterval? = nil
+    ) -> TimeInterval? {
+        let window = max(1, Int(windowSeconds * sampleRate))
+        let energies = energies(of: samples, window: window)
+        guard let quietest = energies.min() else { return nil }
+        let center = preferred ?? Double(samples.count) / sampleRate / 2
+        // «Достаточно тихо» — вдвое громче самого тихого окна либо тише порога
+        // тишины: у настоящей паузы энергия скачет, и требовать точного минимума
+        // значит цепляться за шум.
+        let ceiling = max(quietest * 2, silenceFloor)
+
+        var best: Int?
+        var bestDistance = Double.greatestFiniteMagnitude
+        for index in energies.indices where energies[index] <= ceiling {
+            let offset = Self.offset(ofWindow: index, window: window, sampleRate: sampleRate)
+            let distance = abs(offset - center)
+            guard distance < bestDistance else { continue }
+            bestDistance = distance
+            best = index
+        }
+        guard let best else { return nil }
+        return Self.offset(ofWindow: best, window: window, sampleRate: sampleRate)
+    }
+
+    /// Середина окна: у его краёв речь уже может начаться.
+    private static func offset(ofWindow index: Int, window: Int, sampleRate: Double) -> TimeInterval {
+        (Double(index) + 0.5) * Double(window) / sampleRate
     }
 
     /// Пишет кусок во временный WAV: распознавателю нужен файл, а не буфер.

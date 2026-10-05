@@ -1,6 +1,6 @@
 # Whisper large-v3 turbo на iPhone
 
-Второй движок расшифровки рядом с GigaAM. Состояние на 31 августа 2026.
+Пятый движок расшифровки рядом с GigaAM, Apple, OpenAI и Gemini. Состояние на 31 августа 2026.
 
 ## Чем крутится
 
@@ -20,11 +20,25 @@
 лишь бы в нём было слово `whisper`; внутри должны лежать `MelSpectrogram.mlmodelc`,
 `AudioEncoder.mlmodelc`, `TextDecoder.mlmodelc`.
 
-Собрать папку на Mac:
+Собрать папку на Mac и положить её в симулятор:
 
 ```bash
-python3 design/whisper/fetch_model.py --out ~/Downloads/whisper-large-v3-turbo
+python3 design/whisper/fetch_model.py     # в ~/Library/Caches/lori-models/whisper-large-v3-turbo
+./design/whisper/seed-model.sh <udid>     # оттуда же — в контейнер симулятора
 ```
+
+Модель качается **один раз**: кэш лежит рядом с моделями GigaAM, и повторный запуск
+`fetch_model.py` сверяет размеры файлов с HuggingFace и не качает ничего. Это же и проверка
+целостности — недокачанный файл размером не сойдётся и приедет заново.
+
+Папка — 618 МБ, 24 файла: веса (`AudioEncoder.mlmodelc` 410 МБ, `TextDecoder.mlmodelc` 194 МБ,
+`TextDecoderContextPrefill.mlmodelc` 12 МБ, `MelSpectrogram.mlmodelc` 392 КБ), оба файла
+токенизатора, `config.json` и `generation_config.json`. Все размеры сверены с HuggingFace
+31 августа 2026.
+
+**Путь контейнера перечитывать каждый раз** (`xcrun simctl get_app_container <udid>
+ru.ilyaqa.lori.local data`): после переустановки приложения каталог получает новый UUID —
+данные переносятся, а сохранённый путь перестаёт существовать.
 
 Варианты turbo в репозитории `argmaxinc/whisperkit-coreml`:
 

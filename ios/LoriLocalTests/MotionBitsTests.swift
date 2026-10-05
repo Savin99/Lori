@@ -10,11 +10,14 @@ final class MotionBitsTests: XCTestCase {
         XCTAssertNil(TranscriptionService.fraction(done: 0, total: 0))
     }
 
-    func testFractionCountsTheChunkInWork() {
-        // «3 из 10» — это третий кусок в работе, то есть 0.3.
-        XCTAssertEqual(TranscriptionService.fraction(done: 2, total: 10), 0.3)
-        XCTAssertEqual(TranscriptionService.fraction(done: 0, total: 10), 0.1)
-        XCTAssertEqual(TranscriptionService.fraction(done: 9, total: 10), 1.0)
+    func testFractionCountsFinishedChunksNotTheOneInWork() {
+        // «3 из 10» — это два готовых куска и третий в работе, то есть 0.2.
+        XCTAssertEqual(TranscriptionService.fraction(done: 2, total: 10), 0.2)
+        XCTAssertEqual(TranscriptionService.fraction(done: 0, total: 10), 0)
+        // Последний кусок ещё считается: сотня здесь означала бы «готово», а это ложь,
+        // и на длинном куске она выглядит как зависшее приложение.
+        XCTAssertEqual(TranscriptionService.fraction(done: 9, total: 10), 0.9)
+        XCTAssertEqual(TranscriptionService.fraction(done: 10, total: 10), 1.0)
         // Перебор в колбэке движка не должен давать больше единицы.
         XCTAssertEqual(TranscriptionService.fraction(done: 40, total: 10), 1.0)
     }

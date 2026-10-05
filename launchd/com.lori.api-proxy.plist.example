@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Прокси к API моделей: телефон обращается к нему, он — к сервису.
+  Нужен там, где сервис отказывает по региону телефона, а с этого компьютера работает.
+  Пути машинно-специфичные — поправь под себя и убери `.example` из имени.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lori.api-proxy</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/ilyaqa/Projects/Lori/ui/api-proxy.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ilyaqa/Projects/Lori</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LORI_PROXY_TARGET</key>
+    <string>generativelanguage.googleapis.com</string>
+    <key>LORI_PROXY_PORT</key>
+    <string>8788</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ilyaqa/Projects/Lori/logs/api-proxy.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ilyaqa/Projects/Lori/logs/api-proxy.err.log</string>
+</dict>
+</plist>

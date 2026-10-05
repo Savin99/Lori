@@ -1,19 +1,38 @@
 import Foundation
 import Security
 
-enum KeychainStore {
-    private static let service = "ru.ilyaqa.lori.local"
-    private static let account = "deepseek-api-key"
+/// Ключи API, которые Lori хранит на телефоне. Каждый движок — свой аккаунт
+/// в Keychain: ключ OpenAI и ключ Gemini не должны затирать друг друга.
+enum KeychainAccount: String, CaseIterable, Sendable {
+    case openAI = "openai-api-key"
+    case gemini = "gemini-api-key"
+    case elevenLabs = "elevenlabs-api-key"
+    /// Ассистент по расшифровкам — отдельный аккаунт, а не переиспользованный
+    /// ключ расшифровки: сервис вопросов и сервис распознавания выбираются
+    /// независимо (DeepSeek на вопросы, OpenAI на расшифровку — обычный случай).
+    case assistant = "assistant-api-key"
 
-    static func saveDeepSeekKey(_ key: String) throws {
-        guard !key.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            throw KeychainStoreError.emptyKey
+    var title: String {
+        switch self {
+        case .openAI: "OpenAI"
+        case .gemini: "Gemini"
+        case .elevenLabs: "ElevenLabs"
+        case .assistant: "Ассистент"
         }
-        let data = Data(key.utf8)
+    }
+}
+
+enum KeychainStore {
+    private static let service = Bundle.main.bundleIdentifier ?? "ru.ilyaqa.lori.local"
+
+    static func save(_ key: String, for account: KeychainAccount) throws {
+        let trimmed = key.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { throw KeychainStoreError.emptyKey(account) }
+        let data = Data(trimmed.utf8)
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: account,
+            kSecAttrAccount: account.rawValue,
         ]
         let update: [CFString: Any] = [kSecValueData: data]
         let status = SecItemUpdate(query as CFDictionary, update as CFDictionary)
@@ -28,11 +47,22 @@ enum KeychainStore {
         }
     }
 
-    static func deepSeekKey() throws -> String? {
+    static func key(for account: KeychainAccount) throws -> String? {
+        try resolve(saved: { try savedKey(for: account) }, bundled: { BundledAPIKeys.key(for: account) })
+    }
+
+    // Ошибку доступа к Keychain не скрываем подстановкой другого ключа:
+    // например, заблокированный телефон не должен менять аккаунт оплаты.
+    static func resolve(saved: () throws -> String?, bundled: () -> String?) rethrows -> String? {
+        if let key = try saved(), !key.isEmpty { return key }
+        return bundled()
+    }
+
+    private static func savedKey(for account: KeychainAccount) throws -> String? {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: account,
+            kSecAttrAccount: account.rawValue,
             kSecReturnData: true,
             kSecMatchLimit: kSecMatchLimitOne,
         ]
@@ -45,11 +75,30 @@ enum KeychainStore {
         return key
     }
 
-    static func deleteDeepSeekKey() throws {
+    /// Только факт наличия ключа: интерфейсу нужно показать статус,
+    /// а сам ключ ему видеть незачем.
+    static func hasKey(for account: KeychainAccount) -> Bool {
+        ((try? key(for: account)) ?? nil)?.isEmpty == false
+    }
+
+    static func hasBundledKey(for account: KeychainAccount) -> Bool {
+        BundledAPIKeys.key(for: account) != nil
+    }
+
+    static func usesBundledKey(for account: KeychainAccount) -> Bool {
+        guard (try? savedKey(for: account)) == nil else { return false }
+        return hasBundledKey(for: account)
+    }
+
+    static func statusDescription(for account: KeychainAccount) -> String {
+        usesBundledKey(for: account) ? "Встроен в личную сборку" : "Ключ сохранён на этом iPhone"
+    }
+
+    static func delete(_ account: KeychainAccount) throws {
         let query: [CFString: Any] = [
             kSecClass: kSecClassGenericPassword,
             kSecAttrService: service,
-            kSecAttrAccount: account,
+            kSecAttrAccount: account.rawValue,
         ]
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else { throw KeychainError(status: status) }
@@ -57,11 +106,11 @@ enum KeychainStore {
 }
 
 enum KeychainStoreError: LocalizedError {
-    case emptyKey
+    case emptyKey(KeychainAccount)
 
     var errorDescription: String? {
         switch self {
-        case .emptyKey: "Вставь непустой API-ключ DeepSeek."
+        case let .emptyKey(account): "Вставь непустой ключ \(account.title)."
         }
     }
 }

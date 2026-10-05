@@ -21,6 +21,9 @@ WEIGHTS_REPO = "argmaxinc/whisperkit-coreml"
 TOKENIZER_REPO = "openai/whisper-large-v3"
 TOKENIZER_FILES = ("tokenizer.json", "tokenizer_config.json")
 DEFAULT_VARIANT = "openai_whisper-large-v3-v20240930_turbo_632MB"
+# Тот же кэш, что у моделей GigaAM: 618 МБ качаются один раз, дальше их только
+# засевают в симулятор. Каталог не чистится системой между прогонами тестов.
+DEFAULT_OUT = Path.home() / "Library/Caches/lori-models/whisper-large-v3-turbo"
 
 
 def tree(repo: str, path: str) -> list[dict[str, object]]:
@@ -30,8 +33,15 @@ def tree(repo: str, path: str) -> list[dict[str, object]]:
         return json.load(response)
 
 
-def download(repo: str, remote: str, target: Path) -> int:
-    """Кладёт один файл и возвращает его размер."""
+def download(repo: str, remote: str, target: Path, expected: int = 0) -> int:
+    """Кладёт один файл и возвращает его размер.
+
+    Уже скачанный файл нужного размера не перекачивается: 618 МБ по второму разу —
+    это не бережливость, а единственный способ пользоваться кэшем. Заодно это и
+    проверка целостности: недокачанный файл размером не сойдётся и приедет заново.
+    """
+    if expected and target.exists() and target.stat().st_size == expected:
+        return expected
     target.parent.mkdir(parents=True, exist_ok=True)
     url = f"https://huggingface.co/{repo}/resolve/main/{remote}"
     with urllib.request.urlopen(url) as response, target.open("wb") as file:
@@ -45,7 +55,7 @@ def download(repo: str, remote: str, target: Path) -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--variant", default=DEFAULT_VARIANT, help="папка модели в репозитории WhisperKit")
-    parser.add_argument("--out", type=Path, default=Path("whisper-large-v3-turbo"), help="куда сложить")
+    parser.add_argument("--out", type=Path, default=DEFAULT_OUT, help="куда сложить")
     arguments = parser.parse_args()
 
     out: Path = arguments.out
@@ -55,17 +65,33 @@ def main() -> int:
         return 1
 
     total = 0
+    kept = 0
     for index, item in enumerate(entries, start=1):
         remote = str(item["path"])
         relative = remote[len(arguments.variant) + 1 :]
-        print(f"[{index}/{len(entries)}] {relative}")
-        total += download(WEIGHTS_REPO, remote, out / relative)
+        expected = int(item.get("size", 0))
+        target = out / relative
+        if expected and target.exists() and target.stat().st_size == expected:
+            kept += 1
+        else:
+            print(f"[{index}/{len(entries)}] {relative}")
+        total += download(WEIGHTS_REPO, remote, target, expected)
 
     for name in TOKENIZER_FILES:
-        print(f"[токенизатор] {name}")
-        total += download(TOKENIZER_REPO, name, out / name)
+        expected = next(
+            (int(item["size"]) for item in tree(TOKENIZER_REPO, "") if item.get("path") == name),
+            0,
+        )
+        target = out / name
+        if expected and target.exists() and target.stat().st_size == expected:
+            kept += 1
+        else:
+            print(f"[токенизатор] {name}")
+        total += download(TOKENIZER_REPO, name, target, expected)
 
-    print(f"\nГотово: {out} — {total / 1024 / 1024:.0f} МБ.")
+    if kept:
+        print(f"\nУже лежало и совпало по размеру: {kept} файлов.")
+    print(f"Готово: {out} — {total / 1024 / 1024:.0f} МБ.")
     print("Перенеси папку на iPhone: «Файлы» → «На моём iPhone» → Lori → Models.")
     return 0
 

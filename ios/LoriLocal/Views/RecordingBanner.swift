@@ -11,7 +11,7 @@ struct RecordingBanner: View {
         Button(action: close) {
             HStack(spacing: 9) {
                 Circle()
-                    .fill(recorder.isPaused ? LoriPalette.muted : Color.red)
+                    .fill(recorder.isPaused ? LoriPalette.muted : LoriPalette.danger)
                     .frame(width: 8, height: 8)
                     .opacity(recorder.isPaused ? 0.5 : 0.55 + 0.45 * min(1, max(0, recorder.level)))
 
@@ -29,7 +29,7 @@ struct RecordingBanner: View {
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.muted)
                 Image(systemName: "chevron.right")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(LoriFont.tiny.weight(.semibold))
                     .foregroundStyle(LoriPalette.muted)
             }
             .padding(.horizontal, 16)

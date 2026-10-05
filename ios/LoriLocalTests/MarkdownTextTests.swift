@@ -1,7 +1,7 @@
 import XCTest
 @testable import LoriLocal
 
-/// Разбор ответа модели. Настоящий DeepSeek отвечает Markdown’ом всегда, и без разбора
+/// Разбор Markdown. Расшифровка хранится в Markdown (заголовок, таймкоды жирным), и без разбора
 /// человек читал «**Где это записано:**» вместе с решётками и обратными кавычками.
 final class MarkdownTextTests: XCTestCase {
     func testHeadingsBulletsAndNumbers() {

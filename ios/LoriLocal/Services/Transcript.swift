@@ -2,7 +2,7 @@ import Foundation
 
 /// Слово со временем. Границы считаются как в `gigaam/timestamps_utils.py`:
 /// начало — кадр первого токена слова, конец — кадр последнего плюс один.
-struct TranscriptWord: Equatable {
+struct TranscriptWord: Equatable, Codable, Sendable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
@@ -13,6 +13,16 @@ struct TranscriptSegment: Equatable {
     let start: TimeInterval
     let end: TimeInterval
     let text: String
+    /// Время — не настоящий таймкод реплики, а границы куска аудио. Бывает, когда
+    /// движок вернул только текст: выдавать такие границы за таймкоды речи нельзя.
+    let isApproximate: Bool
+
+    init(start: TimeInterval, end: TimeInterval, text: String, isApproximate: Bool = false) {
+        self.start = start
+        self.end = end
+        self.text = text
+        self.isApproximate = isApproximate
+    }
 
     /// «12:03» или «1:05:20» для записей длиннее часа.
     static func stamp(_ seconds: TimeInterval) -> String {
@@ -31,27 +41,54 @@ struct Transcript: Equatable {
     let text: String
     let segments: [TranscriptSegment]
     let words: [TranscriptWord]
+    /// Замечания к расшифровке: например, участки записи, для которых модель
+    /// ничего не вернула. Молчать о таком нельзя — человек решит, что там тишина.
+    let warnings: [String]
 
-    init(text: String, segments: [TranscriptSegment] = [], words: [TranscriptWord] = []) {
+    init(
+        text: String,
+        segments: [TranscriptSegment] = [],
+        words: [TranscriptWord] = [],
+        warnings: [String] = []
+    ) {
         self.text = text
         self.segments = segments
         self.words = words
+        self.warnings = warnings
     }
 
     var isEmpty: Bool { text.isEmpty }
 
     /// Markdown для файла расшифровки. Без реплик — просто текст,
     /// чтобы результат движка без времени не выглядел ущербным.
-    func markdown(title: String) -> String {
-        guard !segments.isEmpty else { return "# \(title)\n\n\(text)\n" }
+    ///
+    /// Движок подписывается в файле: у GigaAM, Apple, OpenAI и Gemini текст
+    /// получается разного качества, и через месяц уже не вспомнить, чей он.
+    ///
+    /// `stamps: false` — выключенные «Таймкоды реплик»: реплики остаются
+    /// абзацами (метки говорящих — часть текста), но время в файл не пишется.
+    /// Перемотка тапом по реплике тогда не работает — ей не по чему искать.
+    func markdown(title: String, engine: String? = nil, mode: String? = nil, stamps: Bool = true) -> String {
+        var head = "# \(title)\n"
+        if let engine, !engine.isEmpty { head += "\n_Расшифровано: \(engine)_\n" }
+        if let mode, !mode.isEmpty { head += "\n_Режим: \(mode)_\n" }
+        var tail = ""
+        if !warnings.isEmpty {
+            tail = "\n" + warnings.map { "> \($0)" }.joined(separator: "\n") + "\n"
+        }
+        guard !segments.isEmpty else { return "\(head)\n\(text)\n\(tail)" }
         let body = segments
             .map { segment in
+                guard stamps else { return segment.text }
                 let from = TranscriptSegment.stamp(segment.start)
                 let to = TranscriptSegment.stamp(segment.end)
-                return "**[\(from)–\(to)]** \(segment.text)"
+                // «кусок» в подписи — честная пометка: это границы отправленного
+                // фрагмента, а не время самой реплики.
+                let mark = segment.isApproximate ? "кусок " : ""
+                return "**[\(mark)\(from)–\(to)]** \(segment.text)"
             }
             .joined(separator: "\n\n")
-        return "# \(title)\n\n\(body)\n"
+        return "\(head)\n\(body)\n\(tail)"
     }
 }
 

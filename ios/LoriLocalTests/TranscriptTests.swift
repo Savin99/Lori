@@ -35,6 +35,23 @@ final class TranscriptTests: XCTestCase {
         )
     }
 
+    /// Выключенные «Таймкоды реплик»: время из файла уходит, а метки говорящих
+    /// и предупреждения о пропусках остаются — они не про время.
+    func testMarkdownWithoutStampsKeepsSpeakersAndWarnings() {
+        let transcript = Transcript(
+            text: "Г1: привет. Г2: привет.",
+            segments: [
+                TranscriptSegment(start: 0, end: 1, text: "Г1: привет."),
+                TranscriptSegment(start: 2, end: 3, text: "Г2: привет."),
+            ],
+            warnings: ["Похоже на пропуск 0:05–1:10."]
+        )
+        let markdown = transcript.markdown(title: "Звонок", stamps: false)
+        XCTAssertFalse(markdown.contains("**["), "времени в файле нет")
+        XCTAssertTrue(markdown.contains("Г1: привет."))
+        XCTAssertTrue(markdown.contains("> Похоже на пропуск"), "предупреждение не потерялось")
+    }
+
     // MARK: слова
 
     /// Кусок с маркером «▁» открывает новое слово, сам маркер в текст не попадает.

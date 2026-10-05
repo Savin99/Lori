@@ -76,52 +76,82 @@ final class WorkspaceStoreTests: XCTestCase {
         XCTAssertEqual(try workspace.readText(at: "заметка.md"), "текст")
     }
 
+    /// Главный экран показывает записи откуда угодно из рабочей папки,
+    /// но не сами расшифровки и не корзину.
     @MainActor
-    func testNoteFilenameComesFromFirstLine() throws {
+    func testAudioListIsRecursiveAndSkipsTranscripts() throws {
         let workspace = WorkspaceStore(rootURL: temporaryRoot)
         workspace.start()
+        let recordings = temporaryRoot.appending(path: "Recordings", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true)
+        try Data("звук".utf8).write(to: recordings.appending(path: "Встреча.m4a"))
+        try Data("звук".utf8).write(to: temporaryRoot.appending(path: "Принесённое.mp3"))
+        try workspace.writeText("# Встреча", at: "Transcripts/Встреча.md")
+        try workspace.writeText("не аудио", at: "Recordings/заметка.md")
 
-        let path = try workspace.createNote(content: "# Идеи по Lori\n\nПервая мысль")
+        try workspace.refresh()
 
-        XCTAssertEqual(path, "Идеи по Lori.md")
-        XCTAssertEqual(try workspace.readText(at: path), "# Идеи по Lori\n\nПервая мысль")
+        XCTAssertEqual(
+            Set(workspace.audio.map(\.relativePath)),
+            ["Recordings/Встреча.m4a", "Принесённое.mp3"]
+        )
     }
 
+    /// Расшифровка на запись одна: иначе после трёх попыток разными движками
+    /// в папке лежат «Встреча.md», «Встреча 2.md», «Встреча 3.md».
     @MainActor
-    func testNoteFilenameFallsBackToDateAndStaysUnique() throws {
+    func testSaveTranscriptReplacesPreviousRun() throws {
         let workspace = WorkspaceStore(rootURL: temporaryRoot)
         workspace.start()
+        let audio = temporaryRoot.appending(path: "Встреча.m4a")
+        try Data("звук".utf8).write(to: audio)
 
-        let first = try workspace.createNote(content: "   ")
-        let second = try workspace.createNote(content: "")
+        let first = try workspace.saveTranscript(Transcript(text: "Первый прогон"), for: audio, engine: "Стаб")
+        let second = try workspace.saveTranscript(Transcript(text: "Второй прогон"), for: audio, engine: "Другой стаб")
 
-        XCTAssertTrue(first.hasPrefix("Заметка "), first)
-        XCTAssertNotEqual(first, second)
-        XCTAssertEqual(try workspace.entries(at: "").count, 2)
+        XCTAssertEqual(first, "Transcripts/Встреча.md")
+        XCTAssertEqual(second, first)
+        let saved = try workspace.readText(at: second)
+        XCTAssertTrue(saved.contains("Второй прогон"))
+        XCTAssertFalse(saved.contains("Первый прогон"))
+        XCTAssertTrue(saved.contains("_Расшифровано: Другой стаб_"), "чей это текст, должно быть видно в файле")
+        XCTAssertEqual(try workspace.entries(at: "Transcripts").count, 1)
     }
 
+    /// Переименование записи должно двигать и расшифровку: она ищется по имени
+    /// аудиофайла, и раньше текст оставался сиротой — на экране он пропадал,
+    /// и запись приходилось прогонять заново.
     @MainActor
-    func testNoteFilenameNeverBecomesHiddenFile() throws {
+    func testRenamingRecordingMovesItsTranscript() throws {
         let workspace = WorkspaceStore(rootURL: temporaryRoot)
         workspace.start()
+        let audio = temporaryRoot.appending(path: "Встреча.m4a")
+        try Data("звук".utf8).write(to: audio)
+        _ = try workspace.saveTranscript(Transcript(text: "Текст расшифровки."), for: audio, engine: "Стаб")
+        try workspace.refresh()
 
-        let path = try workspace.createNote(content: ".gitignore и прочее")
+        let renamed = try workspace.renameRecording(at: "Встреча.m4a", toName: "Планёрка.m4a")
 
-        XCTAssertFalse(path.hasPrefix("."), path)
-        XCTAssertEqual(try workspace.entries(at: "").map(\.relativePath), [path])
+        let moved = try workspace.entry(at: renamed)
+        let transcript = try XCTUnwrap(
+            workspace.existingTranscript(for: moved),
+            "текст должен переехать вместе с записью"
+        )
+        XCTAssertEqual(transcript, "Transcripts/Планёрка.md")
+        XCTAssertTrue(try workspace.readText(at: transcript).contains("Текст расшифровки."))
+        XCTAssertNil(try? workspace.readText(at: "Transcripts/Встреча.md"), "старого файла не остаётся")
     }
 
+    /// Запись без расшифровки переименовывается как прежде.
     @MainActor
-    func testCreatesNamedFolderInsideWorkspace() throws {
+    func testRenamingRecordingWithoutTranscript() throws {
         let workspace = WorkspaceStore(rootURL: temporaryRoot)
         workspace.start()
+        try Data("звук".utf8).write(to: temporaryRoot.appending(path: "Встреча.m4a"))
+        try workspace.refresh()
 
-        let path = try workspace.createFolder(named: "Рудн")
+        let renamed = try workspace.renameRecording(at: "Встреча.m4a", toName: "Без текста.m4a")
 
-        XCTAssertEqual(path, "Рудн")
-        XCTAssertEqual(try workspace.entries(at: "").map(\.relativePath), ["Рудн"])
-        XCTAssertThrowsError(try workspace.createFolder(named: "../outside")) { error in
-            XCTAssertEqual(error as? WorkspaceError, .invalidFolderName)
-        }
+        XCTAssertEqual(renamed, "Без текста.m4a")
     }
 }
