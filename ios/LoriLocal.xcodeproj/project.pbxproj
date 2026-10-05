@@ -116,6 +116,7 @@
 		99328785DB8F70D40001F54C /* SummaryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C17A20C28533A774DB7F0DB /* SummaryModel.swift */; };
 		993931E9FA6777C6333B792D /* ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5DD76F9DFAE6983AF45DA8 /* ModelCatalog.swift */; };
 		9A177D53976AC3E7ACCA3B46 /* RecordingBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF65995CCD277D9CAA4BA9E /* RecordingBanner.swift */; };
+		9A939107E8A604C394691A1E /* ImportFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623C2A92236A9A51EA670AD0 /* ImportFormatTests.swift */; };
 		9AA19FC7E946D2C5D5A40B33 /* Topics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE34C14BAC42B6B5DF983508 /* Topics.swift */; };
 		9D2AFA65D6D2CACABAC23224 /* ProviderScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4C26F5649C53D75EFD541F1 /* ProviderScreen.swift */; };
 		9DCB42020D88BDF0B0CFE1B5 /* TranscriptExport.swift in Sources */ = {isa = PBXBuildFile; fileRef = B31D861437D4C54AC3C8AE02 /* TranscriptExport.swift */; };
@@ -245,6 +246,7 @@
 		5EC55C18D7F8F9B538E27DBF /* TranscriptExportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptExportTests.swift; sourceTree = "<group>"; };
 		5F279DD83649575214C13009 /* StubURLProtocol.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StubURLProtocol.swift; sourceTree = "<group>"; };
 		5F868E29C641DCE5C30EC1E3 /* LoriFormat.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LoriFormat.swift; sourceTree = "<group>"; };
+		623C2A92236A9A51EA670AD0 /* ImportFormatTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ImportFormatTests.swift; sourceTree = "<group>"; };
 		66181F5E229CB7C04B067C16 /* LogMelSpectrogram.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LogMelSpectrogram.swift; sourceTree = "<group>"; };
 		66DF60803E8E463A749314D0 /* LoriLocal.app */ = {isa = PBXFileReference; includeInIndex = 0; lastKnownFileType = wrapper.application; path = LoriLocal.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		66EB4BE663C13BD87045FF81 /* WorkspaceStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceStore.swift; sourceTree = "<group>"; };
@@ -469,6 +471,7 @@
 				E41240DBA92DA46E8055B2F0 /* GeminiRequestShapeTests.swift */,
 				55EC47D3DEF80D7425434F1D /* GeminiTranscriberTests.swift */,
 				C00EF7EB620456A83A536D47 /* GigaAMOnnxIntegrationTests.swift */,
+				623C2A92236A9A51EA670AD0 /* ImportFormatTests.swift */,
 				362B6B0D03628661DA6198E4 /* ImportInboxTests.swift */,
 				D5B6C60B395C02961CC12241 /* InterfaceModelTests.swift */,
 				4E407255A91E6B290F673B06 /* LogMelSpectrogramTests.swift */,
@@ -865,6 +868,7 @@
 				1A814F8A215B51C1F4519228 /* GeminiRequestShapeTests.swift in Sources */,
 				96BAE9E0304277E1A7F57EE9 /* GeminiTranscriberTests.swift in Sources */,
 				2BA91825018D7DAD69D21A21 /* GigaAMOnnxIntegrationTests.swift in Sources */,
+				9A939107E8A604C394691A1E /* ImportFormatTests.swift in Sources */,
 				132FFEF8F2A60A9D984EC445 /* ImportInboxTests.swift in Sources */,
 				40E90A1E1022125F4DC96B9A /* InterfaceModelTests.swift in Sources */,
 				93162D348F34CF126E23D5AE /* LogMelSpectrogramTests.swift in Sources */,
