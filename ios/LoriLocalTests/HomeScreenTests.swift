@@ -333,3 +333,23 @@ final class ComposerClipboardTests: XCTestCase {
         XCTAssertEqual(model.clipboardHint, "В буфере есть аудио")
     }
 }
+
+/// Переименование — только у записи, с которой ничего не происходит.
+final class RecordActionPolicyTests: XCTestCase {
+    func testOnlyIdleOrFailedRecordsCanBeRenamed() {
+        XCTAssertTrue(TranscriptionRecordState.idle.allowsRename)
+        XCTAssertTrue(TranscriptionRecordState.failed("сбой").allowsRename, "ошибка прошлой попытки не мешает")
+        XCTAssertFalse(TranscriptionRecordState.queued(position: 1, waitsForMemory: false).allowsRename)
+        XCTAssertFalse(TranscriptionRecordState.starting.allowsRename)
+        XCTAssertFalse(TranscriptionRecordState.running.allowsRename)
+        XCTAssertFalse(
+            TranscriptionRecordState.interrupted.allowsRename,
+            "у прерванной сохранено задание — переименование сняло бы его"
+        )
+    }
+
+    func testBusyRefusalSaysWhatToDo() {
+        XCTAssertEqual(RenameFailure.message(for: RenameRefusal.busy), "Сначала дождись окончания расшифровки или останови её.")
+        XCTAssertEqual(RenameFailure.message(for: WorkspaceError.nameTaken), "Запись с таким названием уже есть. Выбери другое.")
+    }
+}

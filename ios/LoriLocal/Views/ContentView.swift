@@ -385,7 +385,7 @@ struct ContentView: View {
             }
             .tint(LoriPalette.danger)
 
-            if !state.isActive {
+            if state.allowsRename {
                 Button { startRename(entry, title: title) } label: {
                     Label("Переименовать", systemImage: "pencil")
                 }
@@ -424,7 +424,7 @@ struct ContentView: View {
                 Label("Поделиться", systemImage: "square.and.arrow.up")
             }
         }
-        if !state.isActive {
+        if state.allowsRename {
             Button { startRename(entry, title: title) } label: {
                 Label("Переименовать", systemImage: "pencil")
             }
@@ -793,12 +793,18 @@ struct ContentView: View {
         guard let entry = renameTarget else { return }
         renameTarget = nil
         let old = entry.relativePath
-        let wasActive = transcription.state(for: old).isActive
+        // Проверка — в момент «Готово», а не при открытии окна: пока оно было
+        // открыто, запись могла снова уйти в работу (повтор по сети, возвращение
+        // в приложение), и переименование оставило бы её текст под старым именем.
+        guard transcription.state(for: old).allowsRename else {
+            workspace.lastError = RenameRefusal.busy.errorDescription
+            return
+        }
         do {
-            guard let new = try rename(entry, typed: renameDraft, currentTitle: renameOriginal) else { return }
+            guard let new = try rename(entry, typed: renameDraft, currentTitle: renameOriginal), new != old else { return }
             // Ошибка прошлой попытки привязана к старому пути: оставь её — и она
             // висела бы в памяти сервиса за записью, которой больше нет.
-            if new != old, !wasActive { transcription.forget(old) }
+            transcription.forget(old)
         } catch {
             workspace.lastError = RenameFailure.message(for: error)
         }
@@ -818,16 +824,16 @@ struct ContentView: View {
         )
     }
 
-    /// Переименование с экрана записи. Текущий заголовок — тот, что виден на нём
-    /// (`RecordTitle`), с ним экран сравнил набранное. Лист остаётся открытым и
-    /// переезжает за записью: меняется `entry`, а не `id` презентации. Ошибку
-    /// показывает сам экран записи — алерт отсюда под открытым листом не встал бы.
-    private func renameOpened(_ entry: WorkspaceEntry, typed: String) throws {
+    /// Переименование с экрана записи. `shownTitle` — заголовок, который был виден,
+    /// когда открылось окно: с ним экран сравнил набранное, и модель, ответившая
+    /// за это время, не превратит «Сохранить» без правки в устаревшее ручное имя.
+    /// Лист остаётся открытым и переезжает за записью: меняется `entry`, а не `id`
+    /// презентации. Ошибку показывает сам экран — алерт отсюда под листом не встал бы.
+    private func renameOpened(_ entry: WorkspaceEntry, typed: String, shownTitle: String) throws {
         let old = entry.relativePath
-        let wasActive = transcription.state(for: old).isActive
-        let current = RecordTitle.resolve(entry, summaries: summaries, previews: previews).title
-        guard let new = try rename(entry, typed: typed, currentTitle: current), new != old else { return }
-        if !wasActive { transcription.forget(old) }
+        guard transcription.state(for: old).allowsRename else { throw RenameRefusal.busy }
+        guard let new = try rename(entry, typed: typed, currentTitle: shownTitle), new != old else { return }
+        transcription.forget(old)
         if let moved = try? workspace.entry(at: new) { opened?.entry = moved }
     }
 
@@ -944,7 +950,7 @@ struct ContentView: View {
                     topics: topics,
                     previews: previews,
                     isRecording: recorder.isCapturing,
-                    onRename: { typed in try renameOpened(record.entry, typed: typed) },
+                    onRename: { typed, shown in try renameOpened(record.entry, typed: typed, shownTitle: shown) },
                     onDelete: { try deleteOpened(record.entry) }
                 )
             }

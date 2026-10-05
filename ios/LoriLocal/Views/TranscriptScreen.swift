@@ -39,7 +39,8 @@ struct TranscriptScreen: View {
     /// привязанные к пути записи. nil — ни тапа по заголовку, ни пункта в «…».
     /// Ошибку (имя занято) показывает этот экран: алерт списка под открытым листом
     /// не показался бы, а то и закрыл бы лист.
-    var onRename: ((String) throws -> Void)? = nil
+    /// Получает набранное и заголовок, который был виден при открытии окна.
+    var onRename: ((_ typed: String, _ shownTitle: String) throws -> Void)? = nil
     /// Удаление делает список — те же хранилища и корзина, что у свайпа. Спрашивает
     /// этот экран, теми же словами (`DeleteRecordCopy`); после удаления список
     /// закрывает лист. nil — пункта нет.
@@ -60,6 +61,10 @@ struct TranscriptScreen: View {
     @State private var notice: Notice?
     @State private var isRenaming = false
     @State private var titleDraft = ""
+    /// Заголовок, который был виден, когда открылось окно переименования. С ним и
+    /// сравнивается набранное: ответ модели, пришедший, пока окно открыто, не
+    /// должен превратить «Сохранить» без правки в ручное имя из старого заголовка.
+    @State private var titleWhenOpened = ""
     @State private var confirmingDelete = false
     /// Какого говорящего сейчас называют и как. Метка одна на всю запись,
     /// поэтому и переименование сразу по всей записи — иначе пришлось бы
@@ -89,8 +94,10 @@ struct TranscriptScreen: View {
     /// `@State`: когда работа кончилась, снимок уже знает файл, а `reload` ещё не
     /// отработал, и экран не должен на этот кадр сказать «Расшифровки пока нет».
     private var transcriptFile: String? { workspace.existingTranscript(for: entry) }
-    /// Переименовать идущую запись нельзя: файл уехал бы из-под движка.
-    private var canRename: Bool { onRename != nil && !isActive }
+    /// Переименовать нельзя идущую запись (файл уехал бы из-под движка) и прерванную
+    /// (её задание поднимется само, а переименование сняло бы его) —
+    /// `TranscriptionRecordState.allowsRename`.
+    private var canRename: Bool { onRename != nil && transcription.state(for: path).allowsRename }
 
     var body: some View {
         NavigationStack {
@@ -1065,14 +1072,15 @@ struct TranscriptScreen: View {
         // Поле заполняется тем, что человек видит, а не именем файла: иначе
         // «Готово» без правки делало «Recording-2026-…» ручным заголовком навсегда.
         titleDraft = recordTitle.title
+        titleWhenOpened = recordTitle.title
         isRenaming = true
     }
 
     private func commitRename() {
         let typed = titleDraft
-        guard let onRename, !RecordTitle.isNoOpRename(typed: typed, current: recordTitle.title) else { return }
+        guard let onRename, !RecordTitle.isNoOpRename(typed: typed, current: titleWhenOpened) else { return }
         do {
-            try onRename(typed)
+            try onRename(typed, titleWhenOpened)
         } catch {
             notice = Notice(title: "Не получилось переименовать", message: RenameFailure.message(for: error))
         }

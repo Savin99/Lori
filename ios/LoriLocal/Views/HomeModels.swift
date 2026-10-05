@@ -304,10 +304,37 @@ enum DeleteRecordCopy {
     }
 }
 
+/// Переименовать можно только запись, с которой ничего не происходит.
+///
+/// У идущей, ждущей и запускающейся задание держит старый путь: движок не найдёт
+/// звук или сохранит текст под старым именем, рядом с переименованной записью.
+/// У прерванной задание сохранено и поднимется само (возвращение в приложение,
+/// повтор по сети) или ждёт «Продолжить», а переименование через `forget` сняло бы
+/// его вместе со снимком — продолжать стало бы нечего. Ошибка прошлой попытки
+/// не мешает: задания за ней нет.
+extension TranscriptionRecordState {
+    var allowsRename: Bool {
+        switch self {
+        case .idle, .failed: true
+        case .queued, .starting, .running, .interrupted: false
+        }
+    }
+}
+
+/// Запись стала занятой, пока было открыто окно переименования.
+enum RenameRefusal: LocalizedError, Equatable {
+    case busy
+
+    var errorDescription: String? {
+        "Сначала дождись окончания расшифровки или останови её."
+    }
+}
+
 /// Что сказать, когда переименовать не вышло: что случилось и что сделать.
 enum RenameFailure {
     static func message(for error: Error) -> String {
-        switch error as? WorkspaceError {
+        if let refusal = error as? RenameRefusal { return refusal.errorDescription ?? "" }
+        return switch error as? WorkspaceError {
         case .nameTaken:
             "Запись с таким названием уже есть. Выбери другое."
         case .invalidName:
