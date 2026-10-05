@@ -186,6 +186,49 @@ final class TranscriptScreenUITests: XCTestCase {
         save("record-more-menu-full")
     }
 
+    /// У короткой записи заголовок — первая фраза; просьба придумать другой
+    /// отвечает словами и в очередь модели ничего не ставит.
+    func testShortRecordKeepsFirstPhraseAsTitle() throws {
+        let app = launch()
+        try open(sample, in: app)
+
+        app.buttons["transcriptMenu"].tap()
+        tap(app.buttons["Придумать заголовок и описание"])
+        XCTAssertTrue(
+            app.staticTexts["Запись короткая — заголовком служит первая фраза."].waitForExistence(timeout: 5),
+            "короткой записи объясняют, почему заголовка от модели не будет"
+        )
+        tap(app.alerts.firstMatch.buttons["OK"])
+    }
+
+    /// Без модели заголовков её предлагают скачать на месте. Набор снимков живёт в
+    /// своём корне со своей очередью заголовков (`--recovery-probe`), поэтому
+    /// оставленная там просьба не трогает обычную очередь. «Скачать» не нажимается.
+    func testTitleRequestOffersModelDownload() throws {
+        let app = launch(extra: ["--recovery-probe"])
+        try XCTSkipUnless(
+            find("Совещание по бюджету", in: app).exists,
+            "нет набора снимков — прогони design/redesign-2026-10-05/seed-record-states.sh"
+        )
+        try open("Совещание по бюджету", in: app)
+
+        app.buttons["transcriptMenu"].tap()
+        tap(app.buttons["Придумать заголовок и описание"])
+        let offer = app.staticTexts["Заголовок придумывает модель на этом iPhone"]
+        try XCTSkipIf(
+            !offer.waitForExistence(timeout: 5) && app.staticTexts["Модель уже скачивается"].exists,
+            "модель уже скачивается — предлагать нечего"
+        )
+        XCTAssertTrue(offer.exists, "без модели предлагают скачать её на месте")
+        let download = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Скачать ")).firstMatch
+        XCTAssertTrue(download.exists, "кнопка называет модель и размер")
+        XCTAssertTrue(download.label.contains("ГБ"), "размер на кнопке: \(download.label)")
+        save("record-title-model-offer")
+        // Отказ — тап мимо поповера, как у любого вопроса из «…».
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.92)).tap()
+        XCTAssertTrue(offer.waitForNonExistence(timeout: 5))
+    }
+
     // MARK: - Снимки состояний
 
     /// Снимки экрана записи в светлой и тёмной теме — для глаз, а не для проверок.
