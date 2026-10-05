@@ -26,9 +26,38 @@ enum ObsidianExport {
         components.host = "new"
         components.queryItems = [
             URLQueryItem(name: "vault", value: vaultName),
-            URLQueryItem(name: "name", value: title),
+            URLQueryItem(name: "name", value: noteName(from: title)),
             URLQueryItem(name: "content", value: String(text.prefix(contentLimit))),
         ]
         return components.url
+    }
+
+    /// Предел длины имени заметки: имя становится файлом в хранилище.
+    static let nameLimit = 120
+
+    /// Имя заметки из заголовка записи.
+    ///
+    /// `name` у `obsidian://new` — имя файла заметки, и заголовок «Запись 21:46»
+    /// туда не годится: двоеточие запрещено в именах файлов, а ещё ломает ссылки
+    /// `[[…]]`. Справка Obsidian («Internal links»): ссылкой может не работать
+    /// строка с `# | ^ : %% [[ ]]`; «/», «\» и «:» файловые системы не примут.
+    /// Хранилища синхронизируют и на Windows, где запрещены ещё `* " < > | ?`.
+    /// Разделители времени и дат («:», «/», «\») становятся «-» — «Запись
+    /// 21-46» читается, остальное снимается.
+    static func noteName(from title: String) -> String {
+        let replaced = title.map { character -> String in
+            if ":/\\".contains(character) { return "-" }
+            if "*\"<>|?#^[]".contains(character) { return " " }
+            if character.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) { return " " }
+            return String(character)
+        }.joined()
+        var name = replaced
+            .replacingOccurrences(of: "%%", with: "%")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
+        // Точка в начале делает файл скрытым.
+        while let first = name.first, first == "." || first.isWhitespace { name.removeFirst() }
+        name = String(name.prefix(nameLimit)).trimmingCharacters(in: .whitespaces)
+        return name.isEmpty ? "Запись" : name
     }
 }

@@ -470,7 +470,23 @@ final class ObsidianExportTests: XCTestCase {
         let content = try XCTUnwrap(items.first { $0.name == "content" }?.value)
 
         XCTAssertEqual(content.count, ObsidianExport.contentLimit)
-    }    /// Какой движок отработал — свойство конкретной расшифровки, и его показывают на
+    }
+
+    /// **Регрессия.** Имя заметки — имя файла в хранилище: «Запись 21:46» с
+    /// двоеточием файловая система не примет, а `#`, `|`, `^`, `[[ ]]` ломают ссылки.
+    func testNoteNameIsSafeForTheVault() throws {
+        let url = try XCTUnwrap(ObsidianExport.url(title: "Запись 21:46", text: "Текст", vault: "Brain"))
+        let items = try XCTUnwrap(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems)
+        XCTAssertEqual(items.first { $0.name == "name" }?.value, "Запись 21-46")
+
+        XCTAssertEqual(ObsidianExport.noteName(from: "План/факт: #итоги [[черновик]] | 50%% готово?"), "План-факт- итоги черновик 50% готово")
+        XCTAssertEqual(ObsidianExport.noteName(from: ".скрытая заметка"), "скрытая заметка")
+        XCTAssertEqual(ObsidianExport.noteName(from: " ### "), "Запись", "пустое имя — не имя")
+        XCTAssertEqual(ObsidianExport.noteName(from: "Совещание 27.08"), "Совещание 27.08")
+        XCTAssertLessThanOrEqual(ObsidianExport.noteName(from: String(repeating: "слово ", count: 100)).count, ObsidianExport.nameLimit)
+    }
+
+    /// Какой движок отработал — свойство конкретной расшифровки, и его показывают на
     /// экране записи. Полное имя в файле длинное, а хвост у него повторяет иконку.
     func testEngineIsShownShortWithItsLocality() {
         let local = TranscriptDocument.parse("""
