@@ -10,29 +10,29 @@ enum TranscriptTitle {
     static let snippetLimit = 120
 
     /// Текст расшифровки без служебной обвязки: заголовка файла, подписи движка,
-    /// предупреждений о пропусках и таймкодов реплик.
+    /// строки режима, предупреждений о пропусках, таймкодов и меток говорящих.
+    ///
+    /// Разбор один на всё приложение — `TranscriptDocument.parse`, тот же, что у
+    /// экрана записи и экспорта. Здесь раньше жил свой построчный разбор, и он
+    /// отстал от формата: `Transcript.markdown` пишет строку `_Режим: …_` для
+    /// каждого движка с режимом, а этот код знал только `#`, `>` и
+    /// `_Расшифровано:` — карточка называлась «_Режим: Быстрый текст_ Обсудили
+    /// переезд». Метки «S1:» снимает тот же разбор: заголовок «S1: Здравствуйте»
+    /// читается как мусор, а сниппету важны слова, а не кто их сказал.
     static func plain(from markdown: String) -> String {
-        var lines: [String] = []
-        for raw in markdown.split(separator: "\n", omittingEmptySubsequences: false) {
-            var line = raw.trimmingCharacters(in: .whitespaces)
-            guard !line.isEmpty else { continue }
-            if line.hasPrefix("#") { continue }
-            if line.hasPrefix(">") { continue }
-            if line.hasPrefix("_Расшифровано:") { continue }
-            // Таймкод реплики «**[0:00–0:05]**» в названии не нужен.
-            if line.hasPrefix("**["), let close = line.range(of: "]**") {
-                line = String(line[close.upperBound...]).trimmingCharacters(in: .whitespaces)
-            }
-            // Метка говорящего «S1:» (в старых файлах «Г1:») — тоже обвязка:
-            // заголовок «S1: Здравствуйте» читается как мусор, а сниппету важны
-            // слова, а не кто их сказал.
-            if let mark = line.range(of: "^[SГ]\\d+:\\s*", options: .regularExpression) {
-                line = String(line[mark.upperBound...]).trimmingCharacters(in: .whitespaces)
-            }
-            guard !line.isEmpty else { continue }
-            lines.append(line)
-        }
-        return lines.joined(separator: " ")
+        text(of: TranscriptDocument.parse(markdown))
+    }
+
+    /// То же для уже разобранного документа: экран записи держит его в памяти,
+    /// и читать файл второй раз ради заголовка незачем.
+    static func text(of document: TranscriptDocument) -> String {
+        // Абзацы и реплики склеиваются в одну строку: карточке нужен текст
+        // подряд, а двойные пробелы из ответа движка в ней только мешают.
+        document.lines
+            .map(\.text)
+            .joined(separator: " ")
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
     }
 
     /// Название: первая фраза, обрезанная по слову. Точка в конце не нужна —

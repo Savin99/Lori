@@ -84,6 +84,77 @@ final class TranscriptTitleTests: XCTestCase {
         XCTAssertNil(TranscriptTitle.title(from: "# Только заголовок\n"))
         XCTAssertNil(TranscriptTitle.snippet(from: ""))
     }
+
+    // MARK: - Настоящий файл, а не рукописный образец
+
+    /// Реплики двух говорящих с таймкодами — так пишут Gemini, ElevenLabs и OpenAI
+    /// в режиме «Говорящие».
+    private let dialog = Transcript(
+        text: "",
+        segments: [
+            TranscriptSegment(start: 0, end: 4, text: "S1: Привет, это тест записи."),
+            TranscriptSegment(start: 4, end: 11, text: "S2: Да, слышу тебя хорошо. Начнём с бюджета на квартал."),
+        ]
+    )
+
+    /// Что угодно из обвязки файла, чего на карточке быть не должно.
+    private func assertClean(_ value: String?, _ label: String, file: StaticString = #filePath, line: UInt = #line) {
+        guard let value else { return XCTFail("\(label): пусто", file: file, line: line) }
+        for junk in ["Режим", "_", "Расшифровано", "S1", "S2", "**[", "0:00", "Recording-"] {
+            XCTAssertFalse(value.contains(junk), "\(label) «\(value)» содержит «\(junk)»", file: file, line: line)
+        }
+    }
+
+    /// **Регрессия.** `Transcript.markdown` пишет строку `_Режим: …_` для каждого
+    /// движка с режимом, а построчный разбор заголовка её не знал: карточка
+    /// называлась «_Режим: Спикеры и таймкоды_ Привет, это», и тем же мусором
+    /// начинались сниппет и текст под чужим заголовком.
+    func testModeLineFromRealFileNeverReachesTheCard() {
+        for stamps in [true, false] {
+            let markdown = dialog.markdown(
+                title: "Recording-2026-09-04T22-22-10Z",
+                engine: "Gemini · gemini-3.5-transcribe",
+                mode: "Спикеры и таймкоды",
+                stamps: stamps
+            )
+            XCTAssertTrue(markdown.contains("_Режим: Спикеры и таймкоды_"), "файл тот самый, с режимом")
+
+            XCTAssertEqual(TranscriptTitle.title(from: markdown), "Привет, это тест записи", "таймкоды: \(stamps)")
+            assertClean(TranscriptTitle.title(from: markdown), "заголовок")
+            assertClean(TranscriptTitle.snippet(from: markdown), "сниппет")
+            assertClean(TranscriptTitle.head(from: markdown), "начало")
+            XCTAssertEqual(TranscriptTitle.snippet(from: markdown), "Да, слышу тебя хорошо. Начнём с бюджета на квартал.")
+            XCTAssertTrue(TranscriptTitle.head(from: markdown)?.hasPrefix("Привет, это тест записи.") == true)
+        }
+    }
+
+    /// Движок без реплик (OpenAI «Быстрый текст», «Причёсанный текст» у Gemini)
+    /// отдаёт текст одним куском — режим в файле стоит и у него.
+    func testModeLineIsDroppedForPlainTextEnginesToo() {
+        let markdown = Transcript(text: "Обсудили переезд офиса в новое помещение. Коробки перевезут в субботу.")
+            .markdown(title: "audio_5_2", engine: "OpenAI · gpt-transcribe", mode: "Быстрый текст")
+
+        XCTAssertEqual(TranscriptTitle.title(from: markdown), "Обсудили переезд офиса в новое помещение")
+        XCTAssertEqual(TranscriptTitle.snippet(from: markdown), "Коробки перевезут в субботу.")
+        assertClean(TranscriptTitle.head(from: markdown), "начало")
+    }
+
+    /// Предупреждения о пропусках и «кусок» у приблизительных таймкодов — тоже
+    /// обвязка, а не слова записи.
+    func testWarningsAndApproximateStampsStayOutOfTheCard() {
+        let markdown = Transcript(
+            text: "",
+            segments: [TranscriptSegment(start: 0, end: 300, text: "Начали с отчёта о продажах за август.", isApproximate: true)],
+            warnings: ["Пропуск 2:00–2:30: слов для этого участка сервис не дал"]
+        ).markdown(title: "Новая запись 12", engine: "Gemini · gemini-3.5-transcribe", mode: "Точность")
+
+        XCTAssertEqual(TranscriptTitle.title(from: markdown), "Начали с отчёта о продажах за август")
+        for value in [TranscriptTitle.snippet(from: markdown), TranscriptTitle.head(from: markdown)] {
+            XCTAssertFalse(value?.contains("Пропуск") ?? true)
+            XCTAssertFalse(value?.contains("кусок") ?? true)
+            XCTAssertFalse(value?.contains("Режим") ?? true)
+        }
+    }
 }
 
 /// Разбор файла расшифровки для экрана записи: по тапу на реплику плеер должен
