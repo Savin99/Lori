@@ -169,6 +169,29 @@ final class ImportBatchTests: XCTestCase {
         XCTAssertEqual(service.lastBatch?.succeeded.count, 5)
     }
 
+    /// Пачка остаётся одной, даже когда движок мгновенный: все файлы сначала копируются, а
+    /// потом встают в очередь подряд, без единой паузы. Иначе короткая первая запись успевала
+    /// бы расшифроваться, пока копируется вторая, и счётчик «1 из 5» рассыпался бы на «1 из 1»
+    /// и «1 из 4».
+    func testTheWholeBatchIsQueuedInOneGoBeforeAnythingStarts() async throws {
+        let service = fixture.service(gate: QueueGate(blocking: false))
+        let files = try ["А.m4a", "Б.m4a", "В.m4a", "Г.m4a", "Д.m4a"].map { try staged($0) }
+        var totalsSeen: [Int] = []
+        var runningSeen: [Int] = []
+
+        let report = await service.importAndEnqueue(files, into: fixture.workspace, using: .gigaam) { _, _ in
+            totalsSeen.append(service.batchTotal)
+            runningSeen.append(service.running.count)
+        }
+        await service.waitForDrain()
+
+        XCTAssertTrue(report.isComplete)
+        XCTAssertEqual(totalsSeen, [1, 2, 3, 4, 5], "каждая встаёт в ту же пачку")
+        XCTAssertEqual(runningSeen, [0, 0, 0, 0, 0], "ни одна не успела начаться, пока ставились остальные")
+        XCTAssertEqual(service.lastBatch?.total, 5, "и итог — одна пачка из пяти")
+        XCTAssertEqual(service.lastBatch?.succeeded.count, 5)
+    }
+
     /// Пять файлов, один из них `.ogg`: четыре идут, пятый назван с причиной.
     func testBatchReportsAPartialFailureAndTheRestGoOn() async throws {
         let order = QueueGate(blocking: false)

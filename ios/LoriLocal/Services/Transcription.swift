@@ -1405,7 +1405,8 @@ extension TranscriptionService {
     /// копирует в рабочую папку и тут же встаёт в очередь, как одно действие.
     ///
     /// Цикл по нескольким файлам и отчёт о частичном успехе остаются за вызывающим — для
-    /// этого функция и одна: один файл вошёл или не вошёл, и третьего нет.
+    /// этого функция и одна: один файл вошёл или не вошёл, и третьего нет. (Для пачки есть
+    /// `importAndEnqueue(_:[URL]…)`: она ещё и держит пачку одной — см. там.)
     ///
     /// - Успех: возвращает путь записи; файл в промежуточной папке убран (иначе он вернулся
     ///   бы в панель при следующем открытии и импортировался второй раз).
@@ -1418,7 +1419,7 @@ extension TranscriptionService {
     ///   в списке «Без расшифровки» в состоянии, которого человек не просил.
     ///
     /// `didImport` вызывается синхронно сразу после постановки, раньше, чем работа успеет
-    /// хоть на шаг продвинуться: здесь интерфейс ставит запись временный заголовок
+    /// хоть на шаг продвинуться: здесь интерфейс ставит записи временный заголовок
     /// (имя принесённого файла), и расшифровка не может закончиться и дать записи
     /// заголовок от модели до того, как он будет задан.
     ///
@@ -1432,35 +1433,22 @@ extension TranscriptionService {
         modifiedAt: Date = .now,
         didImport: (_ relativePath: String) -> Void = { _ in }
     ) async throws -> String {
-        let path: String
-        do {
-            path = try await workspace.importFileAsync(from: staged, modifiedAt: modifiedAt)
-        } catch let refusal as ImportError {
-            ImportInbox.forget(staged)
-            throw refusal
-        }
-        guard let entry = try? workspace.entry(at: path) else {
-            workspace.discardImportedFile(at: path)
-            throw WorkspaceError.importFailed
-        }
-        guard enqueue(entry, in: workspace, using: kind) else {
-            workspace.discardImportedFile(at: path)
-            throw ImportError.queueUnavailable(fileName: staged.lastPathComponent)
-        }
-        didImport(path)
-        ImportInbox.forget(staged)
-        Diagnostics.note("импорт: «\(path)» принята и поставлена в очередь")
-        return path
+        let path = try await importStaged(staged, into: workspace, modifiedAt: modifiedAt)
+        return try enqueueImported(path, staged: staged, into: workspace, using: kind, didImport: didImport)
     }
 
-    /// Принимает пачку файлов: **одна** проверка движка в начале, затем по файлу —
-    /// копирование и постановка, и отчёт о том, что вошло и что нет.
+    /// Принимает пачку файлов: **одна** проверка движка в начале, затем копирование всех, и
+    /// только потом — разом в очередь, по порядку. Отчёт — о том, что вошло и что нет.
     ///
     /// - Движок не готов — не делается ничего, в отчёте `blockedBy` с причиной. Пять файлов
     ///   при пропавшем ключе раньше давали пять строк «Ошибка»; теперь — один вопрос до импорта.
-    /// - Файлы идут **по порядку** и встают в очередь в том же порядке. Движок один на всю
-    ///   пачку: он назван один раз в начале, и смена настройки посреди ввода пачку не
-    ///   перемешает.
+    /// - **Пачка остаётся одной.** Сначала копируются все файлы, и только потом они встают в
+    ///   очередь — подряд, без единой паузы между ними. Будь постановка вперемешку с
+    ///   копированием, короткая первая запись успевала бы расшифроваться, пока копируется
+    ///   вторая: очередь пустела бы посреди ввода, счётчик «1 из 5» превращался в «1 из 1» и
+    ///   «1 из 4», а фоновая задача закрывалась бы и просилась заново.
+    /// - Файлы встают в очередь **в порядке выбора**; движок один на всю пачку: он назван один
+    ///   раз в начале, и смена настройки посреди ввода пачку не перемешает.
     /// - Один негодный файл не отменяет остальных: он попадает в `failed`, остальные идут.
     /// - Даты изменения идут с шагом в 10 мс на убыль: первый файл — самый новый. В списке
     ///   «новые сверху» пачка читается сверху вниз в том порядке, в каком расшифровывается.
@@ -1483,22 +1471,66 @@ extension TranscriptionService {
             return report
         }
 
+        // Сначала копирование — по файлу и по порядку; на постановке пока ничего не стоит.
         let start = Date()
+        var copied: [(source: URL, path: String)] = []
         for (index, file) in files.enumerated() {
             do {
-                let path = try await importAndEnqueue(
-                    file,
-                    into: workspace,
-                    using: engine,
-                    modifiedAt: start.addingTimeInterval(-Double(index) * 0.01),
-                    didImport: { didImport(file, $0) }
+                let path = try await importStaged(
+                    file, into: workspace, modifiedAt: start.addingTimeInterval(-Double(index) * 0.01)
                 )
-                report.imported.append(.init(source: file, path: path))
+                copied.append((file, path))
             } catch {
                 Diagnostics.note("импорт: «\(file.lastPathComponent)» не вошла — \(error.localizedDescription)")
                 report.failed.append(.init(source: file, message: error.localizedDescription))
             }
         }
+
+        // Потом разом в очередь: цикл без `await`, пачка не может опустеть на полпути.
+        for (source, path) in copied {
+            do {
+                try enqueueImported(path, staged: source, into: workspace, using: engine) { didImport(source, $0) }
+                report.imported.append(.init(source: source, path: path))
+            } catch {
+                Diagnostics.note("импорт: «\(source.lastPathComponent)» не вошла — \(error.localizedDescription)")
+                report.failed.append(.init(source: source, message: error.localizedDescription))
+            }
+        }
         return report
+    }
+
+    /// Первая половина импорта: копия в рабочую папку. Неподдерживаемый формат убирает и
+    /// промежуточную копию; любой другой отказ её оставляет.
+    private func importStaged(_ staged: URL, into workspace: WorkspaceStore, modifiedAt: Date) async throws -> String {
+        do {
+            return try await workspace.importFileAsync(from: staged, modifiedAt: modifiedAt)
+        } catch let refusal as ImportError {
+            ImportInbox.forget(staged)
+            throw refusal
+        }
+    }
+
+    /// Вторая половина: постановка в очередь. Не встала — копия в рабочей папке откатывается,
+    /// промежуточная остаётся. Встала — хук, и промежуточная копия убирается.
+    @discardableResult
+    private func enqueueImported(
+        _ path: String,
+        staged: URL,
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind?,
+        didImport: (_ relativePath: String) -> Void
+    ) throws -> String {
+        guard let entry = try? workspace.entry(at: path) else {
+            workspace.discardImportedFile(at: path)
+            throw WorkspaceError.importFailed
+        }
+        guard enqueue(entry, in: workspace, using: kind) else {
+            workspace.discardImportedFile(at: path)
+            throw ImportError.queueUnavailable(fileName: staged.lastPathComponent)
+        }
+        didImport(path)
+        ImportInbox.forget(staged)
+        Diagnostics.note("импорт: «\(path)» принята и поставлена в очередь")
+        return path
     }
 }
