@@ -47,6 +47,28 @@ enum SummaryVariant: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
+    /// «2,3 ГБ» — для кнопки скачивания.
+    var sizeLabel: String {
+        String(format: "%.1f", Double(bytes) / 1_000_000_000)
+            .replacingOccurrences(of: ".", with: ",") + " ГБ"
+    }
+
+    /// «крупную модель» — для «Скачать …» и «Удалить …».
+    var accusative: String {
+        switch self {
+        case .heavy: "крупную модель"
+        case .light: "лёгкую модель"
+        }
+    }
+
+    /// Почему эту модель предлагают первой (`SummaryModelStore.recommendedVariant`).
+    var recommendation: String {
+        switch self {
+        case .heavy: "Для этого iPhone — крупная модель: формулирует лучше, и памяти телефона ей хватает."
+        case .light: "Для этого iPhone — лёгкая модель: крупной здесь не хватит памяти."
+        }
+    }
+
     /// Сколько памяти считаем достаточной, чтобы вообще браться за модель.
     /// У крупной запас больше её собственного веса: после прошлого запуска
     /// память возвращается не сразу, и запускать вторую расшифровку впритык —
@@ -103,6 +125,38 @@ class SummaryModelStore: ObservableObject {
 
     func refresh() {
         installed = Set(SummaryVariant.allCases.filter(isInstalled))
+    }
+
+    /// Хоть одна модель скачана — заголовки придумывает модель, а не первая фраза.
+    var isReady: Bool { !installed.isEmpty }
+
+    /// Какую модель предложить скачать одной кнопкой.
+    var recommendedVariant: SummaryVariant { Self.recommendedVariant() }
+
+    /// Выбор по памяти телефона, а не по вкусу.
+    ///
+    /// Права `increased-memory-limit` бесплатная команда не подписывает, и
+    /// приложению достаётся только часть памяти телефона. Крупная модель берётся
+    /// за работу, когда свободно 3,1 ГБ (`requiredFreeBytes`): на телефоне с 8 ГБ
+    /// это впритык, но проходит — журнал 2 сентября, iPhone 16 Pro Max: после
+    /// загрузки 2,3 ГБ весов свободно ещё около гигабайта. На телефоне с 6 ГБ
+    /// приложению столько не дают вовсе: скачанная крупная модель там никогда бы
+    /// не запустилась, и заголовков не было бы совсем. Порог — 7 млрд байт:
+    /// `physicalMemory` у телефонов «8 ГБ» чуть ниже номинала, у «6 ГБ» — около 6.
+    nonisolated static func recommendedVariant(
+        physicalMemory: UInt64 = ProcessInfo.processInfo.physicalMemory
+    ) -> SummaryVariant {
+        physicalMemory >= 7_000_000_000 ? .heavy : .light
+    }
+
+    /// Значение строки «Заголовки» в корне настроек. Без модели заголовки всё
+    /// равно есть — из первой фразы, и «выключены» там было неправдой.
+    var statusLine: String {
+        if downloading != nil { return "скачивается \(Int(fraction * 100))%" }
+        if let best = SummaryVariant.allCases.first(where: installed.contains) {
+            return best.title.lowercased()
+        }
+        return "первая фраза"
     }
 
     func download(_ variant: SummaryVariant) {

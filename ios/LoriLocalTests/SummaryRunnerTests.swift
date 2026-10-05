@@ -597,3 +597,42 @@ final class SummaryRunnerTests: XCTestCase {
         override func isInstalled(_ variant: SummaryVariant) -> Bool { ready.contains(variant) }
     }
 }
+
+/// Что экран «Заголовки» и строка настроек говорят о модели.
+@MainActor
+final class SummaryModelStoreTests: XCTestCase {
+    private final class StubModels: SummaryModelStore {
+        private let ready: Set<SummaryVariant>
+
+        init(installed: Set<SummaryVariant>) {
+            ready = installed
+            super.init(root: FileManager.default.temporaryDirectory)
+        }
+
+        override func isInstalled(_ variant: SummaryVariant) -> Bool { ready.contains(variant) }
+    }
+
+    /// Одна кнопка «Скачать» — для модели, которая подходит телефону. Крупной
+    /// нужно 3,1 ГБ свободных: на 8 ГБ это впритык, на 6 ГБ не бывает вовсе.
+    func testRecommendedModelFollowsPhoneMemory() {
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 8_589_934_592), .heavy, "8 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 7_500_000_000), .heavy, "8 ГБ чуть ниже номинала")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 12_884_901_888), .heavy, "12 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 6_442_450_944), .light, "6 ГБ")
+        XCTAssertEqual(SummaryModelStore.recommendedVariant(physicalMemory: 4_294_967_296), .light, "4 ГБ")
+    }
+
+    /// Без модели заголовки всё равно есть — из первой фразы; «выключены» было неправдой.
+    func testSettingsLineTellsWhatTitlesComeFrom() {
+        XCTAssertEqual(StubModels(installed: []).statusLine, "первая фраза")
+        XCTAssertFalse(StubModels(installed: []).isReady)
+        XCTAssertEqual(StubModels(installed: [.light]).statusLine, "лёгкая модель")
+        XCTAssertEqual(StubModels(installed: [.heavy, .light]).statusLine, "крупная модель")
+        XCTAssertTrue(StubModels(installed: [.light]).isReady)
+    }
+
+    func testSizesAreWrittenTheRussianWay() {
+        XCTAssertEqual(SummaryVariant.heavy.sizeLabel, "2,3 ГБ")
+        XCTAssertEqual(SummaryVariant.light.sizeLabel, "1,1 ГБ")
+    }
+}
