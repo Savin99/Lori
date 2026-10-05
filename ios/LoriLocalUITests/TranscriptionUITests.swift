@@ -348,19 +348,24 @@ final class TranscriptionUITests: XCTestCase {
     func testInlineTranscribeStartsQueueAndStopAsksFirst() throws {
         continueAfterFailure = false
         let app = launch(stub: true, stubSeconds: 30)
+        stopQueueIfRunning(app)
 
-        let action = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Расшифровать")).firstMatch
-        try XCTSkipUnless(action.waitForExistence(timeout: 5), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        let action = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(action, in: app), "нет записи без расшифровки — прогони design/qa/seed-home.py")
         tap(action)
-
-        let queue = app.descendants(matching: .any)["queueBlock"]
-        XCTAssertTrue(queue.waitForExistence(timeout: 5), "блок очереди появляется над списком")
-        XCTAssertTrue(queue.label.hasPrefix("Расшифровка"), queue.label)
-        XCTAssertFalse(app.buttons["Слушать"].exists, "кнопка на карточке не открывает запись")
+        // Карточка видна, пока не листали: она и говорит первой, что работа пошла.
         XCTAssertTrue(
             cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю")).firstMatch.waitForExistence(timeout: 5),
             "карточка говорит, что идёт работа"
         )
+        XCTAssertFalse(app.buttons["Слушать"].exists, "кнопка на карточке не открывает запись")
+
+        // Блок очереди — первым в списке: если пришлось листать, возвращаемся наверх.
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true), "блок очереди появляется над списком")
+        XCTAssertTrue(queue.label.hasPrefix("Расшифровка"), queue.label)
+        // Блок виден целиком: при крупном шрифте он высокий, и одного «появился» мало.
+        for _ in 0..<3 { app.swipeDown() }
         save(XCUIScreen.main.screenshot(), named: "home-queue-single")
 
         tap(app.buttons["stopQueueButton"])
@@ -375,12 +380,13 @@ final class TranscriptionUITests: XCTestCase {
     func testQueueBlockOpensTheCurrentRecord() throws {
         continueAfterFailure = false
         let app = launch(stub: true, stubSeconds: 30)
+        stopQueueIfRunning(app)
 
-        let action = app.buttons.matching(identifier: "cardAction").matching(NSPredicate(format: "label == %@", "Расшифровать")).firstMatch
-        try XCTSkipUnless(action.waitForExistence(timeout: 5), "нет записи без расшифровки — прогони design/qa/seed-home.py")
+        let action = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(action, in: app), "нет записи без расшифровки — прогони design/qa/seed-home.py")
         tap(action)
         let queue = app.descendants(matching: .any)["queueBlock"]
-        XCTAssertTrue(queue.waitForExistence(timeout: 5))
+        XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true))
         queue.tap()
         XCTAssertTrue(app.buttons["Слушать"].waitForExistence(timeout: 5), "блок открывает запись")
         tap(app.buttons["Расшифровки"])
@@ -459,6 +465,8 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["titlesHint"].waitForExistence(timeout: 5), "без модели заголовков есть подсказка")
         sleep(1)
         shoot(named: "home-titles-hint")
+
+        stopQueueIfRunning(app)
     }
 
     // MARK: - Помощники
@@ -491,6 +499,41 @@ final class TranscriptionUITests: XCTestCase {
 
     private func firstCard(in app: XCUIApplication) -> XCUIElement {
         cards(in: app).firstMatch
+    }
+
+    /// Строки `List` создаются, только когда видны: запись ниже экрана для UI-теста
+    /// не существует, пока до неё не долистали. Листаем, пока не появится.
+    private func scrollUntilExists(
+        _ element: XCUIElement,
+        in app: XCUIApplication,
+        upwards: Bool = false,
+        swipes: Int = 6
+    ) -> Bool {
+        if element.waitForExistence(timeout: 4) { return true }
+        for _ in 0..<swipes {
+            if upwards { app.swipeDown() } else { app.swipeUp() }
+            if element.waitForExistence(timeout: 1) { return true }
+        }
+        return false
+    }
+
+    /// Очередь, оставшаяся от прошлого запуска, снимается. Прерванное задание с
+    /// сохранёнными настройками поднимается само при запуске, и тест застал бы чужую
+    /// работу, а следующий запуск без заглушки отдал бы её настоящему движку.
+    private func stopQueueIfRunning(_ app: XCUIApplication) {
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        guard queue.waitForExistence(timeout: 3) else { return }
+        tap(app.buttons["stopQueueButton"])
+        tap(dialogButton("Остановить", in: app))
+        XCTAssertTrue(queue.waitForNonExistence(timeout: 10), "оставшаяся очередь снята")
+    }
+
+    /// Кнопка на карточке, которая ставит запись в очередь: «Расшифровать» у записи
+    /// без текста или «Продолжить» у прерванной — обе ведут в `enqueue`.
+    private func startAction(in app: XCUIApplication) -> XCUIElement {
+        app.buttons.matching(identifier: "cardAction")
+            .matching(NSPredicate(format: "label IN %@", ["Расшифровать", "Продолжить"]))
+            .firstMatch
     }
 
     /// Тихая карточка: расшифровка есть, и с записью ничего не происходит — ей
