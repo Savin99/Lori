@@ -89,16 +89,6 @@ struct ContentView: View {
     @State private var share: SharePayload?
     /// Запись, для которой спрашивают формат экспорта.
     @State private var shareTarget: WorkspaceEntry?
-    @State private var showAsk = false
-    /// Запись из ссылки в ответе открывается после того, как лист «Спросить»
-    /// закрылся: два листа подряд в одном такте SwiftUI просто теряет.
-    @State private var pendingOpen: WorkspaceEntry?
-    /// Секунда из ссылки в ответе: запись открывается сразу на ней.
-    @State private var pendingSeek: TimeInterval?
-    /// Вопрос, с которым открывают тред. Пустой — просто вернуться к разговору.
-    @State private var askedQuestion = ""
-    /// Секунда, на которую откроется запись из ссылки.
-    @State private var openedSeek: TimeInterval?
     @FocusState private var searchFocused: Bool
 
     @AppStorage(TranscriptionSettings.autoTranscribeKey) private var autoTranscribe = true
@@ -109,13 +99,9 @@ struct ContentView: View {
     @EnvironmentObject private var summaryRunner: SummaryRunner
     @State private var showEnginePicker = false
     @StateObject private var composer = ComposerModel()
-    @StateObject private var assistant = AssistantThreadStore()
     @StateObject private var speakers = SpeakerNames()
     @StateObject private var speed = TranscriptionSpeed()
     @State private var importingAttached = false
-    /// Строка «Спрошу по 5 расшифровкам · 92 тыс. знаков». Считается при входе
-    /// в вопрос и при смене охвата, а не на каждое нажатие клавиши.
-    @State private var contextSummary: String?
     @Environment(\.openURL) private var openURL
     @Environment(\.scenePhase) private var scenePhase
 
@@ -152,23 +138,7 @@ struct ContentView: View {
                 transcription: transcription,
                 topics: topics,
                 previews: previews,
-                isRecording: recorder.isCapturing,
-                startAt: openedSeek
-            )
-        }
-        .sheet(isPresented: $showAsk, onDismiss: openPending) {
-            AssistantThreadScreen(
-                store: assistant,
-                scopes: askScopes,
-                initialScopeID: composer.scopeID,
-                initialQuestion: askedQuestion,
-                title: title(for:),
-                detail: { summaries.detail(for: $0.relativePath) },
-                topic: { topics.topic(for: $0.relativePath) },
-                onOpen: { citation in
-                    pendingOpen = try? workspace.entry(at: citation.path)
-                    pendingSeek = citation.start
-                }
+                isRecording: recorder.isCapturing
             )
         }
         .sheet(item: $topicTarget) { entry in
@@ -228,7 +198,6 @@ struct ContentView: View {
         // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
         // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
         .environmentObject(recorder)
-        .environmentObject(assistant)
         .environmentObject(speakers)
         .environmentObject(speed)
     }
@@ -259,17 +228,6 @@ struct ContentView: View {
                         isSearching = true
                         searchFocused = true
                         search.reindex(workspace)
-                    }
-                    // Вход в разговор — всегда, а не только когда он уже есть.
-                    // Иначе попасть к ассистенту можно было единственным путём:
-                    // набрать вопрос в панели, — а если поле чем-то занято, то
-                    // и вовсе никак.
-                    CircleIconButton(
-                        symbol: "sparkles",
-                        label: assistant.hasThread ? "Вернуться к разговору" : "Спросить по расшифровкам"
-                    ) {
-                        askedQuestion = ""
-                        showAsk = true
                     }
                     CircleIconButton(symbol: "gearshape", label: "Настройки") { showSettings = true }
                 }
@@ -475,8 +433,6 @@ struct ContentView: View {
             speed: speed,
             engine: engine,
             mode: TranscriptionSettings.mode(for: engine.kind),
-            scopes: composerScopes,
-            contextSummary: contextSummary,
             status: transcriptionStatus,
             actions: ComposerActions(
                 record: startRecording,
@@ -494,7 +450,6 @@ struct ContentView: View {
                     TranscriptionSettings.setMode(mode, for: engine.kind)
                     engines.refresh()
                 },
-                ask: askFromComposer,
                 transcribe: transcribeAttached
             )
         )
@@ -514,8 +469,6 @@ struct ContentView: View {
             collectIncoming()
         }
         .onOpenURL { url in receive(url) }
-        .onChange(of: composer.question.isEmpty) { _, _ in updateContextSummary() }
-        .onChange(of: composer.scopeID) { _, _ in updateContextSummary() }
     }
 
     /// Выбранный движок в терминах интерфейса.
@@ -531,67 +484,6 @@ struct ContentView: View {
         let items: [WorkspaceEntry]
 
         var id: Date { day }
-    }
-
-    /// Охваты вопроса: весь архив и каждая заведённая тема. Полноценный выбор
-    /// отдельных записей — отдельная работа; фильтр тем уже есть и уже понятен.
-    private var askScopes: [AskScope] {
-        var result = [AskScope(id: "all", title: "Все", entries: workspace.audio)]
-        for topic in topics.topics {
-            let entries = workspace.audio.filter { topics.topic(for: $0.relativePath) == topic }
-            guard !entries.isEmpty else { continue }
-            result.append(AskScope(id: topic, title: topic, entries: entries))
-        }
-        return result
-    }
-
-    /// Те же охваты, что у листа «Спросить», но в форме, понятной чипу панели:
-    /// у «Всех» показывается число записей, у темы — её название.
-    private var composerScopes: [ComposerScope] {
-        askScopes.map { ComposerScope(id: $0.id, title: $0.title, count: $0.entries.count) }
-    }
-
-    /// Сколько текста уйдёт ассистенту. Знаки оцениваются по размеру файлов, а не
-    /// чтением: расшифровок десятки, и открывать их ради строки над клавиатурой
-    /// нельзя. В кириллическом UTF-8 знак весит около 1,8 байта.
-    private func updateContextSummary() {
-        guard !composer.question.isEmpty else {
-            contextSummary = nil
-            return
-        }
-        let scope = askScopes.first { $0.id == composer.scopeID } ?? askScopes.first
-        let entries = scope?.entries ?? []
-        let sizes = transcriptSizes()
-        let found = entries.compactMap { entry -> Int? in
-            sizes[(entry.name as NSString).deletingPathExtension]
-        }
-        guard !found.isEmpty else {
-            contextSummary = "В этом охвате пока нет расшифровок"
-            return
-        }
-        let characters = Int(Double(found.reduce(0, +)) / 1.8)
-        let count = LoriFormat.plural(found.count, one: "расшифровке", few: "расшифровкам", many: "расшифровкам")
-        contextSummary = "Спрошу по \(count) · \(thousands(characters)) знаков"
-    }
-
-    private func transcriptSizes() -> [String: Int] {
-        let files = (try? workspace.entries(at: "Transcripts")) ?? []
-        return Dictionary(
-            files.map { ((($0.name as NSString).deletingPathExtension), $0.size) },
-            uniquingKeysWith: { first, _ in first }
-        )
-    }
-
-    private func thousands(_ value: Int) -> String {
-        value < 1_000 ? "\(value)" : "\((value + 500) / 1_000) тыс."
-    }
-
-    private func openPending() {
-        guard let entry = pendingOpen else { return }
-        pendingOpen = nil
-        openedSeek = pendingSeek
-        pendingSeek = nil
-        opened = entry
     }
 
     private var visible: [WorkspaceEntry] {
@@ -806,14 +698,6 @@ struct ContentView: View {
                 workspace.lastError = error.localizedDescription
             }
         }
-    }
-
-    private func askFromComposer() {
-        let asked = composer.question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !asked.isEmpty else { return }
-        askedQuestion = asked
-        composer.question = ""
-        showAsk = true
     }
 
     /// Заголовок от локальной модели — после того, как расшифровка легла на диск.

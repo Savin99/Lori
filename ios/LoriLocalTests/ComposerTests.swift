@@ -3,7 +3,7 @@ import XCTest
 @testable import LoriLocal
 
 /// Состояния нижней панели. Они взаимоисключающие, и это главное, что здесь
-/// проверяется: панель не должна одновременно предлагать записать и отправить.
+/// проверяется: панель не должна одновременно предлагать записать и расшифровать.
 @MainActor
 final class ComposerModelTests: XCTestCase {
     func testEmptyPanelOffersRecording() {
@@ -12,23 +12,8 @@ final class ComposerModelTests: XCTestCase {
         XCTAssertEqual(model.state(recording: false), .idle)
     }
 
-    func testTypedQuestionSwitchesToAsking() {
-        let model = ComposerModel()
-        model.question = "Что решили по индексации?"
-
-        XCTAssertEqual(model.state(recording: false), .typing)
-    }
-
-    func testSpacesAreNotAQuestion() {
-        let model = ComposerModel()
-        model.question = "   \n "
-
-        XCTAssertEqual(model.state(recording: false), .idle, "пробелы не должны включать стрелку отправки")
-    }
-
     func testRecordingWinsOverEverything() {
         let model = ComposerModel()
-        model.question = "вопрос"
         model.attach([URL(fileURLWithPath: "/tmp/Совещание.m4a")])
 
         XCTAssertEqual(model.state(recording: true), .recording)
@@ -36,26 +21,22 @@ final class ComposerModelTests: XCTestCase {
 
     /// Пока файл прикреплён, запись недоступна: кнопка микрофона превращается
     /// в «Расшифровать», и другого способа начать запись в панели нет.
-    func testAttachedFileOutranksTypedQuestion() {
+    func testAttachedFileTurnsTheButtonIntoTranscribe() {
         let model = ComposerModel()
-        model.question = "вопрос"
         model.attach([URL(fileURLWithPath: "/tmp/Совещание.m4a")])
 
         XCTAssertEqual(model.state(recording: false), .attached)
     }
 
     /// Подсказка про буфер ничего собой не закрывает: скопированное аудио может
-    /// лежать там часами, и всё это время поле вопроса должно работать. Раньше
-    /// подсказка замещала поле — и спросить ассистента было нечем.
-    func testClipboardHintNeverBlocksTheQuestionField() {
+    /// лежать там часами, и всё это время панель должна работать как обычно —
+    /// в покое, с кнопкой записи на месте.
+    func testClipboardHintNeverBlocksThePanel() {
         let model = ComposerModel()
         model.clipboard = .audio
 
         XCTAssertTrue(model.showsClipboardHint)
-        XCTAssertEqual(model.state(recording: false), .idle, "поле на месте, панель в покое")
-
-        model.question = "вопрос"
-        XCTAssertEqual(model.state(recording: false), .typing, "вопрос набирается поверх подсказки")
+        XCTAssertEqual(model.state(recording: false), .idle, "подсказка не меняет состояние панели")
     }
 
     func testDismissedHintStaysHiddenUntilTheBufferChanges() {
@@ -94,12 +75,12 @@ final class ComposerModelTests: XCTestCase {
         XCTAssertEqual(model.attached.count, 1)
     }
 
-    func testClearingRemovesBothQuestionAndFiles() {
+    func testClearingRemovesAttachedFiles() {
         let model = ComposerModel()
-        model.question = "вопрос"
         model.attach([URL(fileURLWithPath: "/tmp/Совещание.m4a")])
         model.clear()
 
+        XCTAssertTrue(model.attached.isEmpty)
         XCTAssertEqual(model.state(recording: false), .idle)
     }
 }

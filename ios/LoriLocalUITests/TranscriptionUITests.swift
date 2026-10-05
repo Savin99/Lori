@@ -119,7 +119,7 @@ final class TranscriptionUITests: XCTestCase {
         save(XCUIScreen.main.screenshot(), named: "share-menu")
     }
 
-    /// Настройки — четыре строки, а не бесконечный скролл: конфиги живут в своих
+    /// Настройки — пять строк, а не бесконечный скролл: конфиги живут в своих
     /// экранах, и корень виден целиком.
     func testSettingsAreSplitIntoScreens() throws {
         continueAfterFailure = false
@@ -169,65 +169,6 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(speakers.waitForExistence(timeout: 5))
         XCTAssertFalse(speakers.isEnabled, "и говорящих тоже")
         save(XCUIScreen.main.screenshot(), named: "settings-transcription-apple")
-    }
-
-    /// «Спроси свой архив»: вход из нижней панели — вопрос набирается там же,
-    /// где записывают и прикрепляют. Проверяется строка контекста, поле и то,
-    /// что без ключа отправка честно объясняет, чего не хватает.
-    func testAskScreenStatesWhatLeavesTheDeviceBeforeAsking() throws {
-        continueAfterFailure = false
-        let app = launch()
-
-        let question = app.descendants(matching: .any)["questionField"]
-        XCTAssertTrue(question.waitForExistence(timeout: 10), "вопрос набирается прямо в панели")
-        XCTAssertTrue(app.buttons["recordButton"].exists, "пока вопроса нет, кнопка записывает")
-        XCTAssertFalse(app.buttons["sendButton"].exists, "спрашивать без вопроса нечего")
-        focus(question)
-        question.typeText("indeksaciya")
-
-        let send = app.buttons["sendButton"]
-        XCTAssertTrue(send.waitForExistence(timeout: 5), "микрофон стал стрелкой отправки")
-        XCTAssertTrue(
-            app.descendants(matching: .any)["contextSummary"].exists,
-            "сколько расшифровок и знаков уйдёт — сказано прямо под полем"
-        )
-        tap(send)
-
-        XCTAssertTrue(
-            app.staticTexts["Ассистент"].waitForExistence(timeout: 10),
-            "отправка из панели открывает тред"
-        )
-        XCTAssertTrue(
-            app.descendants(matching: .any)["threadContext"].waitForExistence(timeout: 5),
-            "сверху сказано, по скольким расшифровкам идёт разговор"
-        )
-        XCTAssertTrue(app.descendants(matching: .any)["threadField"].exists, "поле вопроса на месте")
-        XCTAssertTrue(app.buttons["changeScope"].exists, "охват можно пересобрать")
-        // Ключа у теста нет и быть не должно: на месте кнопки отправки прямо
-        // написано, чего не хватает, — а не серая кнопка, молчащая в ответ.
-        XCTAssertTrue(
-            app.descendants(matching: .any)["threadNeedsKey"].exists,
-            "без ключа на месте отправки — объяснение, а не молчание"
-        )
-        save(XCUIScreen.main.screenshot(), named: "thread")
-    }
-
-    /// Ключ ассистента живёт на своём экране, отдельно от движков расшифровки.
-    func testAssistantHasItsOwnSettingsScreen() throws {
-        continueAfterFailure = false
-        let app = launch()
-
-        app.buttons["Настройки"].tap()
-        XCTAssertTrue(
-            app.descendants(matching: .any)["settingsAssistant"].waitForExistence(timeout: 20),
-            "в корне настроек есть строка «Ассистент»"
-        )
-        tap(app.descendants(matching: .any)["settingsAssistant"])
-
-        // Поля в `Form` в дерево доступности попадают, кнопки — нет.
-        XCTAssertTrue(exists("assistantKeyField", in: app), "ключ вводится здесь")
-        XCTAssertTrue(exists("assistantBaseURLField", in: app), "адрес совместимого сервиса — здесь же")
-        save(XCUIScreen.main.screenshot(), named: "settings-assistant")
     }
 
     /// Словарь — отдельный экран со списком слов, а не сырой текст в общем скролле.
@@ -295,20 +236,6 @@ final class TranscriptionUITests: XCTestCase {
         app.launchArguments += ["-transcriptionEngine", engine, "--forget-attachments"]
         app.launch()
         return app
-    }
-
-    /// Тап по полю и ожидание фокуса. `typeText` без фокуса падает с
-    /// «Neither element nor any descendant has keyboard focus», а фокус после
-    /// тапа приходит не в тот же миг — особенно когда экран только выехал.
-    private func focus(_ field: XCUIElement, timeout: TimeInterval = 8) {
-        XCTAssertTrue(field.waitForExistence(timeout: timeout), "нет поля для ввода")
-        let deadline = Date().addingTimeInterval(timeout)
-        repeat {
-            field.tap()
-            if (field.value(forKey: "hasKeyboardFocus") as? Bool) == true { return }
-            _ = field.waitForExistence(timeout: 0.3)
-        } while Date() < deadline
-        XCTFail("поле так и не получило фокус")
     }
 
     private func tap(_ element: XCUIElement, timeout: TimeInterval = 5) {

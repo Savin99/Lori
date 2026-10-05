@@ -3,21 +3,21 @@ import Security
 
 /// Ключи API, которые Lori хранит на телефоне. Каждый движок — свой аккаунт
 /// в Keychain: ключ OpenAI и ключ Gemini не должны затирать друг друга.
+///
+/// Имя `assistant-api-key` не переиспользовать: так назывался аккаунт чата
+/// «Спроси свой архив», удалённого 5 октября 2026. Его запись на телефонах
+/// намеренно не стирается, и новый аккаунт с тем же именем молча получил бы
+/// старый ключ.
 enum KeychainAccount: String, CaseIterable, Sendable {
     case openAI = "openai-api-key"
     case gemini = "gemini-api-key"
     case elevenLabs = "elevenlabs-api-key"
-    /// Ассистент по расшифровкам — отдельный аккаунт, а не переиспользованный
-    /// ключ расшифровки: сервис вопросов и сервис распознавания выбираются
-    /// независимо (DeepSeek на вопросы, OpenAI на расшифровку — обычный случай).
-    case assistant = "assistant-api-key"
 
     var title: String {
         switch self {
         case .openAI: "OpenAI"
         case .gemini: "Gemini"
         case .elevenLabs: "ElevenLabs"
-        case .assistant: "Ассистент"
         }
     }
 }

@@ -1,10 +1,12 @@
 import SwiftUI
 
-/// Настройки: четыре строки, а не один бесконечный скролл.
+/// Настройки: пять строк — движок, расшифровка, заголовки, словарь, хранилище, —
+/// а не один бесконечный скролл.
 ///
 /// Раньше на одном экране лежали конфиги всех четырёх движков сразу, и текста было
 /// больше, чем контролов. Теперь корень показывает только текущие значения, а
-/// подробности живут в своих экранах.
+/// подробности живут в своих экранах. Строка «Ассистент» ушла вместе с чатом
+/// «Спроси свой архив» 5 октября 2026.
 struct SettingsRoot: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @Environment(\.dismiss) private var dismiss
@@ -20,10 +22,6 @@ struct SettingsRoot: View {
     // на их ключи обновляет строку после правок на дочерних экранах.
     @AppStorage(TranscriptionSettings.openAIModelKey) private var openAIModelRaw = ""
     @AppStorage(TranscriptionSettings.geminiModeKey) private var geminiModeRaw = ""
-    // Строка «Ассистент» показывает модель: подписка на ключ обновляет её
-    // после выбора на дочернем экране.
-    @AppStorage(AssistantSettings.modelKey) private var assistantModelRaw = ""
-    @State private var assistantHasKey = false
 
     private var engine: TranscriptionEngineKind {
         TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam
@@ -64,20 +62,6 @@ struct SettingsRoot: View {
                     .accessibilityIdentifier("settingsSummary")
 
                     NavigationLink {
-                        AssistantProviderScreen()
-                    } label: {
-                        // Без ключа ассистент не работает вовсе, и строка это
-                        // показывает цветом, а не только словами.
-                        row(
-                            "Ассистент",
-                            symbol: "sparkles",
-                            value: assistantValue,
-                            warning: !assistantHasKey
-                        )
-                    }
-                    .accessibilityIdentifier("settingsAssistant")
-
-                    NavigationLink {
                         VocabularyScreen()
                     } label: {
                         row("Словарь", symbol: "book", value: LoriFormat.plural(
@@ -102,20 +86,10 @@ struct SettingsRoot: View {
             .background(LoriPalette.canvas)
             .navigationTitle("Настройки")
             .toolbar { ToolbarItem(placement: .topBarTrailing) { Button("Готово") { dismiss() } } }
-            .onAppear { assistantHasKey = AssistantSettings.hasKey }
-            .onChange(of: assistantModelRaw) { assistantHasKey = AssistantSettings.hasKey }
         }
         // Плашка записи — снаружи `NavigationStack`: внутри её накрывает большой
         // заголовок, и нажатие достаётся заголовку, а не плашке.
         .recordingBanner { dismiss() }
-    }
-
-    /// Ассистент без ключа не работает вовсе — об этом честнее сказать в строке,
-    /// а не за два экрана отсюда. Сам ключ спрашивается у Keychain на появлении
-    /// экрана, а не в теле View: обращение к Keychain на каждую перерисовку —
-    /// синхронный системный вызов на главном потоке.
-    private var assistantValue: String {
-        assistantHasKey ? AssistantSettings.model : "ключа нет"
     }
 
     private var engineValue: String {
@@ -148,7 +122,7 @@ struct SettingsRoot: View {
         return parts.joined(separator: ", ")
     }
 
-    private func row(_ title: String, symbol: String, value: String, warning: Bool = false) -> some View {
+    private func row(_ title: String, symbol: String, value: String) -> some View {
         HStack(spacing: 12) {
             Image(systemName: symbol)
                 .font(LoriFont.meta.weight(.medium))
@@ -160,7 +134,7 @@ struct SettingsRoot: View {
             Spacer(minLength: 8)
             Text(value)
                 .font(LoriFont.meta)
-                .foregroundStyle(warning ? LoriPalette.warn : LoriPalette.muted)
+                .foregroundStyle(LoriPalette.muted)
                 .lineLimit(1)
         }
     }

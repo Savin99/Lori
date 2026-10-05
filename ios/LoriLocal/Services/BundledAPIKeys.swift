@@ -21,7 +21,7 @@ enum BundledAPIKeys {
     static func allowsBundledKey(for account: KeychainAccount, at url: URL) -> Bool {
         let host: String
         switch account {
-        case .openAI, .assistant: host = "api.openai.com"
+        case .openAI: host = "api.openai.com"
         case .gemini: host = "generativelanguage.googleapis.com"
         case .elevenLabs: host = "api.elevenlabs.io"
         }
@@ -34,7 +34,6 @@ enum BundledAPIKeys {
         case .openAI: TranscriptionSettings.openAIBaseURL
         case .gemini: TranscriptionSettings.geminiHost
         case .elevenLabs: TranscriptionSettings.elevenLabsBaseURL
-        case .assistant: AssistantSettings.baseURL
         }
     }
 

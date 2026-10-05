@@ -11,7 +11,6 @@ struct TranscriptScreen: View {
     @EnvironmentObject private var summaries: SummaryStore
     @EnvironmentObject private var summaryModels: SummaryModelStore
     @EnvironmentObject private var summaryRunner: SummaryRunner
-    @EnvironmentObject private var assistant: AssistantThreadStore
     @EnvironmentObject private var speakers: SpeakerNames
     @EnvironmentObject private var speed: TranscriptionSpeed
     @Environment(\.dismiss) private var dismiss
@@ -24,14 +23,11 @@ struct TranscriptScreen: View {
     @ObservedObject var previews: TranscriptPreviews
     /// Нельзя слушать и писать одновременно: аудиосессия одна.
     let isRecording: Bool
-    /// Секунда из пилюли в ответе ассистента: запись открывается сразу на ней.
-    var startAt: TimeInterval?
 
     @State private var document = TranscriptDocument.empty
     @State private var transcriptPath: String?
     @State private var showEditor = false
     @State private var showTopics = false
-    @State private var showAsk = false
     @State private var share: SharePayload?
     @State private var copied = false
     @State private var error: String?
@@ -106,13 +102,11 @@ struct TranscriptScreen: View {
                     .accessibilityHint("Выбор формата: PDF или Markdown")
                     .accessibilityIdentifier("shareMenu")
 
-                    // Пункты разложены по смыслу: спросить и назвать, править,
-                    // отдать наружу, удалить. Единым списком из шести штук
-                    // «Удалить» стояло вплотную к «Отправить в Obsidian».
+                    // Пункты разложены по смыслу: назвать, править, отдать
+                    // наружу или расшифровать заново. Единым списком из шести
+                    // штук «Удалить» стояло вплотную к «Отправить в Obsidian».
                     Menu {
                         Section {
-                            Button("Спросить по этой записи", systemImage: "sparkles") { showAsk = true }
-                                .disabled(document.isEmpty)
                             Button("Придумать заголовок", systemImage: "text.quote") { makeTitle() }
                                 .disabled(document.isEmpty || summaryRunner.running != nil)
                         }
@@ -140,7 +134,7 @@ struct TranscriptScreen: View {
                         Image(systemName: "ellipsis")
                     }
                     .accessibilityLabel("Ещё")
-                    .accessibilityHint("Спросить, править, поделиться, удалить")
+                    .accessibilityHint("Заголовок, правка текста, тема, Obsidian, расшифровка заново")
                     .accessibilityIdentifier("transcriptMenu")
                 }
             }
@@ -155,22 +149,6 @@ struct TranscriptScreen: View {
                     title: title,
                     path: path,
                     suggestion: topics.suggestion(for: document.plain)
-                )
-            }
-            .sheet(isPresented: $showAsk) {
-                // Охват один — переключателя на экране не будет.
-                AssistantThreadScreen(
-                    store: assistant,
-                    scopes: [AskScope(id: path, title: title, entries: [entry])],
-                    initialScopeID: path,
-                    title: { _ in summaries.title(for: path) ?? title },
-                    detail: { _ in summaries.detail(for: path) },
-                    topic: { _ in topics.topic(for: path) },
-                    onOpen: { citation in
-                        guard let start = citation.start else { return }
-                        playback.seek(to: start)
-                        if !playback.isPlaying { playback.play() }
-                    }
                 )
             }
             .sheet(item: $share) { payload in
@@ -204,12 +182,6 @@ struct TranscriptScreen: View {
         .task {
             if let url = try? workspace.fileURL(for: path) { playback.load(url) }
             reload()
-            // Пришли по пилюле из ответа ассистента — открываемся сразу на той
-            // секунде, о которой шла речь, а не в начале записи.
-            if let startAt {
-                playback.seek(to: startAt)
-                playback.play()
-            }
         }
         // Текст появляется по мере готовности: части уже расшифрованы, ждать нечего.
         .onChange(of: transcription.running) { _, _ in reload() }

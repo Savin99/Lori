@@ -140,55 +140,6 @@ struct ModelCatalog: Sendable {
         "gpt-4o-mini-transcribe", "whisper-1",
     ])
 
-    /// Модели ассистента — те же `/models` у любого совместимого сервиса, но
-    /// нужны из них чат-модели, а не распознаватели речи.
-    func chat(key: String) async throws -> [RemoteModel] {
-        var request = URLRequest(url: AssistantSettings.modelsURL)
-        request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
-        request.timeoutInterval = 30
-        let (data, response) = try await session.data(for: request)
-        try APICheck.ensureSuccess(response: response, data: data)
-
-        struct Answer: Decodable {
-            let data: [Item]
-            struct Item: Decodable { let id: String }
-        }
-        guard let answer = try? JSONDecoder().decode(Answer.self, from: data) else {
-            throw TranscriptionError.badResponse("Сервис вернул список моделей в неизвестном виде.")
-        }
-        return Self.chatModels(answer.data.map(\.id))
-    }
-
-    /// Фильтр чёрным списком, а не белым. Белый пришлось бы писать по именам
-    /// («gpt», «deepseek», …), а они меняются чаще, чем выходят сборки, и новая
-    /// модель просто пропала бы из выбора. Выбрасываем то, что отвечать текстом
-    /// точно не умеет.
-    private static let chatSkipped = [
-        "embedding", "whisper", "transcribe", "tts", "dall-e", "image", "vision-preview",
-        "moderation", "realtime", "audio", "search-index", "rerank", "guard",
-    ]
-
-    static func chatModels(_ identifiers: [String]) -> [RemoteModel] {
-        identifiers
-            .filter { id in
-                let lower = id.lowercased()
-                return !chatSkipped.contains(where: lower.contains)
-            }
-            .sorted()
-            .map { RemoteModel(id: $0, title: $0, detail: nil) }
-    }
-
-    /// Что показать до того, как ключ сохранён. Первая строка — значение по
-    /// умолчанию для нового ключа.
-    static let chatSuggestions = [
-        RemoteModel(id: "gpt-6-luna", title: "GPT-6 Luna", detail: "OpenAI, быстрые и недорогие ответы по записям"),
-        RemoteModel(id: "gpt-6-sol", title: "GPT-6 Sol", detail: "OpenAI, сложные вопросы, дороже"),
-        RemoteModel(id: "gpt-5.1", title: "gpt-5.1", detail: "OpenAI, универсальная"),
-        RemoteModel(id: "gpt-5.1-mini", title: "gpt-5.1-mini", detail: "OpenAI, дешевле и быстрее"),
-        RemoteModel(id: "deepseek-chat", title: "deepseek-chat", detail: "DeepSeek, дешёвая"),
-        RemoteModel(id: "deepseek-reasoner", title: "deepseek-reasoner", detail: "DeepSeek, рассуждает дольше"),
-    ]
-
     /// Модели распознавания у ElevenLabs списком **не отдаются**: `GET /v1/models`
     /// отвечает моделями синтеза речи, и признака «умеет распознавать» в ответе
     /// нет вовсе (проверено по `openapi.json` сервиса). Поэтому здесь короткий

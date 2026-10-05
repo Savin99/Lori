@@ -15,31 +15,25 @@ struct AttachedFile: Identifiable, Equatable {
     var name: String { url.lastPathComponent }
 }
 
-/// Охват вопроса: весь архив или одна тема.
-struct ComposerScope: Identifiable, Equatable {
-    let id: String
-    let title: String
-    let count: Int
-}
-
-/// Что сейчас делает панель. Состояний пять, и они взаимоисключающие —
+/// Что сейчас делает панель. Состояний три, и они взаимоисключающие —
 /// перечисление вместо набора флагов не даёт собрать «запись при прикреплённом
 /// файле» и прочие несуществующие сочетания.
+///
+/// Четвёртое, `typing` (набор вопроса ассистенту), ушло вместе с чатом
+/// «Спроси свой архив» 5 октября 2026: владелец им не пользовался — он
+/// расшифровывает и сам относит файл в ИИ.
 enum ComposerState: Equatable {
     case idle
-    case typing
     case recording
     case attached
 }
 
 /// Состояние нижней панели. Живёт в модели, а не в `@State` экрана: панель
-/// переживает открытие листов, а прикреплённый файл — переход в тред.
+/// и прикреплённый файл переживают открытие листов — настроек, выбора движка.
 @MainActor
 final class ComposerModel: ObservableObject {
-    @Published var question = ""
     @Published var attached: [AttachedFile] = []
     @Published var clipboard: ClipboardAudio.Content = .none
-    @Published var scopeID = "all"
     /// Подсказку убрали крестиком — до следующей смены содержимого буфера.
     @Published var clipboardDismissed = false
     private var lastSeenClipboard: ClipboardAudio.Content = .none
@@ -47,14 +41,14 @@ final class ComposerModel: ObservableObject {
     func state(recording: Bool) -> ComposerState {
         if recording { return .recording }
         if !attached.isEmpty { return .attached }
-        if !question.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { return .typing }
         return .idle
     }
 
     /// Показывать ли подсказку про буфер. Она живёт **над** капсулой отдельной
     /// строкой и ничего собой не закрывает: скопированное аудио может лежать в
-    /// буфере часами, и всё это время поле вопроса обязано оставаться на месте.
-    /// Раньше подсказка замещала поле — и спросить ассистента было нечем.
+    /// буфере часами, и всё это время кнопка записи и чипы обязаны оставаться
+    /// на месте. Раньше подсказка замещала собой часть панели (тогда — поле
+    /// вопроса ассистенту), и той частью было не воспользоваться.
     var showsClipboardHint: Bool {
         clipboard == .audio && !clipboardDismissed && attached.isEmpty
     }
@@ -89,7 +83,6 @@ final class ComposerModel: ObservableObject {
     func clear() {
         for file in attached { ImportInbox.forget(file.url) }
         attached = []
-        question = ""
     }
 
     /// Суммарная длительность прикреплённого — из неё считается оценка времени.
@@ -119,16 +112,16 @@ struct ComposerActions {
     var openSettings: () -> Void
     var chooseEngine: () -> Void
     var setMode: (TranscriptionMode) -> Void
-    var ask: () -> Void
     var transcribe: () -> Void
 }
 
-/// Нижняя панель: поле сверху, чипы снизу.
+/// Нижняя панель: записать голос или расшифровать принесённый файл.
 ///
-/// Одна капсула обслуживает три сценария — записать голос, прикрепить файл,
-/// спросить ассистента. Она закреплена у нижнего края и не переезжает: между
-/// состояниями меняется начинка, а не сама панель, поэтому переход читается
-/// как перетекание, а не как подмена вью.
+/// В покое это одна строка: `+`, чип движка, чип режима и круглая кнопка
+/// записи. Прикреплённый файл добавляет сверху карточку с оценкой времени, а
+/// запись схлопывает панель в строку с таймером и волной. Капсула закреплена
+/// у нижнего края и не переезжает: между состояниями меняется начинка, а не
+/// сама панель, поэтому переход читается как перетекание, а не как подмена вью.
 struct ComposerBar: View {
     @ObservedObject var model: ComposerModel
     @ObservedObject var recorder: AudioCaptureStore
@@ -137,15 +130,8 @@ struct ComposerBar: View {
 
     let engine: EngineDescriptor
     let mode: TranscriptionMode?
-    let scopes: [ComposerScope]
-    /// «Спрошу по 5 расшифровкам · 92 тыс. знаков» — считает экран, у него
-    /// под рукой рабочая папка и кэш расшифровок.
-    let contextSummary: String?
     let status: String?
     let actions: ComposerActions
-
-    @AppStorage(AssistantSettings.modelKey) private var assistantModel = ""
-    @FocusState private var focused: Bool
 
     private var state: ComposerState { model.state(recording: recorder.isCapturing) }
 
@@ -167,10 +153,10 @@ struct ComposerBar: View {
             }
 
             VStack(alignment: .leading, spacing: 8) {
-                if state != .recording {
-                    firstRow
+                if state == .attached {
+                    attachedCard
                 }
-                secondRow
+                controlRow
             }
             .padding(.horizontal, 7)
             .padding(.vertical, 7)
@@ -187,39 +173,9 @@ struct ComposerBar: View {
         .padding(.bottom, 10)
         .background(LoriPalette.canvas.opacity(0.94))
         .animation(.easeOut(duration: 0.2), value: state)
-        .onChange(of: recorder.isCapturing) { _, capturing in
-            if capturing { focused = false }
-        }
     }
 
-    // MARK: - Первая строка
-
-    @ViewBuilder
-    private var firstRow: some View {
-        switch state {
-        case .attached:
-            attachedCard
-        default:
-            VStack(alignment: .leading, spacing: 6) {
-                TextField("Спросить записи…", text: $model.question, axis: .vertical)
-                    .accessibilityIdentifier("questionField")
-                    .focused($focused)
-                    .font(LoriFont.body)
-                    .foregroundStyle(LoriPalette.ink)
-                    .lineLimit(1...5)
-                    .padding(.horizontal, 10)
-                    .padding(.top, 6)
-
-                if state == .typing, let contextSummary {
-                    Text(contextSummary)
-                        .font(LoriFont.small)
-                        .foregroundStyle(LoriPalette.muted)
-                        .padding(.horizontal, 10)
-                        .accessibilityIdentifier("contextSummary")
-                }
-            }
-        }
-    }
+    // MARK: - Прикреплённый файл
 
     private var attachedCard: some View {
         HStack(alignment: .top, spacing: 10) {
@@ -301,10 +257,13 @@ struct ComposerBar: View {
         .accessibilityIdentifier("clipboardHint")
     }
 
-    // MARK: - Вторая строка
+    // MARK: - Строка управления
 
+    /// Строка, которая есть всегда: в покое она и есть вся панель, при
+    /// прикреплённом файле стоит под его карточкой, во время записи
+    /// превращается в таймер с волной.
     @ViewBuilder
-    private var secondRow: some View {
+    private var controlRow: some View {
         if state == .recording {
             HStack(spacing: 6) {
                 RecordingRow(
@@ -318,18 +277,13 @@ struct ComposerBar: View {
             HStack(spacing: 6) {
                 plusMenu
 
-                if state == .typing {
-                    assistantModelChip
-                    scopeChip
-                } else {
-                    EngineChip(
-                        engine: engine,
-                        readiness: engines.readiness(of: engine.kind),
-                        action: actions.chooseEngine
-                    )
-                    if let mode {
-                        ModeChip(engine: engine, current: mode, select: actions.setMode)
-                    }
+                EngineChip(
+                    engine: engine,
+                    readiness: engines.readiness(of: engine.kind),
+                    action: actions.chooseEngine
+                )
+                if let mode {
+                    ModeChip(engine: engine, current: mode, select: actions.setMode)
                 }
 
                 Spacer(minLength: 0)
@@ -373,98 +327,6 @@ struct ComposerBar: View {
         .accessibilityIdentifier("importButton")
     }
 
-    private var assistantModelChip: some View {
-        Menu {
-            ForEach(assistantChoices, id: \.self) { name in
-                Button {
-                    assistantModel = name
-                } label: {
-                    if name == currentAssistantModel {
-                        Label(name, systemImage: "checkmark")
-                    } else {
-                        Text(name)
-                    }
-                }
-            }
-        } label: {
-            chipLabel(icon: "cloud", text: currentAssistantModel)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .accessibilityIdentifier("assistantModelChip")
-        .accessibilityLabel("Модель ассистента: \(currentAssistantModel)")
-    }
-
-    private var currentAssistantModel: String {
-        assistantModel.isEmpty ? AssistantSettings.model : assistantModel
-    }
-
-    /// Две-три модели, не список «ещё моделей»: выбор здесь — это выбор цены
-    /// и скорости, а не каталог сервиса. Полный список живёт в настройках.
-    private var assistantChoices: [String] {
-        var names = [currentAssistantModel]
-        for suggestion in ModelCatalog.chatSuggestions.map(\.id) where !names.contains(suggestion) {
-            names.append(suggestion)
-            if names.count == 3 { break }
-        }
-        return names
-    }
-
-    private var scopeChip: some View {
-        Menu {
-            ForEach(scopes) { scope in
-                Button {
-                    model.scopeID = scope.id
-                } label: {
-                    if scope.id == currentScope?.id {
-                        Label(scope.title, systemImage: "checkmark")
-                    } else {
-                        Text(scope.title)
-                    }
-                }
-            }
-        } label: {
-            chipLabel(icon: "doc.text", text: scopeTitle)
-        }
-        .fixedSize(horizontal: false, vertical: true)
-        .accessibilityIdentifier("scopeChip")
-        .accessibilityLabel("Охват вопроса: \(scopeTitle)")
-    }
-
-    private var currentScope: ComposerScope? {
-        scopes.first { $0.id == model.scopeID } ?? scopes.first
-    }
-
-    /// Весь архив показывается числом записей, тема — своим названием:
-    /// «5 записей» отвечает на вопрос «сколько», «Работа» — на вопрос «что».
-    private var scopeTitle: String {
-        guard let scope = currentScope else { return "Нет записей" }
-        guard scope.id == "all" else { return scope.title }
-        return LoriFormat.plural(scope.count, one: "запись", few: "записи", many: "записей")
-    }
-
-    /// Чип рисуется на 32pt, а нажимается на 44pt — как круглые кнопки рядом.
-    /// Крупная пилюля перетягивала на себя внимание с текста вопроса, ради
-    /// которого панель и существует.
-    private func chipLabel(icon: String, text: String) -> some View {
-        HStack(spacing: 4) {
-            Image(systemName: icon)
-                .font(LoriFont.tiny)
-            Text(text)
-                .font(LoriFont.small)
-                .lineLimit(1)
-                .truncationMode(.tail)
-            Image(systemName: "chevron.down")
-                .font(LoriFont.tiny.weight(.semibold))
-                .opacity(0.45)
-        }
-        .foregroundStyle(LoriPalette.ink)
-        .padding(.horizontal, 10)
-        .frame(height: 32)
-        .background(LoriPalette.bubble, in: Capsule())
-        .frame(height: 44)
-        .contentShape(Capsule())
-    }
-
     // MARK: - Круглая кнопка справа
 
     /// Одна кнопка на все состояния: микрофон, стрелка, стоп. Именно поэтому
@@ -487,12 +349,13 @@ struct ComposerBar: View {
         .accessibilityIdentifier(roundIdentifier)
     }
 
+    // Перечисления без `default`: новое состояние панели должно остановить
+    // сборку здесь, а не молча достаться микрофону.
     private var roundSymbol: String {
         switch state {
         case .recording: "stop.fill"
-        case .typing: "arrow.up"
         case .attached: "arrow.up"
-        default: "mic.fill"
+        case .idle: "mic.fill"
         }
     }
 
@@ -503,27 +366,24 @@ struct ComposerBar: View {
     private var roundLabel: String {
         switch state {
         case .recording: "Остановить запись"
-        case .typing: "Спросить"
         case .attached: "Расшифровать"
-        default: "Записать"
+        case .idle: "Записать"
         }
     }
 
     private var roundIdentifier: String {
         switch state {
         case .recording: "stopButton"
-        case .typing: "sendButton"
         case .attached: "transcribeButton"
-        default: "recordButton"
+        case .idle: "recordButton"
         }
     }
 
     private func roundAction() {
         switch state {
         case .recording: actions.stop()
-        case .typing: actions.ask()
         case .attached: actions.transcribe()
-        default: actions.record()
+        case .idle: actions.record()
         }
     }
 }
@@ -601,132 +461,5 @@ struct LiveWave: View {
         .frame(height: 20)
         .frame(maxWidth: .infinity)
         .accessibilityHidden(true)
-    }
-}
-
-/// Композер треда: та же капсула, что на главном, но без микрофона —
-/// в разговоре с ассистентом записывать нечего.
-///
-/// Кнопка отправки без ключа не «серая и молчит»: на её месте прямо написано,
-/// чего не хватает. Мелкая строка выше кнопки этот вопрос не закрывала —
-/// человек жал на неактивную кнопку и не понимал, почему ничего не происходит.
-struct ThreadComposer: View {
-    @Binding var text: String
-    @FocusState.Binding var focused: Bool
-
-    let model: String
-    let models: [String]
-    let hasKey: Bool
-    let busy: Bool
-    let selectModel: (String) -> Void
-    let openSettings: () -> Void
-    let send: () -> Void
-
-    private var ready: Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !busy
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            TextField("Спросить…", text: $text, axis: .vertical)
-                .accessibilityIdentifier("threadField")
-                .focused($focused)
-                .font(LoriFont.body)
-                .foregroundStyle(LoriPalette.ink)
-                .lineLimit(1...5)
-                .padding(.horizontal, 10)
-                .padding(.top, 6)
-
-            HStack(spacing: 6) {
-                modelChip
-                Spacer(minLength: 0)
-                if hasKey {
-                    sendButton
-                } else {
-                    missingKey
-                }
-            }
-        }
-        .padding(.horizontal, 7)
-        .padding(.vertical, 7)
-        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: 26, style: .continuous)
-                .stroke(LoriPalette.line, lineWidth: 1)
-        )
-        .padding(.horizontal, 20)
-        .padding(.top, 8)
-        .padding(.bottom, 10)
-        .background(LoriPalette.canvas.opacity(0.94))
-    }
-
-    /// Две-три модели, а не каталог сервиса: здесь выбирают цену и скорость,
-    /// а полный список живёт в настройках.
-    private var modelChip: some View {
-        Menu {
-            ForEach(models, id: \.self) { name in
-                Button {
-                    selectModel(name)
-                } label: {
-                    if name == model {
-                        Label(name, systemImage: "checkmark")
-                    } else {
-                        Text(name)
-                    }
-                }
-            }
-        } label: {
-            HStack(spacing: 4) {
-                Image(systemName: "cloud")
-                    .font(LoriFont.tiny)
-                Text(model)
-                    .font(LoriFont.small)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Image(systemName: "chevron.down")
-                    .font(LoriFont.tiny.weight(.semibold))
-                    .opacity(0.45)
-            }
-            .foregroundStyle(LoriPalette.ink)
-            .padding(.horizontal, 10)
-            .frame(height: 32)
-            .background(LoriPalette.bubble, in: Capsule())
-            .frame(height: 44)
-            .contentShape(Capsule())
-        }
-        .accessibilityIdentifier("threadModelChip")
-        .accessibilityLabel("Модель ассистента: \(model)")
-    }
-
-    private var sendButton: some View {
-        Button(action: send) {
-            Image(systemName: "arrow.up")
-                .font(LoriFont.control)
-                .foregroundStyle(LoriPalette.onInk)
-                .frame(width: 36, height: 36)
-                .background(LoriPalette.ink.opacity(ready ? 0.9 : 0.35), in: Circle())
-                .frame(width: 44, height: 44)
-                .contentShape(Circle())
-        }
-        .buttonStyle(.plain)
-        .fixedSize()
-        .disabled(!ready)
-        .accessibilityLabel("Спросить")
-        .accessibilityIdentifier("threadSendButton")
-    }
-
-    private var missingKey: some View {
-        Button(action: openSettings) {
-            Text("Добавьте ключ ассистента")
-                .font(LoriFont.small.weight(.semibold))
-                .foregroundStyle(LoriPalette.warn)
-                .padding(.horizontal, 12)
-                .frame(height: 32)
-                .background(LoriPalette.warn.opacity(0.14), in: Capsule())
-                .frame(height: 44)
-                .contentShape(Capsule())
-        }
-        .buttonStyle(.plain)
-        .accessibilityIdentifier("threadNeedsKey")
     }
 }
