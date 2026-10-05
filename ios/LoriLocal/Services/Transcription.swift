@@ -570,6 +570,9 @@ final class TranscriptionService: ObservableObject {
         configurations = InterruptedRecords.jobs(from: interruptedStore)
         inFlight = InterruptedRecords.load(from: interruptedStore)
         interrupted = Set(inFlight.keys)
+        // Ошибки прошлых попыток тоже: после перезапуска запись, на которой расшифровка
+        // не вышла, обязана выглядеть как «Ошибка», а не как нетронутая.
+        failed = InterruptedRecords.failures(from: interruptedStore)
     }
 
     func engine(for kind: TranscriptionEngineKind) -> any Transcribing {
@@ -788,6 +791,7 @@ final class TranscriptionService: ObservableObject {
     /// Продолжаем исходное задание с зафиксированными настройками. Новые облачные
     /// задания уже запущены человеком; старые записи без снимка ждут ручного повтора.
     func resumeInterrupted(in workspace: WorkspaceStore) {
+        pruneFailures(in: workspace)
         guard !inFlight.isEmpty else { return }
         for path in resumeOrder() {
             guard let kind = inFlight[path] else { continue }
@@ -829,6 +833,31 @@ final class TranscriptionService: ObservableObject {
         interrupted.remove(path)
         inFlight.removeValue(forKey: path)
         configurations.removeValue(forKey: path)
+        failed.removeValue(forKey: path)
+        _ = persistJobs()
+    }
+
+    /// Запись удалили (или она пропала, пока приложение не работало): ошибка её
+    /// последней попытки больше никому не нужна. Вместе с ней уходят очередь и «Прервано».
+    ///
+    /// Ошибка сохраняется до тех пор, пока запись не поставят заново или не удалят, —
+    /// других поводов забыть её нет. Поэтому экран, удаляющий запись, обязан сказать
+    /// об этом здесь, как говорит `topics`, `summaries` и остальным хранилищам.
+    func forget(_ relativePath: String) {
+        let hadFailure = failed.removeValue(forKey: relativePath) != nil
+        // `cancel` сам сохраняет очередь, если запись в ней была, — уже без ошибки; если
+        // записи в очереди не было, а ошибка была, сохранить нужно отдельно.
+        cancel(relativePath)
+        if hadFailure { _ = persistJobs() }
+    }
+
+    /// Ошибки записей, которых больше нет на диске. Удаление через приложение
+    /// (`forget`) их снимает сразу, а вот файл, убранный через «Файлы», узнаётся только
+    /// по тому, что его нет, — и проверяется это там, где известна рабочая папка.
+    private func pruneFailures(in workspace: WorkspaceStore) {
+        let gone = failed.keys.filter { (try? workspace.fileURL(for: $0)) == nil }
+        guard !gone.isEmpty else { return }
+        for path in gone { failed.removeValue(forKey: path) }
         _ = persistJobs()
     }
 
@@ -837,7 +866,7 @@ final class TranscriptionService: ObservableObject {
         do {
             let all = configurations.filter { inFlight[$0.key] != nil }
             let legacy = inFlight.filter { all[$0.key] == nil }
-            try InterruptedRecords.saveJobs(all, legacy: legacy, to: interruptedStore)
+            try InterruptedRecords.saveJobs(all, legacy: legacy, failures: failed, to: interruptedStore)
             return true
         } catch {
             lastError = "Не удалось сохранить очередь. Освободи место и повтори."

@@ -16,6 +16,9 @@ import Foundation
 /// Список лежит **файлом**, а не в `UserDefaults`: настройки доживают до диска только
 /// при уходе в фон, и при жёстком завершении процесса последняя запись пропадает — то
 /// есть ровно в том случае, ради которого этот список и заведён.
+///
+/// В том же файле лежат и ошибки последних попыток (`failures`): они не про обрыв, но
+/// нужны по той же причине — пережить перезапуск, который память не переживает.
 enum InterruptedRecords {
     static var url: URL {
         let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -27,6 +30,12 @@ enum InterruptedRecords {
     private struct Archive: Codable {
         let jobs: [String: TranscriptionJob]
         let legacy: [String: TranscriptionEngineKind]
+        /// Записи, чья последняя попытка кончилась ошибкой, — путь → текст для человека.
+        ///
+        /// Поле необязательное, и это не вежливость: файлы прежних версий его не знают, а
+        /// читаться обязаны, и наоборот — старая сборка, открыв новый файл, просто пропустит
+        /// лишний ключ. Без ошибок ключ вовсе не пишется, так что файл остаётся таким же, как был.
+        let failures: [String: String]?
     }
 
     /// Путь записи → движок, которым её считали.
@@ -42,15 +51,33 @@ enum InterruptedRecords {
         return stored.compactMapValues(TranscriptionEngineKind.init(rawValue:))
     }
 
+    /// Путь записи → текст последней ошибки.
+    ///
+    /// Ошибка живёт в том же файле, что и очередь, а не только в памяти: после
+    /// перезапуска запись без неё выглядела нетронутой — «Без расшифровки», хотя в
+    /// прошлый раз расшифровка не вышла, и человек не знал, что пробовать надо иначе.
+    /// Старые форматы файла ошибок не хранили вовсе — для них пусто.
+    static func failures(from url: URL) -> [String: String] {
+        guard let data = try? Data(contentsOf: url),
+              let archive = try? JSONDecoder().decode(Archive.self, from: data) else { return [:] }
+        return archive.failures ?? [:]
+    }
+
     static func jobs(from url: URL) -> [String: TranscriptionJob] {
         guard let data = try? Data(contentsOf: url) else { return [:] }
         if let archive = try? JSONDecoder().decode(Archive.self, from: data) { return archive.jobs }
         return (try? JSONDecoder().decode([String: TranscriptionJob].self, from: data)) ?? [:]
     }
 
-    static func saveJobs(_ jobs: [String: TranscriptionJob], legacy: [String: TranscriptionEngineKind] = [:], to url: URL) throws {
+    static func saveJobs(
+        _ jobs: [String: TranscriptionJob],
+        legacy: [String: TranscriptionEngineKind] = [:],
+        failures: [String: String] = [:],
+        to url: URL
+    ) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        try JSONEncoder().encode(Archive(jobs: jobs, legacy: legacy)).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
+        let archive = Archive(jobs: jobs, legacy: legacy, failures: failures.isEmpty ? nil : failures)
+        try JSONEncoder().encode(archive).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 
     /// Пустой список стирает файл: пустой JSON в Application Support — это мусор,
