@@ -608,7 +608,8 @@ final class TranscriptionService: ObservableObject {
     /// задания уже запущены человеком; старые записи без снимка ждут ручного повтора.
     func resumeInterrupted(in workspace: WorkspaceStore) {
         guard !inFlight.isEmpty else { return }
-        for (path, kind) in inFlight.sorted(by: { $0.key < $1.key }) {
+        for path in resumeOrder() {
+            guard let kind = inFlight[path] else { continue }
             guard let entry = try? workspace.entry(at: path) else {
                 // Записи могло уже не быть — её удалили, пока приложение не работало.
                 forgetCompletely(path)
@@ -620,6 +621,26 @@ final class TranscriptionService: ObservableObject {
             guard !kind.leavesDevice || configurations[path] != nil else { continue }
             Journal.append("прерванная расшифровка «\(path)» поставлена заново движком \(kind.rawValue)")
             enqueue(entry, in: workspace, using: kind)
+        }
+    }
+
+    /// В каком порядке поднимать прерванное: в том, в каком записи добавляли.
+    ///
+    /// Раньше шло по алфавиту пути, и пять файлов, поставленных в порядке «Планёрка,
+    /// Интервью, Звонок», после перезапуска считались как «Звонок, Интервью, Планёрка»:
+    /// очередь, начатая в одном порядке, заканчивалась в другом. Порядок добавления
+    /// записан в снимке задания — `TranscriptionJob.created` ставится в момент
+    /// `enqueue`, и повторная постановка тем же движком снимок не перезаписывает, так
+    /// что порядок переживает и несколько перезапусков подряд.
+    ///
+    /// Записи без снимка (файл прежней версии, где хранился только движок) считать
+    /// не по чему: они идут первыми и между собой — по пути, как и раньше. Равные
+    /// даты разводятся тем же путём, чтобы порядок не зависел от словаря.
+    private func resumeOrder() -> [String] {
+        inFlight.keys.sorted { lhs, rhs in
+            let left = configurations[lhs]?.created ?? .distantPast
+            let right = configurations[rhs]?.created ?? .distantPast
+            return left == right ? lhs < rhs : left < right
         }
     }
 

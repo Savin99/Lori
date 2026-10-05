@@ -147,6 +147,11 @@ final class TranscriptionConcurrencyTests: XCTestCase {
         await gate.openGate()
         await service.waitForDrain()
         XCTAssertEqual(try workspace.entries(at: "Transcripts").count, 3, "очередь обязана дойти до конца")
+        // Не только «по одной», но и «по очереди»: движок видит записи ровно в том
+        // порядке, в каком их поставили. Счёт «две из трёх сделаны» без этого
+        // выполнился бы и при порядке наоборот.
+        let order = await gate.arrivals()
+        XCTAssertEqual(order, ["Первая.m4a", "Вторая.m4a", "Третья.m4a"], "очередь идёт в порядке постановки")
     }
 
     /// Настройка осталась и работает: два разных аудио считаются одновременно.
