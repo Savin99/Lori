@@ -1,6 +1,7 @@
 import Foundation
 import MLX
 import MLXLMCommon
+import UIKit
 
 /// Заголовок и краткое описание расшифровки, посчитанные на самом телефоне.
 ///
@@ -94,6 +95,18 @@ actor Summarizer {
             // её на пути в фон незачем: см. отмену ниже.
             try Task.checkCancellation()
             let container = try await loaded()
+            // Загрузка весов — секунды работы на графическом процессоре, и
+            // `willResignActive` мог прийти посреди неё. Отмена задачи сюда
+            // доходит, но состояние приложения проверяется ещё и напрямую: счёт,
+            // начатый вне переднего плана, MLX обрывает `abort()` (крэш 2 сентября).
+            //
+            // Остаточный риск: саму загрузку (`loadModel` → `eval`) прервать
+            // посередине нечем. Если приложение уйдёт в фон за эти секунды, команды,
+            // уже отданные графическому процессору, могут вернуться с ошибкой, и
+            // MLX упадёт так же. Если такие падения появятся в крэш-логах, следующий
+            // шаг — грузить веса на процессоре (`Device.cpu`) или не начинать
+            // загрузку, пока идёт фоновая расшифровка.
+            try await Self.ensureForeground()
             return try await container.perform { context in
             var parameters = GenerateParameters()
             // Потолок с запасом на размышления. Ждать его целиком не придётся:
@@ -106,7 +119,8 @@ actor Summarizer {
             let input = try await context.processor.prepare(input: UserInput(chat: [
                 .system(instructions), .user(prompt)
             ]))
-            try Task.checkCancellation()
+            // Последняя проверка перед первым шагом генерации.
+            try await Summarizer.MLXBackend.ensureForeground()
             let result: GenerateResult = try MLXLMCommon.generate(
                 input: input, parameters: parameters, context: context
             ) { (tokens: [Int]) -> GenerateDisposition in
@@ -117,6 +131,14 @@ actor Summarizer {
             return result.output
             }
             #endif
+        }
+
+        /// Счёт на графическом процессоре — только на переднем плане. Иначе работа
+        /// бросается так же, как при отмене: заявка вернётся в очередь заголовков.
+        static func ensureForeground() async throws {
+            try Task.checkCancellation()
+            let active = await MainActor.run { UIApplication.shared.applicationState == .active }
+            guard active else { throw CancellationError() }
         }
 
         private func loaded() async throws -> ModelContainer {
