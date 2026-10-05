@@ -32,7 +32,10 @@ struct LoriLocalApp: App {
 
         // Сервис и его фоновое сопровождение знают друг о друге: `unowned` в одну
         // сторону, `weak` в другую — цикла нет, а собрать их можно только здесь.
-        let transcription = TranscriptionService(interruptedStore: RecoveryProbe.enabled ? RecoveryProbe.queue : InterruptedRecords.url)
+        let transcription = TranscriptionService(
+            engines: Self.engines(),
+            interruptedStore: RecoveryProbe.enabled ? RecoveryProbe.queue : InterruptedRecords.url
+        )
         let runway = TranscriptionRunway(service: transcription)
         transcription.runway = runway
         runner.connect(to: workspace, transcription: transcription)
@@ -57,6 +60,18 @@ struct LoriLocalApp: App {
 
     /// Unit-host не запускает задания пользовательского архива параллельно тестам.
     private var isUnitTestHost: Bool { NSClassFromString("XCTestCase") != nil }
+
+    /// Движки расшифровки. nil — настоящие. Проверочный движок QA подставляется
+    /// только в DEBUG-сборке Lori QA и только по аргументу запуска (`QAStubEngine`);
+    /// в Release этой ветки нет в коде вовсе.
+    private static func engines() -> [TranscriptionEngineKind: any Transcribing]? {
+        #if DEBUG
+        if QAStubEngine.enabled {
+            return QAStubEngine.engines(seconds: QAStubEngine.seconds(in: ProcessInfo.processInfo.arguments))
+        }
+        #endif
+        return nil
+    }
 
     var body: some Scene {
         WindowGroup {
