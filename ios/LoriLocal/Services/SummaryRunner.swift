@@ -13,7 +13,15 @@ import UIKit
 @MainActor
 final class SummaryRunner: ObservableObject {
     @Published private(set) var running: String?
-    @Published var failure: String?
+    /// Последняя ошибка заголовка. Общая на все записи — поэтому рядом
+    /// `failurePath`: экран записи показывает только свою, а не чужую.
+    @Published var failure: String? {
+        didSet { if failure == nil { failurePath = nil } }
+    }
+    /// Чья это ошибка: путь записи или nil — ошибка не про запись (очередь не
+    /// сохранилась). Ставится раньше `failure`, чтобы тот, кто следит за
+    /// `failure`, уже видел, чья она.
+    @Published private(set) var failurePath: String?
     @Published private(set) var waitingReason: String?
     @Published private(set) var pendingCount = 0
     /// Записи с расшифровкой, которым ещё нужен заголовок, но в очередь они не
@@ -391,7 +399,7 @@ final class SummaryRunner: ObservableObject {
             try FileManager.default.createDirectory(at: queueURL.deletingLastPathComponent(), withIntermediateDirectories: true)
             try JSONEncoder().encode(postponed).write(to: queueURL, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
         } catch {
-            failure = "Не удалось сохранить очередь заголовков: \(error.localizedDescription)"
+            fail("Не удалось сохранить очередь заголовков: \(error.localizedDescription)", for: nil)
             Diagnostics.fault("заголовки: очередь не сохранилась: \(error.localizedDescription)")
         }
     }
@@ -471,14 +479,14 @@ final class SummaryRunner: ObservableObject {
         if Task.isCancelled { return .cancelled }
         guard let source else {
             note("заголовок: нет расшифровки — «\(name)»")
-            if request.force { failure = "У записи нет расшифровки — заголовок придумывать не из чего." }
+            if request.force { fail("У записи нет расшифровки — заголовок придумывать не из чего.", for: request.path) }
             return .dropped
         }
         guard source.characters > Self.minimumCharacters else {
             tooShort.insert(request.path)
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(name)»")
             dropStaleAnswer(for: request.path)
-            if request.force { failure = "В записи слишком мало текста, чтобы придумать заголовок." }
+            if request.force { fail("В записи слишком мало текста, чтобы придумать заголовок.", for: request.path) }
             return .dropped
         }
         // Пока читался файл, приложение могло уйти в фон — модель там гасит процесс.
@@ -526,7 +534,7 @@ final class SummaryRunner: ObservableObject {
             waitingReason = "Заголовки продолжатся после возвращения в Lori"
         case .failed(let message):
             failedThisPass.insert(request.path)
-            failure = message
+            fail(message, for: request.path)
             waitingReason = "Не удалось создать заголовок. Повторю при возвращении в Lori"
             Diagnostics.fault("заголовок: «\(Self.name(of: request.path))» — \(message)")
         }
@@ -538,6 +546,11 @@ final class SummaryRunner: ObservableObject {
     }
 
     // MARK: - Вспомогательное
+
+    private func fail(_ message: String, for path: String?) {
+        failurePath = path
+        failure = message
+    }
 
     /// Текст записи стал коротким или пустым: прежний ответ модели написан по
     /// другому тексту и врал бы на карточке (`SummaryStore.dropGenerated`).

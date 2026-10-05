@@ -628,6 +628,33 @@ final class SummaryRunnerTests: XCTestCase {
         XCTAssertNil(store.entry(for: "a.m4a"))
     }
 
+    // MARK: - Чья ошибка
+
+    /// Ошибка общая на все записи, поэтому у неё есть путь: экран записи
+    /// показывает только свою, а не ошибку соседней записи из очереди.
+    func testFailureNamesItsRecord() async throws {
+        let runner = SummaryRunner(
+            models: StubModels(installed: [.light]), store: store,
+            availableMemory: { 8_000_000_000 }, isForeground: { true },
+            summarize: { _, _, text in
+                if text.hasPrefix("Первая") { throw Summarizer.Failure.emptyAnswer }
+                return .init(title: "Заголовок", detail: "Описание")
+            }
+        )
+
+        runner.summarize(path: "first.m4a", text: "Первая " + Self.transcript)
+        await waitUntil { runner.failure != nil && runner.running == nil }
+
+        XCTAssertEqual(runner.failurePath, "first.m4a")
+        XCTAssertNotNil(runner.failure)
+
+        _ = runner.requestTitle(for: "second.m4a", text: "Вторая " + Self.transcript)
+        XCTAssertNil(runner.failure, "новая просьба начинается без старой ошибки")
+        XCTAssertNil(runner.failurePath)
+        await waitUntil { self.store.title(for: "second.m4a") != nil && runner.running == nil }
+        XCTAssertNotEqual(runner.failurePath, "second.m4a", "удача ошибкой не помечается")
+    }
+
     // MARK: - Файл заголовков не читается
 
     /// Пока файл заголовков не прочитан (на телефоне — до первой разблокировки),
