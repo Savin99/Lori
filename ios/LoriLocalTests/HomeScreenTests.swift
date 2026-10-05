@@ -103,7 +103,7 @@ final class RecordStatusTests: XCTestCase {
     /// На карточке — первая фраза ошибки; что делать — на экране записи.
     func testFailureShowsShortReasonAndRetry() throws {
         let status = try XCTUnwrap(RecordStatus.make(
-            state: .failed("Ключ ElevenLabs не сохранён. Настройки → «ElevenLabs» → вставь ключ."),
+            state: .failed("Ключ ElevenLabs не сохранён. Настройки → Движок → Провайдер → вставь ключ в поле «Ключ API»."),
             hasTranscript: true,
             fraction: nil,
             remaining: nil

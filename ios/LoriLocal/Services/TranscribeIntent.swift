@@ -10,7 +10,7 @@ import AppIntents
 struct TranscribeInLoriIntent: AppIntent {
     static let title: LocalizedStringResource = "Расшифровать в Lori"
     static let description = IntentDescription(
-        "Открывает Lori с прикреплённой записью. Движок и запуск — за вами."
+        "Открывает Lori с прикреплённой записью. Движок и запуск — за тобой."
     )
     /// Без этого действие выполнялось бы в фоне, а прикреплённый файл ждал бы
     /// в панели, которую никто не открыл.

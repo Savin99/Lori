@@ -130,7 +130,7 @@ final class SummaryRunner: ObservableObject {
         var message: String {
             switch self {
             case .noWeights: "Модель заголовков ещё не скачана. Настройки → Заголовки → «Скачать»."
-            case .notEnoughMemory: "Сейчас мало свободной памяти для модели заголовков. Закройте пару приложений и попробуйте снова."
+            case .notEnoughMemory: "Сейчас мало свободной памяти для модели заголовков. Закрой пару приложений и попробуй снова."
             }
         }
     }
@@ -226,7 +226,7 @@ final class SummaryRunner: ObservableObject {
         let source = text.map(Source.init(text:))
         if let source, source.characters <= Self.minimumCharacters { return .tooShort }
         guard store.allowGeneratedTitle(for: path) else {
-            return .failed("Не удалось сохранить настройку заголовка. Попробуйте ещё раз.")
+            return .failed("Не удалось сохранить настройку заголовка. Попробуй ещё раз.")
         }
         tooShort.remove(path)
         enqueue(path, force: true, source: source)

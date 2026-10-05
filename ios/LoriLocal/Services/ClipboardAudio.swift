@@ -377,7 +377,7 @@ enum ClipboardAudioError: LocalizedError, Equatable {
         case let .notAudio(types):
             "В буфере обмена нет аудио.\(Self.listed(types))"
         case let .unreadable(types):
-            "Аудио из буфера забрать не удалось — приложение отдаёт его только по ссылке. Сохраните запись в «Файлы» и добавьте через «Аудио из Файлов».\(Self.listed(types))"
+            "Аудио из буфера забрать не удалось — приложение отдаёт его только по ссылке. Сохрани запись в «Файлы» и добавь через «Аудио из Файлов».\(Self.listed(types))"
         }
     }
 
