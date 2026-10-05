@@ -22,10 +22,11 @@ struct TranscriptScreen: View {
     @EnvironmentObject private var speed: TranscriptionSpeed
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
+    @Environment(\.dynamicTypeSize) private var typeSize
     /// Плеер лежит в `@State`, а не в `@StateObject`: позиция публикуется каждые
     /// 60 мс, и экран, подписанный на неё целиком, пересобирал бы шапку, блок
     /// состояния и сотни реплик на каждом тике. На плеер подписана только его
-    /// карточка (`PlayerCard`), а длительность приходит сюда одним значением.
+    /// карточка (`PlayerCard`), а длительность экран берёт один раз при открытии.
     @State private var playback = AudioPlaybackStore()
 
     let entry: WorkspaceEntry
@@ -167,7 +168,6 @@ struct TranscriptScreen: View {
         // Переименование меняет путь: экран переезжает за записью, а не играет
         // файл, которого уже нет.
         .onChange(of: path) { _, _ in open() }
-        .onReceive(playback.$duration) { audioDuration = $0 }
         .onChange(of: summaryRunner.isQueued(path)) { _, queued in
             if !queued { titleRequested = false }
         }
@@ -417,8 +417,9 @@ struct TranscriptScreen: View {
     /// коллекций: между «вышла из очереди» и «вошла в работу» у записи иначе не
     /// было ни одной отметки, и экран на секунды показывал «Расшифровки пока нет».
     ///
-    /// Ошибка здесь же, строкой, а не вторым алертом: алерт про неё уже показывает
-    /// список, а на экране записи важно, что она висит рядом с кнопкой «Повторить».
+    /// Ошибка здесь же, строкой, а не вторым алертом: алерт про неё показывает
+    /// список (`ContentView`), а на экране записи важно, что она висит рядом с
+    /// кнопкой «Повторить».
     private var status: Status? {
         switch transcription.state(for: path) {
         case let .queued(position, waitsForMemory):
@@ -712,8 +713,9 @@ struct TranscriptScreen: View {
     ///
     /// Раньше кнопкой была вся строка, и текст нельзя было выделить: долгое
     /// нажатие уходило в кнопку. Теперь перематывает таймкод, а реплику можно
-    /// выделить и скопировать кусок — часто нужна одна фраза, а не вся запись.
+    /// выделить и скопировать — часто нужна одна реплика, а не вся запись.
     /// `column` — ширина колонки времени; nil — таймкодов в расшифровке нет вовсе.
+    @ViewBuilder
     private func row(
         start: TimeInterval?,
         approximate: Bool,
@@ -721,30 +723,50 @@ struct TranscriptScreen: View {
         text: String,
         column: CGFloat?
     ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 12) {
-            if let column {
-                if let start {
-                    timeButton(start, approximate: approximate, width: column)
-                } else {
-                    // Продолжение реплики: колонка времени пустая, но она есть.
-                    // Без неё абзацы одной реплики разъезжаются по левому краю, и
-                    // читается это как разные реплики.
-                    Color.clear.frame(width: column, height: 1)
+        if typeSize.isAccessibilitySize {
+            // На самых крупных размерах три колонки в строку оставляли тексту
+            // одно слово на строку. Время и говорящий встают над репликой, а
+            // текст получает всю ширину.
+            VStack(alignment: .leading, spacing: 4) {
+                if start != nil || speaker != nil {
+                    HStack(alignment: .firstTextBaseline, spacing: 10) {
+                        if let start { timeButton(start, approximate: approximate, width: nil) }
+                        if let speaker { speakerDot(speaker) }
+                    }
                 }
+                replica(text)
             }
-            if let speaker { speakerDot(speaker) }
-            Text(text)
-                .font(LoriFont.body)
-                .foregroundStyle(LoriPalette.ink)
-                .multilineTextAlignment(.leading)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .textSelection(.enabled)
+        } else {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                if let column {
+                    if let start {
+                        timeButton(start, approximate: approximate, width: column)
+                    } else {
+                        // Продолжение реплики: колонка времени пустая, но она есть.
+                        // Без неё абзацы одной реплики разъезжаются по левому краю,
+                        // и читается это как разные реплики.
+                        Color.clear.frame(width: column, height: 1)
+                    }
+                }
+                if let speaker { speakerDot(speaker) }
+                replica(text)
+            }
         }
+    }
+
+    private func replica(_ text: String) -> some View {
+        Text(text)
+            .font(LoriFont.body)
+            .foregroundStyle(LoriPalette.ink)
+            .multilineTextAlignment(.leading)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .textSelection(.enabled)
     }
 
     /// «≈» — время это границы отправленного куска, а не реплики: выдать его за
     /// таймкод речи значило бы соврать.
-    private func timeButton(_ start: TimeInterval, approximate: Bool, width: CGFloat) -> some View {
+    /// `width` — ширина колонки; nil — по самому времени (время над репликой).
+    private func timeButton(_ start: TimeInterval, approximate: Bool, width: CGFloat?) -> some View {
         let stamp = RecordClock.time(start)
         return Button {
             guard !isRecording else { return }
@@ -898,6 +920,9 @@ struct TranscriptScreen: View {
 
     private func open() {
         if let url = try? workspace.fileURL(for: path) { playback.load(url) }
+        // `load` узнаёт длительность сразу, без подготовки звука: этого числа
+        // экрану хватает, а подписываться на плеер ради него незачем.
+        audioDuration = playback.duration
         previews.load(entry, in: workspace)
         reload()
     }
@@ -1403,7 +1428,9 @@ struct SpeakerDot: View {
             .font(LoriFont.tiny.weight(.semibold))
             .foregroundStyle(LoriPalette.onInk)
             .lineLimit(1)
-            .padding(.horizontal, name == nil ? 0 : 8)
+            // Поля и у метки: на крупном шрифте «S2» шире кружка в 26 pt и без
+            // них упиралась бы в его край.
+            .padding(.horizontal, name == nil ? 4 : 8)
             .frame(minWidth: 26, minHeight: 26)
             .background(color, in: Capsule())
             .accessibilityLabel("Говорящий \(name ?? label)")
