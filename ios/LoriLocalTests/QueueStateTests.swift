@@ -491,6 +491,88 @@ final class QueueStateTests: XCTestCase {
         XCTAssertTrue(reached.isEmpty)
     }
 
+    /// «Отменить» и тут же «Расшифровать» на той же записи: прежняя работа ещё сворачивается,
+    /// и нажатие не должно пропасть — запись пойдёт заново, как только место освободится.
+    func testReEnqueueRightAfterCancelRunsOnceTheCancelledWorkUnwinds() async throws {
+        fixture = try QueueFixture(files: ["Запись.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate)
+        let entry = try fixture.entry("Запись.m4a")
+
+        service.enqueue(entry, in: fixture.workspace, using: .gigaam)
+        await gate.waitForArrivals(1)
+        service.cancel("Запись.m4a")
+        XCTAssertTrue(service.enqueue(entry, in: fixture.workspace, using: .gigaam), "просьба принята, а не потеряна")
+
+        await gate.openAll()
+        let outcome = await service.waitForDrain()
+
+        let reached = await gate.arrivals()
+        XCTAssertEqual(reached, ["Запись.m4a", "Запись.m4a"], "прежняя работа и новая — одна за другой")
+        XCTAssertEqual(outcome?.succeeded, ["Запись.m4a"])
+        XCTAssertEqual(outcome?.cancelled, 1)
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Запись.md"))
+        XCTAssertTrue(service.isIdle)
+        XCTAssertEqual(service.batchTotal, 0)
+        XCTAssertTrue(InterruptedRecords.load(from: fixture.store).isEmpty)
+    }
+
+    /// Повторная постановка идущей, **не** отменённой записи по-прежнему ничего не меняет.
+    func testReEnqueueOfAGenuinelyRunningRecordDoesNotRestartIt() async throws {
+        fixture = try QueueFixture(files: ["Запись.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate)
+        let entry = try fixture.entry("Запись.m4a")
+
+        service.enqueue(entry, in: fixture.workspace, using: .gigaam)
+        await gate.waitForArrivals(1)
+        service.enqueue(entry, in: fixture.workspace, using: .gigaam)
+        await gate.openAll()
+        await service.waitForDrain()
+
+        let reached = await gate.arrivals()
+        XCTAssertEqual(reached, ["Запись.m4a"], "работа одна")
+    }
+
+    /// Вторая отмена снимает и просьбу «поставить заново», если она успела прийти.
+    func testCancelAllAlsoDropsAPendingRestart() async throws {
+        fixture = try QueueFixture(files: ["Запись.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate)
+        let entry = try fixture.entry("Запись.m4a")
+
+        service.enqueue(entry, in: fixture.workspace, using: .gigaam)
+        await gate.waitForArrivals(1)
+        service.cancel("Запись.m4a")
+        service.enqueue(entry, in: fixture.workspace, using: .gigaam)
+        service.cancelAll()
+        await gate.openAll()
+        await service.waitForDrain()
+
+        let reached = await gate.arrivals()
+        XCTAssertEqual(reached, ["Запись.m4a"], "после второй отмены заново ничего не идёт")
+        XCTAssertThrowsError(try fixture.workspace.readText(at: "Transcripts/Запись.md"))
+    }
+
+    /// Систему перестало устраивать, когда отменённая запись ещё сворачивалась: обрыв не
+    /// должен воскресить то, что человек снял, — иначе она поднялась бы сама при запуске.
+    func testSystemInterruptionDoesNotResurrectACancelledRecord() async throws {
+        fixture = try QueueFixture(files: ["Снятая.m4a", "Ждавшая.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate)
+        try enqueueAll(["Снятая.m4a", "Ждавшая.m4a"], on: service)
+        await gate.waitForArrivals(1)
+
+        service.cancel("Снятая.m4a")
+        service.interruptEverything()
+        await gate.openAll()
+        await service.waitForDrain()
+
+        XCTAssertEqual(service.interrupted, ["Ждавшая.m4a"], "прервана только та, что ждала")
+        XCTAssertEqual(InterruptedRecords.load(from: fixture.store), ["Ждавшая.m4a": .gigaam])
+        XCTAssertEqual(service.state(for: "Снятая.m4a"), .idle)
+    }
+
     func testCancelAllIsHarmlessWhenNothingIsGoingOn() throws {
         fixture = try QueueFixture()
         let service = fixture.service(gate: QueueGate())

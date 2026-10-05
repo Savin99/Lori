@@ -548,6 +548,21 @@ final class TranscriptionService: ObservableObject {
     /// Записи пачки, у которых исхода ещё нет. Запись, снятая или оборванная до конца,
     /// отсюда уходит сразу — иначе её закончившаяся позже работа посчиталась бы дважды.
     private var batchLive: Set<String> = []
+    /// Записи, которые сняли, пока их работа шла: задача отменена, но движок ещё
+    /// сворачивается, и `active` держит место. Пока так, на эту же запись нельзя запустить
+    /// вторую работу и нельзя считать её «прерванной системой».
+    private var cancelling: Set<String> = []
+
+    /// Просьба поставить запись заново, пришедшая, пока прежняя работа над ней
+    /// сворачивается после отмены. Молча отказать значило бы потерять нажатие;
+    /// запустить вторую работу поверх первой — перепутать их итоги. Поднимается, когда
+    /// прежняя закончилась.
+    private struct Restart {
+        let entry: WorkspaceEntry
+        let workspace: WorkspaceStore
+        let kind: TranscriptionEngineKind?
+    }
+    private var restartAfterCancel: [String: Restart] = [:]
 
     /// Все пять движков создаются сразу: они ничего не занимают до первой расшифровки,
     /// а тестам удобно подменять набор целиком.
@@ -678,7 +693,15 @@ final class TranscriptionService: ObservableObject {
     func enqueue(_ entry: WorkspaceEntry, in workspace: WorkspaceStore, using kind: TranscriptionEngineKind? = nil) -> Bool {
         recoveryWorkspace = workspace
         let path = entry.relativePath
-        guard active[path] == nil, !waiting.contains(where: { $0.entry.relativePath == path }) else { return true }
+        if active[path] != nil {
+            // Её только что отменили, и движок ещё сворачивается: запомнить просьбу, а не
+            // терять — `finish` поднимет запись, когда место освободится.
+            if cancelling.contains(path) {
+                restartAfterCancel[path] = Restart(entry: entry, workspace: workspace, kind: kind)
+            }
+            return true
+        }
+        guard !waiting.contains(where: { $0.entry.relativePath == path }) else { return true }
 
         let opensBatch = !busy
         let previous = configurations[path]
@@ -734,12 +757,17 @@ final class TranscriptionService: ObservableObject {
         starting.remove(relativePath)
         forget(interrupted: relativePath)
         batchSettle(relativePath, as: .cancelled)
+        // Новая отмена отменяет и просьбу «поставить заново», если она успела прийти.
+        restartAfterCancel.removeValue(forKey: relativePath)
         if inFlight.removeValue(forKey: relativePath) != nil, persist {
             _ = persistJobs()
         }
         // Задача снимается, но из `active` её убирает сама завершившаяся работа:
         // иначе освободившееся место занял бы кто-то раньше, чем движок отпустил модель.
-        active[relativePath]?.cancel()
+        if let task = active[relativePath] {
+            cancelling.insert(relativePath)
+            task.cancel()
+        }
     }
 
     /// «Отменить всё»: снимает и то, что идёт, и то, что запускается, и то, что ждёт,
@@ -784,7 +812,10 @@ final class TranscriptionService: ObservableObject {
             inFlight[path] = job.kind
             batchSettle(path, as: .interrupted)
         }
-        for path in active.keys {
+        // Снятые человеком, но ещё сворачивающиеся записи не трогаем: обрыв системой не
+        // должен воскресить то, что человек отменил, — иначе при ближайшем запуске она
+        // поднялась бы сама.
+        for path in active.keys where !cancelling.contains(path) {
             interrupted.insert(path)
             interrupting.insert(path)
             if inFlight[path] == nil { inFlight[path] = lane[path] }
@@ -998,6 +1029,7 @@ final class TranscriptionService: ObservableObject {
         lane[path] = nil
         startedAt[path] = nil
         starting.remove(path)
+        cancelling.remove(path)
         // Прерванная запись остаётся в файле: её судьба решится при следующем запуске.
         if !interrupted.contains(path), inFlight.removeValue(forKey: path) != nil {
             connectionRetries.removeValue(forKey: path)
@@ -1018,6 +1050,11 @@ final class TranscriptionService: ObservableObject {
             batchSettle(path, as: .failed)
         } else {
             batchSettle(path, as: .cancelled)
+        }
+        // Нажали «Расшифровать» на записи, пока её отменённая работа сворачивалась, — теперь
+        // место свободно. Это до `admit`, а не после: пачка не должна успеть «опустеть».
+        if let restart = restartAfterCancel.removeValue(forKey: path) {
+            enqueue(restart.entry, in: restart.workspace, using: restart.kind)
         }
         admit()
     }
