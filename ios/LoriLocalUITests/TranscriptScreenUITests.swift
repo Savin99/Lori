@@ -186,6 +186,44 @@ final class TranscriptScreenUITests: XCTestCase {
         save("record-more-menu-full")
     }
 
+    /// Прерванную запись не переименовать: переименование через `forget` сняло бы
+    /// её сохранённое задание. Пункта нет ни в меню долгого нажатия, ни в свайпе, а
+    /// на экране записи заголовок — не кнопка и «Переименовать» в «…» выключено.
+    /// «Продолжить» тест не нажимает: прерванная запись набора нужна снимкам.
+    func testInterruptedRecordCannotBeRenamed() throws {
+        let app = launch(engine: "elevenlabs", extra: ["--recovery-probe"])
+        let card = find("Прервано", in: app)
+        try XCTSkipUnless(
+            card.exists,
+            "нет прерванной записи — прогони design/redesign-2026-10-05/seed-record-states.sh"
+        )
+        reveal(card, in: app)
+
+        card.press(forDuration: 1.2)
+        XCTAssertTrue(app.buttons["Тема"].waitForExistence(timeout: 5), "меню долгого нажатия открылось")
+        XCTAssertTrue(app.buttons["Удалить"].exists)
+        XCTAssertFalse(app.buttons["Переименовать"].exists, "у прерванной записи в меню нет «Переименовать»")
+        // Меню закрывается тапом мимо — у самого края, вне карточки.
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.03, dy: 0.42)).tap()
+        XCTAssertTrue(app.buttons["Тема"].waitForNonExistence(timeout: 5))
+
+        try openCard(withStatus: "Прервано", in: app)
+        XCTAssertFalse(app.buttons["recordTitle"].exists, "заголовок прерванной записи — не кнопка переименования")
+        app.buttons["transcriptMenu"].tap()
+        let rename = app.buttons["Переименовать"]
+        XCTAssertTrue(rename.waitForExistence(timeout: 3), "пункт в «…» виден")
+        XCTAssertFalse(rename.isEnabled, "но выключен")
+        // Мимо меню — в пустой низ экрана, подальше от «Продолжить».
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88)).tap()
+        XCTAssertTrue(rename.waitForNonExistence(timeout: 5))
+        close(app)
+
+        reveal(card, in: app)
+        card.swipeLeft()
+        XCTAssertTrue(app.buttons["Удалить"].waitForExistence(timeout: 5), "свайп открыл действия")
+        XCTAssertFalse(app.buttons["Переименовать"].exists, "и в свайпе «Переименовать» нет")
+    }
+
     /// У короткой записи заголовок — первая фраза; просьба придумать другой
     /// отвечает словами и в очередь модели ничего не ставит.
     func testShortRecordKeepsFirstPhraseAsTitle() throws {
@@ -262,20 +300,19 @@ final class TranscriptScreenUITests: XCTestCase {
         // Ошибку даёт сам прогон: облачный движок без ключа. Она переживает
         // перезапуск, и при следующем прогоне запись просто открывается. Одна
         // запись без расшифровки всегда остаётся — для снимка этого состояния.
+        // Карточка с ошибкой говорит её первой фразой: «Ключ ElevenLabs не сохранён».
         let untranscribed = app.descendants(matching: .any)
             .matching(identifier: "recordingCard")
             .matching(NSPredicate(format: "label CONTAINS %@", "Без расшифровки"))
-        if untranscribed.count >= 2 || !card(containing: "Ошибка", in: app).exists {
+        if untranscribed.count >= 2 || !card(containing: failedCard, in: app).exists {
             try openCard(withStatus: "Без расшифровки", in: app)
             tap(app.buttons["transcribeAction"])
-            // Алерт списка про ту же ошибку закрывает лист записи — снимок
-            // фиксирует, как это выглядит сейчас (`ContentView`, не этот экран).
-            _ = app.alerts.firstMatch.waitForExistence(timeout: 15)
-            save("record-failed-list-alert")
-            dismissAlerts(in: app)
+            // Ошибка записи — строкой на этом экране. Алерт списка про неё больше не
+            // встаёт и лист не закрывает (`ContentView.activeError`).
+            XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 3), "ошибка записи — не алертом поверх листа")
         }
         if !app.descendants(matching: .any)["recordTitle"].exists {
-            try openCard(withStatus: "Ошибка", in: app)
+            try openCard(withStatus: failedCard, in: app)
         }
         let failure = app.staticTexts["Не получилось расшифровать"]
         XCTAssertTrue(failure.waitForExistence(timeout: 15), "облачный движок без ключа даёт ошибку")
@@ -305,6 +342,9 @@ final class TranscriptScreenUITests: XCTestCase {
     }
 
     // MARK: - Помощники
+
+    /// Первая фраза ошибки облачного движка без ключа — так её пишет карточка.
+    private let failedCard = "не сохранён"
 
     /// Запуск с заданным движком: выбор живёт в `UserDefaults` и иначе переживал бы
     /// прогон — один тест влиял бы на другой.
@@ -400,18 +440,6 @@ final class TranscriptScreenUITests: XCTestCase {
         guard field.waitForExistence(timeout: 3) else { return }
         field.typeText(name)
         tap(app.buttons["Сохранить"])
-    }
-
-    /// Алерт списка про ошибку может встать поверх листа — снимок с ним
-    /// сохраняется отдельно, а сам алерт закрывается.
-    private func dismissAlerts(in app: XCUIApplication) {
-        for _ in 0..<3 {
-            let alert = app.alerts.firstMatch
-            guard alert.waitForExistence(timeout: 2) else { return }
-            let ok = alert.buttons["OK"]
-            if ok.exists { ok.tap() } else { alert.buttons.firstMatch.tap() }
-            _ = alert.waitForNonExistence(timeout: 3)
-        }
     }
 
     /// Один и тот же экран в светлой и тёмной теме.

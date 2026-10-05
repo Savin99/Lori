@@ -35,13 +35,13 @@ enum TranscriptionError: LocalizedError, Equatable {
         case .assetsUnavailable:
             "На этом устройстве нет моделей распознавания речи. В симуляторе iOS их нет вообще — расшифровка работает только на настоящем iPhone."
         case .modelsMissing:
-            "Модели GigaAM ещё не скачаны. Настройки → «Модель GigaAM» → «Скачать», или выбери другой движок."
+            "Модель GigaAM ещё не скачана. Настройки → Движок → «Скачать модель», или выбери другой движок."
         case .whisperModelMissing:
             "Модель Whisper не найдена. Положи папку модели в «Файлы» → Lori → Models: приложение её не качает — это 632 МБ."
         case let .modelIncomplete(name, file):
             "Папке модели движка «\(name)» не хватает файла «\(file)». Без него расшифровка пошла бы за ним в сеть."
         case let .missingKey(account):
-            "Ключ \(account.title) не сохранён. Настройки → «\(account.title)» → вставь ключ."
+            "Ключ \(account.title) не сохранён. Настройки → Движок → Провайдер → вставь ключ в поле «Ключ API»."
         case let .api(message):
             message
         case let .badResponse(message):

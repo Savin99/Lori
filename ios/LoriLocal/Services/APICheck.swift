@@ -79,14 +79,14 @@ enum APICheck {
         // Тексты — одной строкой: склейка многострочных литералов уже один раз
         // протащила в интерфейс дорожку пробелов, и человек увидел её на телефоне.
         if message.localizedCaseInsensitiveContains("user location is not supported") {
-            return "Google не принимает запросы из вашего региона — дело не в ключе. "
+            return "Google не принимает запросы из твоего региона — дело не в ключе. "
                 + "Ответ сервиса: «\(message)» "
                 + "Выход: указать в настройках Gemini адрес своего прокси в поддерживаемом регионе "
                 + "или выбрать другой движок."
         }
         if message.localizedCaseInsensitiveContains("country, region, or territory not supported")
             || message.localizedCaseInsensitiveContains("unsupported_country") {
-            return "Сервис не принимает запросы из вашего региона — дело не в ключе. "
+            return "Сервис не принимает запросы из твоего региона — дело не в ключе. "
                 + "Ответ сервиса: «\(message)» "
                 + "Выход: указать свой адрес API в настройках или выбрать другой движок."
         }

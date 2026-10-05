@@ -85,7 +85,10 @@ struct ContentView: View {
     @StateObject private var speed = TranscriptionSpeed()
 
     @State private var showSettings = false
-    @State private var opened: WorkspaceEntry?
+    /// Открытая запись. Своя обёртка с постоянным `id`, а не сама запись: у записи
+    /// `id` — путь, и после переименования с экрана записи `sheet(item:)` закрыл бы
+    /// лист и открыл заново. Здесь меняется только `entry`, и лист остаётся.
+    @State private var opened: OpenedRecord?
     @State private var showFileImporter = false
     @State private var query = ""
     @State private var isSearching = false
@@ -263,7 +266,7 @@ struct ContentView: View {
                         stop: { showStopQueue = true },
                         explainBackground: { backgroundExplanation = backgroundReason }
                     )
-                    .onTapGesture { opened = entry(at: summary.focusPath) }
+                    .onTapGesture { opened = entry(at: summary.focusPath).map { OpenedRecord(entry: $0) } }
                     .listRowBackground(Color.clear)
                     .listRowSeparator(.hidden)
                     .listRowInsets(EdgeInsets(top: 6, leading: 20, bottom: 6, trailing: 20))
@@ -342,12 +345,12 @@ struct ContentView: View {
             topic: topics.topic(for: path),
             needsTopic: needsTopic(entry),
             status: status,
-            perform: { _ in transcription.enqueue(entry, in: workspace) }
+            perform: { action in start(entry, action) }
         )
         .listRowBackground(Color.clear)
         .listRowSeparator(.hidden)
         .listRowInsets(EdgeInsets(top: 5, leading: 20, bottom: 5, trailing: 20))
-        .onTapGesture { opened = entry }
+        .onTapGesture { opened = OpenedRecord(entry: entry) }
         .contextMenu {
             contextMenu(for: entry, title: title, state: state, hasTranscript: hasTranscript, action: status?.action)
         }
@@ -382,7 +385,7 @@ struct ContentView: View {
             }
             .tint(LoriPalette.danger)
 
-            if !state.isActive {
+            if state.allowsRename {
                 Button { startRename(entry, title: title) } label: {
                     Label("Переименовать", systemImage: "pencil")
                 }
@@ -421,7 +424,7 @@ struct ContentView: View {
                 Label("Поделиться", systemImage: "square.and.arrow.up")
             }
         }
-        if !state.isActive {
+        if state.allowsRename {
             Button { startRename(entry, title: title) } label: {
                 Label("Переименовать", systemImage: "pencil")
             }
@@ -435,7 +438,7 @@ struct ContentView: View {
             }
         }
         if let action {
-            Button { transcription.enqueue(entry, in: workspace) } label: {
+            Button { start(entry, action) } label: {
                 Label(action.title, systemImage: action == .transcribe ? "waveform" : "arrow.clockwise")
             }
         }
@@ -470,7 +473,7 @@ struct ContentView: View {
                     ForEach(search.hits) { hit in
                         Button {
                             searchFocused = false
-                            opened = hit.entry
+                            opened = OpenedRecord(entry: hit.entry)
                         } label: {
                             SearchResultRow(hit: hit)
                         }
@@ -790,57 +793,88 @@ struct ContentView: View {
         guard let entry = renameTarget else { return }
         renameTarget = nil
         let old = entry.relativePath
-        let wasActive = transcription.state(for: old).isActive
+        // Проверка — в момент «Готово», а не при открытии окна: пока оно было
+        // открыто, запись могла снова уйти в работу (повтор по сети, возвращение
+        // в приложение), и переименование оставило бы её текст под старым именем.
+        guard transcription.state(for: old).allowsRename else {
+            workspace.lastError = RenameRefusal.busy.errorDescription
+            return
+        }
         do {
-            guard let new = try RecordRename.commit(
-                entry,
-                typed: renameDraft,
-                currentTitle: renameOriginal,
-                workspace: workspace,
-                summaries: summaries,
-                topics: topics,
-                speakers: speakers,
-                previews: previews,
-                runner: summaryRunner
-            ) else { return }
+            guard let new = try rename(entry, typed: renameDraft, currentTitle: renameOriginal), new != old else { return }
             // Ошибка прошлой попытки привязана к старому пути: оставь её — и она
             // висела бы в памяти сервиса за записью, которой больше нет.
-            if new != old, !wasActive { transcription.forget(old) }
+            transcription.forget(old)
         } catch {
-            workspace.lastError = Self.renameMessage(for: error)
+            workspace.lastError = RenameFailure.message(for: error)
         }
     }
 
-    private static func renameMessage(for error: Error) -> String {
-        switch error as? WorkspaceError {
-        case .nameTaken:
-            "Запись с таким названием уже есть. Выбери другое."
-        case .invalidName:
-            "Из этого названия не получается имя файла. Добавь буквы или цифры."
-        default:
-            "Не получилось переименовать: \(error.localizedDescription)"
-        }
+    private func rename(_ entry: WorkspaceEntry, typed: String, currentTitle: String) throws -> String? {
+        try RecordRename.commit(
+            entry,
+            typed: typed,
+            currentTitle: currentTitle,
+            workspace: workspace,
+            summaries: summaries,
+            topics: topics,
+            speakers: speakers,
+            previews: previews,
+            runner: summaryRunner
+        )
     }
 
-    /// Удаление — только после подтверждения, и сначала снимается расшифровка
-    /// записи: иначе движок дописал бы текст к записи, которая уже в корзине.
+    /// Переименование с экрана записи. `shownTitle` — заголовок, который был виден,
+    /// когда открылось окно: с ним экран сравнил набранное, и модель, ответившая
+    /// за это время, не превратит «Сохранить» без правки в устаревшее ручное имя.
+    /// Лист остаётся открытым и переезжает за записью: меняется `entry`, а не `id`
+    /// презентации. Ошибку показывает сам экран — алерт отсюда под листом не встал бы.
+    private func renameOpened(_ entry: WorkspaceEntry, typed: String, shownTitle: String) throws {
+        let old = entry.relativePath
+        guard transcription.state(for: old).allowsRename else { throw RenameRefusal.busy }
+        guard let new = try rename(entry, typed: typed, currentTitle: shownTitle), new != old else { return }
+        transcription.forget(old)
+        if let moved = try? workspace.entry(at: new) { opened?.entry = moved }
+    }
+
+    /// Кнопка на карточке и пункт меню: «Продолжить» — тем же движком, что считал
+    /// до обрыва (`RecordStatus.engine`), как и на экране записи.
+    private func start(_ entry: WorkspaceEntry, _ action: RecordStatus.Action) {
+        let engine = RecordStatus.engine(for: action, interrupted: transcription.interruptedEngine(for: entry.relativePath))
+        transcription.enqueue(entry, in: workspace, using: engine)
+    }
+
+    /// Удаление из списка — после подтверждения в списке.
     private func delete(_ entry: WorkspaceEntry) {
-        let path = entry.relativePath
-        transcription.forget(path)
-        summaryRunner.forget(path)
         do {
-            // Расшифровка уходит в корзину вместе с записью: одна без другой не нужна.
-            if let transcript = workspace.existingTranscript(for: entry) {
-                try workspace.moveToTrash(transcript)
-            }
-            try workspace.moveToTrash(path)
-            topics.forget(path)
-            summaries.forget(path)
-            speakers.forget(path)
-            previews.invalidate(path)
+            try moveToTrash(entry)
         } catch {
             workspace.lastError = "Не получилось удалить запись: \(error.localizedDescription)"
         }
+    }
+
+    /// Удаление с экрана записи — после подтверждения на нём. Удалось — лист
+    /// закрывается; нет — ошибку показывает экран записи, и лист остаётся.
+    private func deleteOpened(_ entry: WorkspaceEntry) throws {
+        try moveToTrash(entry)
+        opened = nil
+    }
+
+    /// Сначала снимается расшифровка записи: иначе движок дописал бы текст к записи,
+    /// которая уже в корзине. Расшифровка уходит в корзину вместе с записью — одна
+    /// без другой не нужна; метаданные забываются, только когда файлы переехали.
+    private func moveToTrash(_ entry: WorkspaceEntry) throws {
+        let path = entry.relativePath
+        transcription.forget(path)
+        summaryRunner.forget(path)
+        if let transcript = workspace.existingTranscript(for: entry) {
+            try workspace.moveToTrash(transcript)
+        }
+        try workspace.moveToTrash(path)
+        topics.forget(path)
+        summaries.forget(path)
+        speakers.forget(path)
+        previews.invalidate(path)
     }
 
     /// Имя, под которым запись уходит наружу. Заголовок «Запись 09:10» для файла не
@@ -916,13 +950,15 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsRoot(transcription: transcription, topics: topics)
             }
-            .sheet(item: $opened) { entry in
+            .sheet(item: $opened) { record in
                 TranscriptScreen(
-                    entry: entry,
+                    entry: record.entry,
                     transcription: transcription,
                     topics: topics,
                     previews: previews,
-                    isRecording: recorder.isCapturing
+                    isRecording: recorder.isCapturing,
+                    onRename: { typed, shown in try renameOpened(record.entry, typed: typed, shownTitle: shown) },
+                    onDelete: { try deleteOpened(record.entry) }
                 )
             }
             .sheet(item: $topicTarget) { entry in
@@ -955,7 +991,7 @@ struct ContentView: View {
                 Button("Отмена", role: .cancel) {}
             }
             .confirmationDialog(
-                "Удалить запись?",
+                DeleteRecordCopy.title,
                 isPresented: isPresented($deleteTarget),
                 titleVisibility: .visible,
                 presenting: deleteTarget
@@ -963,9 +999,7 @@ struct ContentView: View {
                 Button("Удалить", role: .destructive) { delete(entry) }
                 Button("Отмена", role: .cancel) {}
             } message: { entry in
-                Text(transcription.state(for: entry.relativePath).isActive
-                     ? "Аудио и расшифровка переедут в корзину Lori. Расшифровка этой записи остановится."
-                     : "Аудио и расшифровка переедут в корзину Lori.")
+                Text(DeleteRecordCopy.message(active: transcription.state(for: entry.relativePath).isActive))
             }
             .confirmationDialog(
                 "Остановить расшифровку?",
@@ -1021,6 +1055,13 @@ struct ContentView: View {
                 Text(activeError ?? "")
             }
     }
+}
+
+/// Запись, открытая листом. `id` постоянный на всё время показа: переименование
+/// меняет путь записи, и лист должен остаться, а не закрыться и открыться заново.
+struct OpenedRecord: Identifiable {
+    let id = UUID()
+    var entry: WorkspaceEntry
 }
 
 struct CircleIconButton: View {

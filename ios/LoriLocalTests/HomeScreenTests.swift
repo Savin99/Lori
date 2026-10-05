@@ -103,7 +103,7 @@ final class RecordStatusTests: XCTestCase {
     /// На карточке — первая фраза ошибки; что делать — на экране записи.
     func testFailureShowsShortReasonAndRetry() throws {
         let status = try XCTUnwrap(RecordStatus.make(
-            state: .failed("Ключ ElevenLabs не сохранён. Настройки → «ElevenLabs» → вставь ключ."),
+            state: .failed("Ключ ElevenLabs не сохранён. Настройки → Движок → Провайдер → вставь ключ в поле «Ключ API»."),
             hasTranscript: true,
             fraction: nil,
             remaining: nil
@@ -331,5 +331,34 @@ final class ComposerClipboardTests: XCTestCase {
         let model = ComposerModel()
         model.clipboard = .audio
         XCTAssertEqual(model.clipboardHint, "В буфере есть аудио")
+    }
+}
+
+/// Переименование — только у записи, с которой ничего не происходит, а
+/// «Продолжить» — тем же движком, что считал до обрыва.
+final class RecordActionPolicyTests: XCTestCase {
+    func testOnlyIdleOrFailedRecordsCanBeRenamed() {
+        XCTAssertTrue(TranscriptionRecordState.idle.allowsRename)
+        XCTAssertTrue(TranscriptionRecordState.failed("сбой").allowsRename, "ошибка прошлой попытки не мешает")
+        XCTAssertFalse(TranscriptionRecordState.queued(position: 1, waitsForMemory: false).allowsRename)
+        XCTAssertFalse(TranscriptionRecordState.starting.allowsRename)
+        XCTAssertFalse(TranscriptionRecordState.running.allowsRename)
+        XCTAssertFalse(
+            TranscriptionRecordState.interrupted.allowsRename,
+            "у прерванной сохранено задание — переименование сняло бы его"
+        )
+    }
+
+    func testBusyRefusalSaysWhatToDo() {
+        XCTAssertEqual(RenameFailure.message(for: RenameRefusal.busy), "Сначала дождись окончания расшифровки или останови её.")
+        XCTAssertEqual(RenameFailure.message(for: WorkspaceError.nameTaken), "Запись с таким названием уже есть. Выбери другое.")
+    }
+
+    /// Старая прерванная запись без снимка задания не уходит в движок, выбранный сейчас.
+    func testResumeKeepsTheInterruptedEngine() {
+        XCTAssertEqual(RecordStatus.engine(for: .resume, interrupted: .openAI), .openAI)
+        XCTAssertNil(RecordStatus.engine(for: .resume, interrupted: nil), "движок неизвестен — решает снимок задания")
+        XCTAssertNil(RecordStatus.engine(for: .retry, interrupted: .openAI), "«Повторить» — выбранным сейчас")
+        XCTAssertNil(RecordStatus.engine(for: .transcribe, interrupted: nil))
     }
 }

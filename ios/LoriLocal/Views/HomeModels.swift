@@ -154,6 +154,18 @@ struct RecordStatus: Equatable, Sendable {
         }
     }
 
+    /// Каким движком ставить запись по кнопке на карточке. «Продолжить» — тем же,
+    /// что считал до обрыва: у старых прерванных записей нет снимка задания, и без
+    /// движка сервис взял бы выбранный сейчас в настройках — запись, прерванная на
+    /// OpenAI, молча ушла бы в ElevenLabs. «Расшифровать» и «Повторить» — тем, что
+    /// выбран сейчас: после ошибки человек мог сменить движок именно затем.
+    static func engine(for action: Action, interrupted: TranscriptionEngineKind?) -> TranscriptionEngineKind? {
+        switch action {
+        case .resume: interrupted
+        case .transcribe, .retry: nil
+        }
+    }
+
     /// «63%» — по сделанному, без округления вверх: сотня появляется только с концом
     /// работы, иначе «100%» стояло бы на последнем куске (см. `TranscriptionService.fraction`).
     static func percent(_ fraction: Double) -> String {
@@ -286,5 +298,61 @@ enum ImportNotice {
             title: "Не все файлы добавлены",
             text: ([lead] + messages).joined(separator: "\n\n")
         )
+    }
+}
+
+// MARK: - Удаление и переименование — одними словами везде
+
+/// Подтверждение удаления: одни и те же слова в списке и на экране записи. Два
+/// входа в одно действие не должны называть его по-разному.
+enum DeleteRecordCopy {
+    static let title = "Удалить запись?"
+
+    /// Идущая расшифровка останавливается — об этом говорится до нажатия.
+    static func message(active: Bool) -> String {
+        active
+            ? "Аудио и расшифровка переедут в корзину Lori. Расшифровка этой записи остановится."
+            : "Аудио и расшифровка переедут в корзину Lori."
+    }
+}
+
+/// Переименовать можно только запись, с которой ничего не происходит.
+///
+/// У идущей, ждущей и запускающейся задание держит старый путь: движок не найдёт
+/// звук или сохранит текст под старым именем, рядом с переименованной записью.
+/// У прерванной задание сохранено и поднимется само (возвращение в приложение,
+/// повтор по сети) или ждёт «Продолжить», а переименование через `forget` сняло бы
+/// его вместе со снимком — продолжать стало бы нечего. Ошибка прошлой попытки
+/// не мешает: задания за ней нет.
+extension TranscriptionRecordState {
+    var allowsRename: Bool {
+        switch self {
+        case .idle, .failed: true
+        case .queued, .starting, .running, .interrupted: false
+        }
+    }
+}
+
+/// Запись стала занятой, пока было открыто окно переименования.
+enum RenameRefusal: LocalizedError, Equatable {
+    case busy
+
+    var errorDescription: String? {
+        "Сначала дождись окончания расшифровки или останови её."
+    }
+}
+
+/// Что сказать, когда переименовать не вышло: что случилось и что сделать.
+enum RenameFailure {
+    static func message(for error: Error) -> String {
+        if let refusal = error as? RenameRefusal { return refusal.errorDescription ?? "" }
+        return switch error as? WorkspaceError {
+        case .nameTaken:
+            "Запись с таким названием уже есть. Выбери другое."
+        case .invalidName:
+            "Из этого названия не получается имя файла. Добавь буквы или цифры."
+        default:
+            "Не получилось переименовать: \(error.localizedDescription)"
+        }
     }
 }
