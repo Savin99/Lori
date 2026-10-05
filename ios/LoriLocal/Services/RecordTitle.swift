@@ -34,6 +34,85 @@ struct RecordTitle: Equatable, Sendable {
     let generatedDetail: String?
 }
 
+// MARK: - Старшинство источников
+
+extension RecordTitle {
+    /// Заголовок и описание записи по тому, что о ней известно.
+    ///
+    /// Старшинство:
+    /// 1. имя от человека — его не переписывает ничто;
+    /// 2. заголовок модели — он может заменить имя принесённого файла: такое имя
+    ///    временное (`SummaryStore.setImported`);
+    /// 3. осмысленное имя принесённого файла — «Совещание 27.08»: человек уже
+    ///    назвал запись, и подменять это первой фразой значит терять примету;
+    /// 4. первая фраза расшифровки;
+    /// 5. служебное имя файла в читаемом виде — «audio 5 2», только пока
+    ///    расшифровка не дала заголовка;
+    /// 6. «Запись 21:46».
+    ///
+    /// Под заголовком — описание модели, а без него текст записи: продолжение
+    /// первой фразы, только когда и заголовок из неё, иначе начало текста —
+    /// отрезать «ушедшее в заголовок» не от чего, сниппет начинался бы с
+    /// середины фразы.
+    ///
+    /// Функция чистая и дешёвая: два словарных поиска в хранилищах, без чтения
+    /// файлов, — её можно звать прямо из `body`.
+    static func resolve(
+        summary: SummaryStore.Entry?,
+        preview: TranscriptPreviews.Preview?,
+        recordedAt: Date,
+        now: Date = .now
+    ) -> RecordTitle {
+        let generated = summary.flatMap { $0.detail.isEmpty ? nil : $0.detail }
+        func named(_ title: String, _ source: Source) -> RecordTitle {
+            RecordTitle(title: title, detail: generated ?? preview?.head, source: source, generatedDetail: generated)
+        }
+
+        if let summary, !summary.title.isEmpty {
+            switch summary.origin {
+            case .manual:
+                return named(summary.title, .manual)
+            case .generated:
+                return named(summary.title, .model)
+            case .imported:
+                if !isGenericName(summary.title) { return named(summary.title, .importedName) }
+            }
+        }
+        if let title = preview?.title, !title.isEmpty {
+            return RecordTitle(
+                title: title,
+                detail: generated ?? preview?.snippet,
+                source: .transcript,
+                generatedDetail: generated
+            )
+        }
+        if let summary, summary.origin == .imported, !summary.title.isEmpty {
+            return named(cleanedName(summary.title), .genericName)
+        }
+        return named("Запись \(LoriFormat.stamp(recordedAt, now: now))", .date)
+    }
+
+    /// То же по хранилищам приложения. Вид, который зовёт это из `body`, обязан
+    /// наблюдать оба хранилища — тогда он перерисуется, когда придёт заголовок
+    /// модели или дочитается расшифровка.
+    @MainActor
+    static func resolve(_ entry: WorkspaceEntry, summaries: SummaryStore, previews: TranscriptPreviews) -> RecordTitle {
+        resolve(path: entry.relativePath, recordedAt: entry.modifiedAt, summaries: summaries, previews: previews)
+    }
+
+    @MainActor
+    static func resolve(path: String, recordedAt: Date, summaries: SummaryStore, previews: TranscriptPreviews) -> RecordTitle {
+        resolve(summary: summaries.entry(for: path), preview: previews.preview(for: path), recordedAt: recordedAt)
+    }
+
+    /// Где лежит расшифровка записи: `Transcripts/<имя аудио без расширения>.md` —
+    /// то же правило, что у `WorkspaceStore.existingTranscript` и `saveTranscript`.
+    static func transcriptPath(forAudio path: String) -> String {
+        let base = ((path as NSString).lastPathComponent as NSString).deletingPathExtension
+        return "Transcripts/\(base).md"
+    }
+}
+
 // MARK: - Служебные имена файлов
 
 extension RecordTitle {
