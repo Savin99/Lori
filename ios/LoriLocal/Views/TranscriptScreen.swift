@@ -78,6 +78,9 @@ struct TranscriptScreen: View {
     /// крупном шрифте обрезался бы. 46 + 12 — это и отступ `Skeleton`.
     @ScaledMetric(relativeTo: .footnote) private var timeColumn: CGFloat = 46
     @ScaledMetric(relativeTo: .footnote) private var hourTimeColumn: CGFloat = 62
+    /// Предел колонки говорящих: «Марина Кузнецова» не должна съедать полстроки,
+    /// длинное имя обрезается многоточием.
+    @ScaledMetric(relativeTo: .caption2) private var speakerCap: CGFloat = 96
 
     private var path: String { entry.relativePath }
     private var recordTitle: RecordTitle { RecordTitle.resolve(entry, summaries: summaries, previews: previews) }
@@ -96,8 +99,10 @@ struct TranscriptScreen: View {
                     header
                     PlayerCard(playback: playback, isRecording: isRecording)
                         .padding(.top, 14)
-                    actions
-                        .padding(.top, 12)
+                    if showsActions {
+                        actions
+                            .padding(.top, 12)
+                    }
                     if let status {
                         statusBlock(status)
                             .padding(.top, 16)
@@ -337,9 +342,14 @@ struct TranscriptScreen: View {
 
     // MARK: - Поделиться и скопировать
 
-    /// Обе кнопки выключены, пока текста нет, но видны: человек сразу знает, что
-    /// будет можно, когда расшифровка появится. Выключенная «Поделиться» теряет
-    /// оливковую заливку — главным на экране без текста становится «Расшифровать».
+    /// Без расшифровки этих кнопок нет вовсе. Раньше они стояли выключенными, и две
+    /// серые капсулы спорили с единственной живой — «Расшифровать». Пока файл
+    /// расшифровки дочитывается, кнопки видны (и выключены): исчезни они на этот
+    /// миг — экран подпрыгнул бы при каждом открытии.
+    private var showsActions: Bool {
+        !document.isEmpty || (transcriptFile != nil && !isUntranscribed)
+    }
+
     private var actions: some View {
         let enabled = !document.isEmpty
         return FlowRow(spacing: 10) {
@@ -657,6 +667,7 @@ struct TranscriptScreen: View {
     private var transcriptText: some View {
         if !document.isEmpty {
             let column = timeColumnWidth(upTo: document.lastStamp)
+            let pills = speakerPills(document.lines.compactMap(\.speaker))
             // Часовая запись даёт сотни реплик. Обычный VStack создавал их все до
             // первого кадра; ленивый строит только видимую часть.
             LazyVStack(alignment: .leading, spacing: 14) {
@@ -666,7 +677,8 @@ struct TranscriptScreen: View {
                         approximate: line.isApproximate,
                         speaker: line.speaker,
                         text: line.text,
-                        column: document.hasTimecodes ? column : nil
+                        column: document.hasTimecodes ? column : nil,
+                        pills: pills
                     )
                 }
             }
@@ -674,15 +686,18 @@ struct TranscriptScreen: View {
         } else if let ready = transcription.partialTranscript(for: path), !ready.segments.isEmpty {
             // Файла ещё нет, а части уже готовы — показываем их сразу.
             let column = timeColumnWidth(upTo: ready.segments.last?.start)
+            let marks = ready.segments.map { TranscriptDocument.speakerMark(in: $0.text) }
+            let pills = speakerPills(marks.compactMap { $0?.label })
             LazyVStack(alignment: .leading, spacing: 14) {
-                ForEach(Array(ready.segments.enumerated()), id: \.offset) { _, segment in
-                    let mark = TranscriptDocument.speakerMark(in: segment.text)
+                ForEach(Array(ready.segments.enumerated()), id: \.offset) { index, segment in
+                    let mark = marks[index]
                     row(
                         start: segment.start,
                         approximate: segment.isApproximate,
                         speaker: mark?.label,
                         text: mark?.rest ?? segment.text,
-                        column: column
+                        column: column,
+                        pills: pills
                     )
                 }
                 Skeleton()
@@ -714,6 +729,31 @@ struct TranscriptScreen: View {
         (last ?? 0) >= 3600 ? hourTimeColumn : timeColumn
     }
 
+    /// Ширина кружка каждого говорящего и общая колонка под них.
+    ///
+    /// Колонка одна на весь документ — по самому широкому кружку, но не шире
+    /// `speakerCap`. Раньше у каждой реплики была своя ширина: «Марина» рядом с «S2»
+    /// сдвигала текст своих реплик правее соседних, и столбец текста шёл лесенкой.
+    /// Меряется заранее, по шрифту, а не раскладкой: ленивый список строит только
+    /// видимые строки, и колонка, собранная из них, прыгала бы при прокрутке.
+    private func speakerPills(_ labels: [String]) -> SpeakerPills? {
+        let unique = Set(labels)
+        guard !unique.isEmpty else { return nil }
+        let category = UIContentSizeCategory(typeSize)
+        let base = UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: UITraitCollection(preferredContentSizeCategory: category))
+        let font = UIFont.systemFont(ofSize: base.pointSize, weight: .semibold)
+        var widths: [String: CGFloat] = [:]
+        for label in unique {
+            let named = speakers.isNamed(label, in: path)
+            let text = named ? speakers.name(of: label, in: path) : label
+            let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
+            // Поля — как у `SpeakerDot`: у имени шире, у метки «S1» уже.
+            let ideal = ceil(textWidth) + (named ? 16 : 8)
+            widths[label] = min(speakerCap, max(26, ideal))
+        }
+        return SpeakerPills(widths: widths, column: widths.values.max() ?? 26)
+    }
+
     /// Реплика: таймкод — кнопка, текст — нет.
     ///
     /// Раньше кнопкой была вся строка, и текст нельзя было выделить: долгое
@@ -726,7 +766,8 @@ struct TranscriptScreen: View {
         approximate: Bool,
         speaker: String?,
         text: String,
-        column: CGFloat?
+        column: CGFloat?,
+        pills: SpeakerPills?
     ) -> some View {
         if typeSize.isAccessibilitySize {
             // На самых крупных размерах три колонки в строку оставляли тексту
@@ -753,7 +794,16 @@ struct TranscriptScreen: View {
                         Color.clear.frame(width: column, height: 1)
                     }
                 }
-                if let speaker { speakerDot(speaker) }
+                if let pills {
+                    // Колонка говорящих есть у каждой строки документа с говорящими:
+                    // без метки она пустая, но держит текст на одной вертикали.
+                    if let speaker {
+                        speakerDot(speaker, width: pills.widths[speaker])
+                            .frame(width: pills.column, alignment: .leading)
+                    } else {
+                        Color.clear.frame(width: pills.column, height: 1)
+                    }
+                }
                 replica(text)
             }
         }
@@ -798,10 +848,12 @@ struct TranscriptScreen: View {
     }
 
     /// Кружок называет говорящего долгим нажатием — сразу по всей записи.
-    private func speakerDot(_ label: String) -> some View {
+    /// `width` — ширина кружка, посчитанная для колонки; nil — по содержимому.
+    private func speakerDot(_ label: String, width: CGFloat? = nil) -> some View {
         SpeakerDot(
             label: label,
-            name: speakers.isNamed(label, in: path) ? speakers.name(of: label, in: path) : nil
+            name: speakers.isNamed(label, in: path) ? speakers.name(of: label, in: path) : nil,
+            width: width
         )
         .onLongPressGesture(minimumDuration: 0.5) { beginNaming(label) }
         .accessibilityAction(named: "Назвать говорящего") { beginNaming(label) }
@@ -1130,6 +1182,12 @@ struct TranscriptScreen: View {
     }
 }
 
+/// Ширины кружков говорящих в документе и колонка под самый широкий.
+private struct SpeakerPills {
+    let widths: [String: CGFloat]
+    let column: CGFloat
+}
+
 /// Сообщение экрана: что случилось и что делать.
 private struct Notice {
     let title: String
@@ -1445,6 +1503,8 @@ struct SpeakerDot: View {
     /// Имя, если человек его дал. Цвет всё равно считается по метке: он должен
     /// остаться прежним и после переименования.
     var name: String?
+    /// Точная ширина — в колонке говорящих. Длинное имя в ней обрезается.
+    var width: CGFloat?
 
     /// Палитра из токенов приложения: у каждой пары «светлый — тёмный» уже
     /// подобрана плотность, случайные оттенки в тёмной теме бы выпадали.
@@ -1457,9 +1517,11 @@ struct SpeakerDot: View {
             .font(LoriFont.tiny.weight(.semibold))
             .foregroundStyle(LoriPalette.onInk)
             .lineLimit(1)
+            .truncationMode(.tail)
             // Поля и у метки: на крупном шрифте «S2» шире кружка в 26 pt и без
             // них упиралась бы в его край.
             .padding(.horizontal, name == nil ? 4 : 8)
+            .frame(width: width)
             .frame(minWidth: 26, minHeight: 26)
             .background(color, in: Capsule())
             .accessibilityLabel("Говорящий \(name ?? label)")
