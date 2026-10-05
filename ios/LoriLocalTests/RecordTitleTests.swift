@@ -331,6 +331,56 @@ final class TranscriptPreviewsTests: XCTestCase {
         XCTAssertEqual(previews.preview(for: path)?.title, "Второй вариант после перерасшифровки")
     }
 
+    /// Первое чтение ждёт `release`, остальные отвечают сразу.
+    private final class ReadGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var count = 0
+        private var held: CheckedContinuation<Void, Never>?
+
+        var isHolding: Bool { lock.withLock { held != nil } }
+
+        func next() async -> Int {
+            let call = lock.withLock { count += 1; return count }
+            if call == 1 {
+                await withCheckedContinuation { continuation in
+                    lock.withLock { held = continuation }
+                }
+            }
+            return call
+        }
+
+        func release() {
+            let continuation = lock.withLock { () -> CheckedContinuation<Void, Never>? in
+                defer { held = nil }
+                return held
+            }
+            continuation?.resume()
+        }
+    }
+
+    /// **Регрессия.** Номер чтения считался по записи и после `invalidate` (и
+    /// `move`) начинался заново с единицы: опоздавшее старое чтение совпадало
+    /// номером с новым и затирало свежее превью устаревшим.
+    func testLateOldReadNeverOverwritesAFreshPreview() async throws {
+        _ = try workspace.saveTranscript(Transcript(text: "Текст записи. Дальше."), for: audioURL)
+        let gate = ReadGate()
+        let previews = TranscriptPreviews(reader: { _ in
+            let call = await gate.next()
+            return TranscriptPreviews.Preview(title: call == 1 ? "Старое" : "Новое", snippet: nil, head: nil)
+        })
+
+        previews.load(try workspace.entry(at: path), in: workspace)
+        await waitUntil { gate.isHolding }
+        previews.invalidate(path)
+        previews.transcriptSaved(path, in: workspace)
+        await waitUntil { previews.preview(for: path)?.title == "Новое" }
+
+        gate.release()
+        try await Task.sleep(for: .milliseconds(150))
+
+        XCTAssertEqual(previews.preview(for: path)?.title, "Новое", "опоздавшее чтение отброшено")
+    }
+
     /// Переименование не заставляет перечитывать текст и не роняет карточку в дату.
     func testRenamedRecordKeepsItsPreview() async throws {
         _ = try workspace.saveTranscript(Transcript(text: "Обсудили бюджет на квартал. Потом найм."), for: audioURL)

@@ -29,6 +29,24 @@ final class TranscriptPreviews: ObservableObject {
     private var loading = Set<String>()
     /// Номер последнего чтения по записи: ответ устаревшего чтения отбрасывается.
     private var generations: [String: Int] = [:]
+    /// Счётчик чтений — общий и только растёт. Раньше номер считался по записи
+    /// и после `invalidate`/`move` начинался заново с единицы: старое чтение,
+    /// ещё шедшее для того же пути, совпадало номером с новым и затирало свежее
+    /// превью устаревшим.
+    private var lastGeneration = 0
+    /// Чтение и разбор файла. Подменяется в тестах, чтобы задержать одно чтение
+    /// и проверить, что его опоздавший ответ отбрасывается.
+    private let reader: @Sendable (URL) async -> Preview
+
+    init(reader: (@Sendable (URL) async -> Preview)? = nil) {
+        self.reader = reader ?? { url in
+            // Само чтение и разбор — вне главного потока: на длинных текстах
+            // именно они задерживали скролл.
+            await Task.detached(priority: .utility) {
+                Preview.make(from: (try? WorkspaceStore.readTextFile(at: url)) ?? "")
+            }.value
+        }
+    }
     /// Записи, у которых расшифровки не было, когда строка просила превью.
     ///
     /// Строка списка зовёт `load` один раз — в своём `.task`. Раньше запись без
@@ -104,14 +122,12 @@ final class TranscriptPreviews: ObservableObject {
         }
         missing.remove(path)
         loading.insert(path)
-        let generation = (generations[path] ?? 0) + 1
+        lastGeneration += 1
+        let generation = lastGeneration
         generations[path] = generation
+        let reader = reader
         Task { [weak self] in
-            // `Task {}` наследует MainActor. Само чтение и разбор явно
-            // выносим: на длинных текстах именно эта строка задерживала скролл.
-            let preview = await Task.detached(priority: .utility) {
-                Preview.make(from: (try? WorkspaceStore.readTextFile(at: url)) ?? "")
-            }.value
+            let preview = await reader(url)
             guard let self, self.generations[path] == generation else { return }
             self.loading.remove(path)
             self.previews[path] = preview
