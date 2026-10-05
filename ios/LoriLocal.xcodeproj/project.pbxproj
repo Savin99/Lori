@@ -573,13 +573,6 @@
 			path = Fixtures;
 			sourceTree = "<group>";
 		};
-		"TEMP_B268E3E7-792B-4E23-83DB-6101024DD31D" /* .claude */ = {
-			isa = PBXGroup;
-			children = (
-			);
-			path = .claude;
-			sourceTree = "<group>";
-		};
 /* End PBXGroup section */
 
 /* Begin PBXNativeTarget section */
