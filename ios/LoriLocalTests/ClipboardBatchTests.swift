@@ -376,7 +376,10 @@ final class ClipboardBatchTests: XCTestCase {
         XCTAssertEqual(name(nil, nil, "mp3"), "Вставленное.mp3")
         XCTAssertEqual(name(nil, nil, nil), "Вставленное.m4a", "как было, когда тип ничего не сказал")
         XCTAssertEqual(name("", "", "m4a"), "Вставленное.m4a")
-        XCTAssertEqual(name(nil, "6F9619FF-8B86-D011-B42D-00C04FC964FF.m4a", "m4a"), "Вставленное.m4a", "набор знаков — не имя")
+        XCTAssertEqual(name(nil, "6F9619FF-8B86-D011-B42D-00C04FC964FF.m4a", "m4a"), "Вставленное.m4a", "UUID — не имя")
+        XCTAssertEqual(name(nil, "6F9619FF8B86D011B42D00C04FC964FF.m4a", "m4a"), "Вставленное.m4a", "и UUID без дефисов")
+        XCTAssertEqual(name(nil, "20260901-123456.m4a", "m4a"), "20260901-123456.m4a", "цифры с дефисом — настоящее имя диктофона")
+        XCTAssertEqual(name(nil, "12345678.m4a", "m4a"), "12345678.m4a")
         XCTAssertEqual(name("а/б", nil, "m4a"), "а-б.m4a", "«/» не должен стать папкой")
         XCTAssertEqual(name(".скрытая", nil, "m4a"), "скрытая.m4a")
     }

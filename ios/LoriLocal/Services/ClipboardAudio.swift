@@ -344,9 +344,11 @@ enum ClipboardAudio {
                     || UTType(filenameExtension: suffix)?.conforms(to: .audio) == true
             )
         }
-        /// Имя без смысла — набор шестнадцатеричных знаков, каким бывает временный файл.
+        /// Имя без смысла — UUID, каким бывает временный файл. Именно UUID, а не «что-то из
+        /// цифр и дефисов»: «20260901-123456» — настоящее имя, которое дал диктофон, и
+        /// терять его нельзя.
         func isMeaningless(_ base: String) -> Bool {
-            base.count >= 8 && base.allSatisfy { $0.isHexDigit || $0 == "-" }
+            UUID(uuidString: base) != nil || (base.count == 32 && base.allSatisfy(\.isHexDigit))
         }
 
         let suggested = clean(suggestedName)
