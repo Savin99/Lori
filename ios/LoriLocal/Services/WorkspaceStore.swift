@@ -361,6 +361,18 @@ final class WorkspaceStore: ObservableObject {
         return importedPath(destination, in: relativeDirectory)
     }
 
+    /// Откат импорта: убирает файл, который `importFileAsync` только что создал.
+    ///
+    /// Не «Удалить запись» (та уходит в корзину): здесь файл — наша свежая копия, а
+    /// оригинал по-прежнему лежит в промежуточной папке, так что терять нечего. Нужен,
+    /// когда за импортом не удалось поставить запись в очередь: оставить её в списке
+    /// «Без расшифровки» значило бы вернуть человеку работу, которую он уже отдал.
+    func discardImportedFile(at relativePath: String) {
+        guard let url = try? fileURL(for: relativePath) else { return }
+        try? fileManager.removeItem(at: url)
+        requestRefresh()
+    }
+
     // MARK: - Импорт: подготовка, имена, копирование
 
     /// Проверки, общие для обоих вариантов импорта. Возвращает папку назначения и имя файла.

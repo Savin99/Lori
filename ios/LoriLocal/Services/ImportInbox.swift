@@ -263,9 +263,14 @@ enum ImportInbox {
 enum ImportError: LocalizedError, Equatable, Sendable {
     /// Формата нет среди тех, что приложение расшифровывает.
     case unsupportedFormat(fileName: String)
+    /// Файл принят, но очередь расшифровки сохранить не удалось (нет места, файл закрыт
+    /// защитой данных). Импорт при этом откатывается: запись не остаётся «Без расшифровки».
+    case queueUnavailable(fileName: String)
 
     var errorDescription: String? {
         switch self {
+        case let .queueUnavailable(fileName):
+            return "«\(fileName)» не поставлена в очередь: не удалось сохранить очередь. Освободите место на телефоне и попробуйте снова — файл остался прикреплённым."
         case let .unsupportedFormat(fileName):
             let suffix = (fileName as NSString).pathExtension.lowercased()
             let what = suffix.isEmpty

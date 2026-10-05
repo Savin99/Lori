@@ -1324,3 +1324,133 @@ final class TranscriptionService: ObservableObject {
         }
     }
 }
+
+// MARK: - Пакетный импорт и постановка
+
+/// Итог пакетного импорта: что вошло в очередь, что нет и почему.
+struct TranscriptionImportReport: Equatable {
+    struct Imported: Equatable {
+        /// Файл в промежуточной папке, откуда его взяли, — по нему интерфейс узнаёт «свой» файл.
+        let source: URL
+        /// Путь записи в рабочей папке — по нему она стоит в очереди.
+        let path: String
+    }
+
+    struct Failure: Equatable {
+        let source: URL
+        /// Причина текстом для человека: имя файла в ней уже есть.
+        let message: String
+    }
+
+    /// Не `nil` — движок не готов, и **не сделано ничего**: ни импорта, ни очереди.
+    /// Прикреплённые файлы лежат где лежали, человеку нужно починить движок и повторить.
+    var blockedBy: String?
+    var imported: [Imported] = []
+    var failed: [Failure] = []
+
+    /// Всё, что просили, вошло в очередь.
+    var isComplete: Bool { blockedBy == nil && failed.isEmpty }
+}
+
+extension TranscriptionService {
+    /// Принимает **один** подготовленный файл (из `ImportInbox`) и ставит его в очередь:
+    /// копирует в рабочую папку и тут же встаёт в очередь, как одно действие.
+    ///
+    /// Цикл по нескольким файлам и отчёт о частичном успехе остаются за вызывающим — для
+    /// этого функция и одна: один файл вошёл или не вошёл, и третьего нет.
+    ///
+    /// - Успех: возвращает путь записи; файл в промежуточной папке убран (иначе он вернулся
+    ///   бы в панель при следующем открытии и импортировался второй раз).
+    /// - Неподдерживаемый формат: `ImportError.unsupportedFormat`, промежуточная копия убрана —
+    ///   негодный файл годным не станет, а в панели он только мешает.
+    /// - Любой другой отказ при копировании: бросает ошибку, файл **остаётся** в
+    ///   промежуточной папке для повтора.
+    /// - Очередь не сохранилась: импорт откатывается (копия в рабочей папке убирается),
+    ///   `ImportError.queueUnavailable`, промежуточный файл остаётся. Запись не остаётся
+    ///   в списке «Без расшифровки» в состоянии, которого человек не просил.
+    ///
+    /// `didImport` вызывается синхронно сразу после постановки, раньше, чем работа успеет
+    /// хоть на шаг продвинуться: здесь интерфейс ставит запись временный заголовок
+    /// (имя принесённого файла), и расшифровка не может закончиться и дать записи
+    /// заголовок от модели до того, как он будет задан.
+    ///
+    /// Сама запись в работу **не** уходит без вызова: «Принесённый файл никогда не уходит в
+    /// расшифровку сам» — этот вызов и есть нажатие человека.
+    @discardableResult
+    func importAndEnqueue(
+        _ staged: URL,
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind? = nil,
+        modifiedAt: Date = .now,
+        didImport: (_ relativePath: String) -> Void = { _ in }
+    ) async throws -> String {
+        let path: String
+        do {
+            path = try await workspace.importFileAsync(from: staged, modifiedAt: modifiedAt)
+        } catch let refusal as ImportError {
+            ImportInbox.forget(staged)
+            throw refusal
+        }
+        guard let entry = try? workspace.entry(at: path) else {
+            workspace.discardImportedFile(at: path)
+            throw WorkspaceError.importFailed
+        }
+        guard enqueue(entry, in: workspace, using: kind) else {
+            workspace.discardImportedFile(at: path)
+            throw ImportError.queueUnavailable(fileName: staged.lastPathComponent)
+        }
+        didImport(path)
+        ImportInbox.forget(staged)
+        Diagnostics.note("импорт: «\(path)» принята и поставлена в очередь")
+        return path
+    }
+
+    /// Принимает пачку файлов: **одна** проверка движка в начале, затем по файлу —
+    /// копирование и постановка, и отчёт о том, что вошло и что нет.
+    ///
+    /// - Движок не готов — не делается ничего, в отчёте `blockedBy` с причиной. Пять файлов
+    ///   при пропавшем ключе раньше давали пять строк «Ошибка»; теперь — один вопрос до импорта.
+    /// - Файлы идут **по порядку** и встают в очередь в том же порядке. Движок один на всю
+    ///   пачку: он назван один раз в начале, и смена настройки посреди ввода пачку не
+    ///   перемешает.
+    /// - Один негодный файл не отменяет остальных: он попадает в `failed`, остальные идут.
+    /// - Даты изменения идут с шагом в 10 мс на убыль: первый файл — самый новый. В списке
+    ///   «новые сверху» пачка читается сверху вниз в том порядке, в каком расшифровывается.
+    ///
+    /// `didImport` получает исходный файл и путь записи — этого хватает, чтобы задать записи
+    /// заголовок по имени принесённого файла.
+    func importAndEnqueue(
+        _ files: [URL],
+        into workspace: WorkspaceStore,
+        using kind: TranscriptionEngineKind? = nil,
+        didImport: (_ source: URL, _ relativePath: String) -> Void = { _, _ in }
+    ) async -> TranscriptionImportReport {
+        var report = TranscriptionImportReport()
+        guard !files.isEmpty else { return report }
+
+        let engine = kind ?? TranscriptionSettings.engine
+        if let problem = await preflightProblem(for: engine) {
+            Diagnostics.note("импорт: пачка из \(files.count) остановлена до начала — \(problem)")
+            report.blockedBy = problem
+            return report
+        }
+
+        let start = Date()
+        for (index, file) in files.enumerated() {
+            do {
+                let path = try await importAndEnqueue(
+                    file,
+                    into: workspace,
+                    using: engine,
+                    modifiedAt: start.addingTimeInterval(-Double(index) * 0.01),
+                    didImport: { didImport(file, $0) }
+                )
+                report.imported.append(.init(source: file, path: path))
+            } catch {
+                Diagnostics.note("импорт: «\(file.lastPathComponent)» не вошла — \(error.localizedDescription)")
+                report.failed.append(.init(source: file, message: error.localizedDescription))
+            }
+        }
+        return report
+    }
+}
