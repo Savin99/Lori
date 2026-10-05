@@ -22,25 +22,36 @@ struct RecordingCard: View {
     let status: RecordStatus?
     let perform: (RecordStatus.Action) -> Void
 
+    @Environment(\.dynamicTypeSize) private var typeSize
+
+    /// При шрифтах для слабого зрения кнопка рядом со строкой состояния сжимала
+    /// её до «Без расш…» — тогда кнопка встаёт под текст карточки.
+    private var stacksAction: Bool { typeSize.isAccessibilitySize }
+
     var body: some View {
-        info
-            // Кнопка действия — поверх строки состояния, а не внутри неё: внутри
-            // она слилась бы с текстом карточки в один элемент VoiceOver и
-            // потерялась бы для UI-теста. Место под неё держит невидимая копия.
-            .overlay(alignment: Alignment(horizontal: .trailing, vertical: .cardStatus)) {
-                if let action = status?.action {
-                    CardActionButton(action: action, record: title) { perform(action) }
+        VStack(alignment: .leading, spacing: 8) {
+            info
+                // Кнопка действия — поверх строки состояния, а не внутри неё: внутри
+                // она слилась бы с текстом карточки в один элемент VoiceOver и
+                // потерялась бы для UI-теста. Место под неё держит невидимая копия.
+                .overlay(alignment: Alignment(horizontal: .trailing, vertical: .cardStatus)) {
+                    if !stacksAction, let action = status?.action {
+                        CardActionButton(action: action, record: title) { perform(action) }
+                    }
                 }
+            if stacksAction, let action = status?.action {
+                CardActionButton(action: action, record: title) { perform(action) }
             }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 13)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(LoriPalette.line, lineWidth: 1))
-            .contentShape(Rectangle())
-            // Превью долгого нажатия — сама карточка, а не прямоугольник строки
-            // с кремовыми полями вокруг неё.
-            .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 13)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+        .overlay(RoundedRectangle(cornerRadius: 20, style: .continuous).stroke(LoriPalette.line, lineWidth: 1))
+        .contentShape(Rectangle())
+        // Превью долгого нажатия — сама карточка, а не прямоугольник строки
+        // с кремовыми полями вокруг неё.
+        .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: 20, style: .continuous))
     }
 
     private var info: some View {
@@ -61,7 +72,7 @@ struct RecordingCard: View {
             }
 
             if let status {
-                StatusRow(status: status, record: title)
+                StatusRow(status: status, record: title, reservesAction: !stacksAction)
                     .alignmentGuide(.cardStatus) { $0[VerticalAlignment.center] }
             }
 
@@ -116,6 +127,8 @@ struct RecordingCard: View {
 private struct StatusRow: View {
     let status: RecordStatus
     let record: String
+    /// Держать ли справа место под кнопку, лежащую поверх строки.
+    var reservesAction = true
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -136,7 +149,7 @@ private struct StatusRow: View {
                     .multilineTextAlignment(.leading)
                     .contentTransition(.numericText())
                 Spacer(minLength: 8)
-                if let action = status.action {
+                if reservesAction, let action = status.action {
                     // Место под настоящую кнопку, которая лежит поверх карточки.
                     CardActionButton.capsule(action)
                         .hidden()
