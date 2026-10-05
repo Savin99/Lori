@@ -95,6 +95,24 @@ final class TranscriptScreenUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Пауза"].waitForExistence(timeout: 3), "тап по таймкоду включает звук")
     }
 
+    /// Реплику выделяют долгим нажатием, как любой текст, — и копируют.
+    func testReplicaTextIsSelectable() throws {
+        let app = launch()
+        try open(sample, in: app)
+
+        // Та же фраза стоит сниппетом на карточке списка под листом — берём
+        // последнюю: лист в дереве идёт после списка.
+        let matches = app.staticTexts.matching(NSPredicate(format: "label == %@", "Раз, два, три, четыре, пять."))
+        XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 5))
+        matches.element(boundBy: matches.count - 1).press(forDuration: 1.2)
+        // «Скопировать» из меню текста, а не одноимённая кнопка экрана.
+        let copy = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "label == %@ AND identifier != %@", "Скопировать", "copyTranscript"))
+            .firstMatch
+        XCTAssertTrue(copy.waitForExistence(timeout: 3), "долгое нажатие на реплику даёт меню текста")
+        save("record-text-selection")
+    }
+
     /// В «…» только то, что работает; «Скопировать» и «Поделиться» живут на экране.
     func testMoreMenuListsRecordActions() throws {
         let app = launch()
