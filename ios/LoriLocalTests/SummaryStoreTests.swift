@@ -293,6 +293,30 @@ final class SummaryStoreTests: XCTestCase {
         XCTAssertEqual(reopened.entry(for: "d.m4a")?.origin, .imported)
     }
 
+    /// **Регрессия.** Записи самой Lori импортом не бывали: служебное на вид имя
+    /// у них — «Звонок», «12.09», «1:1», «Q3 2026» — набрал человек, и понижать
+    /// его до имени файла нельзя. Понижается только принесённая запись.
+    func testLegacyManualNamesOfOwnRecordingsStayManual() throws {
+        let legacy = """
+        {"Recordings/a.m4a": {"title": "Звонок", "detail": "", "manual": true},
+         "Recordings/b.m4a": {"title": "12.09", "detail": "", "manual": true},
+         "Recordings/c.m4a": {"title": "1:1", "detail": "Описание модели", "manual": true},
+         "Recordings/d.m4a": {"title": "Q3 2026", "detail": "", "manual": true},
+         "Imported/e.m4a": {"title": "Новая запись 5", "detail": "", "manual": true},
+         "Imported/f.m4a": {"title": "Совещание 27.08", "detail": "", "manual": true}}
+        """
+        try Data(legacy.utf8).write(to: url)
+
+        let reopened = SummaryStore(url: url)
+
+        for path in ["Recordings/a.m4a", "Recordings/b.m4a", "Recordings/c.m4a", "Recordings/d.m4a"] {
+            XCTAssertEqual(reopened.entry(for: path)?.origin, .manual, "\(path) — имя от человека")
+        }
+        XCTAssertFalse(reopened.needsSummary(for: "Recordings/c.m4a"), "описание модели уже было")
+        XCTAssertEqual(reopened.entry(for: "Imported/e.m4a")?.origin, .imported, "служебное имя принесённого файла")
+        XCTAssertEqual(reopened.entry(for: "Imported/f.m4a")?.origin, .manual)
+    }
+
     /// Старые сборки читают из файла заголовок, описание и «ручное» — эти поля
     /// остаются на месте.
     func testSavedFileStaysReadableForOlderBuilds() throws {

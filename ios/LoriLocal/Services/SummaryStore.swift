@@ -289,7 +289,12 @@ final class SummaryStore: ObservableObject {
     /// рядом, потом запись в журнал. Без копии писать поверх нельзя вовсе.
     private func decode(_ data: Data) -> [String: Entry]? {
         do {
-            return try JSONDecoder().decode([String: Entry].self, from: data)
+            // Происхождение старых записей зависит от пути (`Entry.legacy`), а путь —
+            // это ключ словаря, и разбору одной записи он не виден.
+            let stored = try JSONDecoder().decode([String: Entry.Stored].self, from: data)
+            return Dictionary(uniqueKeysWithValues: stored.map { path, record in
+                (path, Entry(stored: record, path: path))
+            })
         } catch {
             let stamp = Self.backupStamp.string(from: Date())
             let backup = url.deletingPathExtension().appendingPathExtension("corrupt-\(stamp).json")
@@ -332,40 +337,57 @@ final class SummaryStore: ObservableObject {
 
 // MARK: - Формат файла
 
-extension SummaryStore.Entry: Codable {
+extension SummaryStore.Entry: Encodable {
     private enum CodingKeys: String, CodingKey {
         case title, detail, manual, origin, summarized, source, stale, replaceManual
     }
 
-    init(from decoder: Decoder) throws {
-        let container = try decoder.container(keyedBy: CodingKeys.self)
-        title = try container.decode(String.self, forKey: .title)
-        detail = try container.decodeIfPresent(String.self, forKey: .detail) ?? ""
-        let manual = try container.decodeIfPresent(Bool.self, forKey: .manual) ?? false
-        source = try container.decodeIfPresent(String.self, forKey: .source)
-        stale = try container.decodeIfPresent(Bool.self, forKey: .stale) ?? false
-        replaceManual = try container.decodeIfPresent(Bool.self, forKey: .replaceManual) ?? false
+    /// Запись так, как она лежит в файле: у старых сборок там только заголовок,
+    /// описание и «ручное».
+    struct Stored: Decodable {
+        let title: String
+        let detail: String?
+        let manual: Bool?
+        let origin: String?
+        let summarized: Bool?
+        let source: String?
+        let stale: Bool?
+        let replaceManual: Bool?
+    }
+
+    init(stored: Stored, path: String) {
+        let detail = stored.detail ?? ""
         // Незнакомое значение из будущей сборки не роняет разбор всего файла.
-        if let raw = try container.decodeIfPresent(String.self, forKey: .origin),
-           let origin = SummaryStore.Origin(rawValue: raw) {
-            self.origin = origin
-            summarized = try container.decodeIfPresent(Bool.self, forKey: .summarized) ?? false
-        } else {
-            (origin, summarized) = Self.legacy(title: title, detail: detail, manual: manual)
-        }
+        let known = stored.origin.flatMap(SummaryStore.Origin.init(rawValue:))
+        let (origin, summarized) = known.map { ($0, stored.summarized ?? false) }
+            ?? Self.legacy(title: stored.title, detail: detail, manual: stored.manual ?? false, path: path)
+        self.init(
+            title: stored.title,
+            detail: detail,
+            origin: origin,
+            summarized: summarized,
+            source: stored.source,
+            stale: stored.stale ?? false,
+            replaceManual: stored.replaceManual ?? false
+        )
     }
 
     /// Происхождение для файла старой сборки, где были только заголовок,
     /// описание и признак «ручное».
     ///
     /// Описание бывало только от модели, поэтому непустое значит «модель уже
-    /// отвечала». Ручное имя, которое на деле служебное («Новая запись 5»), —
-    /// это импорт: до `setImported` имена принесённых файлов помечались ручными,
-    /// и такое имя навсегда побеждало заголовок модели. Человек так запись не
-    /// назовёт, а модели ответить заново стоит одного запуска.
-    static func legacy(title: String, detail: String, manual: Bool) -> (SummaryStore.Origin, Bool) {
+    /// отвечала». Ручное имя, которое на деле служебное («Новая запись 5»), у
+    /// принесённой записи — это импорт: до `setImported` имена принесённых файлов
+    /// помечались ручными, и такое имя навсегда побеждало заголовок модели.
+    ///
+    /// Но только вне `Recordings/`: записи самой Lori (диктофон) импортом не
+    /// бывали никогда, и служебное на вид имя там — «Звонок», «12.09», «1:1»,
+    /// «Q3 2026» — набрал человек. Понизить его значило бы отдать модели.
+    static func legacy(title: String, detail: String, manual: Bool, path: String) -> (SummaryStore.Origin, Bool) {
         if manual {
-            return RecordTitle.isGenericName(title) ? (.imported, false) : (.manual, !detail.isEmpty)
+            let ownRecording = path.hasPrefix("Recordings/")
+            if !ownRecording, RecordTitle.isGenericName(title) { return (.imported, false) }
+            return (.manual, !detail.isEmpty)
         }
         return detail.isEmpty ? (.imported, false) : (.generated, true)
     }
