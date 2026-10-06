@@ -99,7 +99,7 @@ struct ContentView: View {
     @StateObject private var search = TranscriptSearchStore()
     @StateObject private var topics = TopicStore()
     @StateObject private var durations = RecordingDurations()
-    @StateObject private var engines = ContentView.makeEngineDirectory()
+    @StateObject private var engines = EngineDirectory.forInterface()
     @StateObject private var composer = ComposerModel()
     @StateObject private var speakers = SpeakerNames()
     @StateObject private var speed = TranscriptionSpeed()
@@ -572,7 +572,7 @@ struct ContentView: View {
             )
         )
         .sheet(isPresented: $showEnginePicker) {
-            EnginePicker(directory: engines, selection: $engineRaw)
+            EnginePicker(directory: engines, selection: $engineRaw, transcription: transcription)
         }
         .onChange(of: engineRaw) { engines.refresh() }
         // Типы буфера читаются без содержимого, поэтому проверять их можно и на
@@ -592,17 +592,6 @@ struct ContentView: View {
     /// Выбранный движок в терминах интерфейса.
     private var engine: EngineDescriptor {
         EngineCatalog.descriptor(for: TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam)
-    }
-
-    /// Готовность движков для чипа. С проверочным движком QA считает он, и любой
-    /// выбор в панели честно готов — иначе снимки показывали бы «Нет ключа».
-    private static func makeEngineDirectory() -> EngineDirectory {
-        #if DEBUG
-        if QAStubEngine.enabled {
-            return EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { true })
-        }
-        #endif
-        return EngineDirectory()
     }
 
     // MARK: - Состояние
@@ -985,7 +974,9 @@ struct ContentView: View {
     /// листов и диалогов подряд упирается в проверку типов компилятора.
     private func sheets(_ content: some View) -> some View {
         content
-            .sheet(isPresented: $showSettings) {
+            // В настройках могли скачать модель или ввести ключ, а у экрана движка свой
+            // справочник: без перечитывания чип панели так и говорил бы «Нет ключа».
+            .sheet(isPresented: $showSettings, onDismiss: { engines.refresh() }) {
                 SettingsRoot(transcription: transcription, topics: topics)
             }
             // Запись, открытую из поиска, могли удалить или переименовать на её экране:
