@@ -389,10 +389,12 @@ struct GeminiTranscriber: Transcribing {
         )
 
         // Что переспрашивать, решается до первого запроса: от длинного к короткому,
-        // чтобы предел переспросов ушёл туда, где потеряно больше.
+        // чтобы предел переспросов ушёл туда, где потеряно больше. Звучащим
+        // считается участок с фразами у уровня речи (`AudioLoudness.verdict`):
+        // щелчок или вдох в тихой минуте — не повод платить за переспрос.
         var loud: [(gap: ClosedRange<TimeInterval>, sound: ClosedRange<TimeInterval>)] = []
         for gap in gaps {
-            guard let sound = AudioLoudness.sound(in: source, range: gap, louderThan: threshold) else {
+            guard let sound = AudioLoudness.lostSpeech(in: source, range: gap, speechLevel: level) else {
                 Diagnostics.note("пропуск \(TranscriptCoverage.describe(gap)): тихо, переспрашивать нечего")
                 continue
             }

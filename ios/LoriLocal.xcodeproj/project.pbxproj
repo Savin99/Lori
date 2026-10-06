@@ -68,6 +68,7 @@
 		53DCD74BB721BC2AB5823714 /* LocalTranscriptCheckpoint.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1E2BBA361369DA5F6EC885AB /* LocalTranscriptCheckpoint.swift */; };
 		56F2A462F944B9FB25348012 /* TranscriptPreviews.swift in Sources */ = {isa = PBXBuildFile; fileRef = F30975A5A880CF96E786B795 /* TranscriptPreviews.swift */; };
 		578F983501ADD7CCEB03BE9F /* TranscriptionJob.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C751AC3813F1EFA8C10B6B0 /* TranscriptionJob.swift */; };
+		5A6E2BA9DADFFCE5C4F63BAE /* SyntheticSound.swift in Sources */ = {isa = PBXBuildFile; fileRef = C94DB1AF9C88008A0873954A /* SyntheticSound.swift */; };
 		5BC5F62EDA3386CCC181405E /* MotionBits.swift in Sources */ = {isa = PBXBuildFile; fileRef = 275990D3CE34D947AB8DB7D9 /* MotionBits.swift */; };
 		5F09E7287CDE8C5DF4CAE283 /* TranscriptCoverage.swift in Sources */ = {isa = PBXBuildFile; fileRef = 6B06995C1A34651D3A6BBB46 /* TranscriptCoverage.swift */; };
 		5F3189D30CD009536143F0CB /* EngineSessionCacheTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 92A039D21FBC90FA16CAF93E /* EngineSessionCacheTests.swift */; };
@@ -304,6 +305,7 @@
 		C00D3C676BA66C599AC6306D /* GeminiTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiTranscriber.swift; sourceTree = "<group>"; };
 		C00EF7EB620456A83A536D47 /* GigaAMOnnxIntegrationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GigaAMOnnxIntegrationTests.swift; sourceTree = "<group>"; };
 		C292F42B4C567A830C09FF29 /* TranscriptionSettingsTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptionSettingsTests.swift; sourceTree = "<group>"; };
+		C94DB1AF9C88008A0873954A /* SyntheticSound.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SyntheticSound.swift; sourceTree = "<group>"; };
 		C99AB0B59F6B41AB5E1B977B /* AudioChunker.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioChunker.swift; sourceTree = "<group>"; };
 		CA63D2220A8BCFFF0C21AAD3 /* RepetitionCheckTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RepetitionCheckTests.swift; sourceTree = "<group>"; };
 		CC41B9D0DF36794BF3B07D5C /* TranscriptCoverageTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptCoverageTests.swift; sourceTree = "<group>"; };
@@ -488,6 +490,7 @@
 				9A7FE8B8ED0CF69B754384B5 /* SummarizerTests.swift */,
 				F9EF2592FE1D5FB3A10BE310 /* SummaryRunnerTests.swift */,
 				D872CCCB4986635646EE2B7C /* SummaryStoreTests.swift */,
+				C94DB1AF9C88008A0873954A /* SyntheticSound.swift */,
 				0B7D939E3F05BC05E538D371 /* TranscriptCheckpointTests.swift */,
 				CC41B9D0DF36794BF3B07D5C /* TranscriptCoverageTests.swift */,
 				5EC55C18D7F8F9B538E27DBF /* TranscriptExportTests.swift */,
@@ -883,6 +886,7 @@
 				46A9462D25809971695EE159 /* SummarizerTests.swift in Sources */,
 				F9B0BC48B01B3031540D8DF7 /* SummaryRunnerTests.swift in Sources */,
 				2CA438E22E9E602776CE1EBC /* SummaryStoreTests.swift in Sources */,
+				5A6E2BA9DADFFCE5C4F63BAE /* SyntheticSound.swift in Sources */,
 				429A1116386224898B48E240 /* TranscriptCheckpointTests.swift in Sources */,
 				B576D895E5032BD394B6ADA6 /* TranscriptCoverageTests.swift in Sources */,
 				6AA9694CE5C5441297EFCB3C /* TranscriptExportTests.swift in Sources */,

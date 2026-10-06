@@ -148,25 +148,30 @@ struct OpenAITranscriber: Transcribing {
         let measured = segments.isEmpty
             ? words.map { TranscriptSegment(start: $0.start, end: $0.end, text: $0.text) }
             : segments
-        if !measured.isEmpty {
+        let gaps: [ClosedRange<TimeInterval>] = measured.isEmpty
+            ? []
+            : TranscriptCoverage.gaps(in: measured, duration: duration).sorted {
+                ($0.upperBound - $0.lowerBound) > ($1.upperBound - $1.lowerBound)
+            }
+        if !gaps.isEmpty {
             // Пропуск проверяется звуком, а не только арифметикой: порог здесь
             // восемь секунд, а восьмисекундных пауз в разговоре сколько угодно, и
-            // плашка на каждой — ложная тревога. Порог тишины считается от уровня
-            // речи этой же записи (`AudioLoudness`), переспроса тут нет: у whisper
+            // плашка на каждой — ложная тревога. Плашка — только там, где в участке
+            // звучит речь (`AudioLoudness.verdict`: фразы у уровня речи этой же
+            // записи, щелчки и вдохи не в счёт). Переспроса тут нет: у whisper
             // тайминги плотные, и пропуск на нём почти всегда и есть молчание.
             let level = AudioLoudness.speechLevel(in: audioURL, speech: TranscriptCoverage.merged(measured))
-            let threshold = AudioLoudness.threshold(speechLevel: level)
-            let gaps = TranscriptCoverage.gaps(in: measured, duration: duration)
-                .sorted { ($0.upperBound - $0.lowerBound) > ($1.upperBound - $1.lowerBound) }
             // Слушаем десять самых длинных: запись с сотней дыр сломана целиком,
             // и сто чтений звука этого не исправят.
             for gap in gaps.prefix(10) {
-                guard let sound = AudioLoudness.sound(in: audioURL, range: gap, louderThan: threshold) else { continue }
+                guard let sound = AudioLoudness.lostSpeech(in: audioURL, range: gap, speechLevel: level) else { continue }
                 warnings.append("Пропуск \(TranscriptCoverage.describe(sound)): в ответе сервиса нет текста для этого участка.")
             }
-        }
-        if !warnings.isEmpty {
-            Diagnostics.note("OpenAI: пропусков \(warnings.count), покрытие \(Int(TranscriptCoverage.share(measured, duration: duration) * 100))%")
+            Diagnostics.note(
+                "OpenAI: участков без слов \(gaps.count), с речью \(warnings.count), "
+                + "уровень речи \(level.map { String(format: "%.4f", $0) } ?? "не измерен"), "
+                + "покрытие \(Int(TranscriptCoverage.share(measured, duration: duration) * 100))%"
+            )
         }
 
         let joined = texts.joined(separator: " ").trimmingCharacters(in: .whitespacesAndNewlines)

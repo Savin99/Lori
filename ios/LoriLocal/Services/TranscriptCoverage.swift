@@ -56,6 +56,35 @@ enum TranscriptCoverage {
         "\(TranscriptSegment.stamp(range.lowerBound))–\(TranscriptSegment.stamp(range.upperBound))"
     }
 
+    /// Отрезок из плашки о пропуске — обратное к `describe`: «Пропуск 4:19–5:19:
+    /// в ответе сервиса нет текста…» → 259…319. Плашки старых сборок («Похоже на
+    /// пропуск 0:10–0:20: …», до 3 сентября 2026) лежат в файлах владельца так же.
+    ///
+    /// `nil` — это не плашка о пропуске. «Участок 0:00–5:00: модель зациклилась…»
+    /// и прочие замечания про сорвавшийся ответ — о другом: там звук не спрашивают.
+    static func gap(in warning: String) -> ClosedRange<TimeInterval>? {
+        var text = Substring(warning.trimmingCharacters(in: .whitespaces))
+        for prefix in ["Похоже на пропуск ", "Пропуск "] {
+            guard text.lowercased().hasPrefix(prefix.lowercased()) else { continue }
+            text = text.dropFirst(prefix.count)
+            let token = text.prefix { !$0.isWhitespace }.trimmingCharacters(in: CharacterSet(charactersIn: ":.,;"))
+            let bounds = token.split(whereSeparator: { $0 == "–" || $0 == "-" }).map(String.init)
+            guard bounds.count == 2, let from = seconds(bounds[0]), let to = seconds(bounds[1]), to > from else {
+                return nil
+            }
+            return from...to
+        }
+        return nil
+    }
+
+    /// «1:05:20» → 3920, «4:19» → 259. Только то, что пишет `TranscriptSegment.stamp`.
+    static func seconds(_ stamp: String) -> TimeInterval? {
+        let parts = stamp.split(separator: ":", omittingEmptySubsequences: false)
+        guard (2...3).contains(parts.count),
+              parts.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return nil }
+        return parts.compactMap { TimeInterval($0) }.reduce(0) { $0 * 60 + $1 }
+    }
+
     /// Доля записи, покрытая репликами: 0…1.
     static func share(_ segments: [TranscriptSegment], duration: TimeInterval) -> Double {
         guard duration > 0 else { return 0 }

@@ -307,31 +307,35 @@ struct ElevenLabsTranscriber: Transcribing {
 
     /// Участки записи, для которых сервис не вернул ни слова. Проверка та же,
     /// что у OpenAI: молчать о пропуске нельзя — человек решит, что там тишина.
-    /// Порог тишины считается от уровня речи этой же записи, иначе плашка
-    /// вылезала бы на каждой восьмисекундной паузе в разговоре.
+    ///
+    /// Плашка — только там, где в участке звучит речь (`AudioLoudness.verdict`):
+    /// фразы от четырёх секунд у уровня речи этой записи. Прежнее правило звало
+    /// пропуском любой участок со щелчком или вдохом — так на записи владельца
+    /// 43:28 появились «Пропуск 4:19–5:19» и «Пропуск 20:17–20:34» над тишиной.
     static func gapWarnings(
         segments: [TranscriptSegment],
         audioURL: URL,
         duration: TimeInterval
     ) -> [String] {
         guard !segments.isEmpty else { return [] }
-        let level = AudioLoudness.speechLevel(in: audioURL, speech: TranscriptCoverage.merged(segments))
-        let threshold = AudioLoudness.threshold(speechLevel: level)
-        var warnings: [String] = []
         let gaps = TranscriptCoverage.gaps(in: segments, duration: duration)
             .sorted { ($0.upperBound - $0.lowerBound) > ($1.upperBound - $1.lowerBound) }
+        guard !gaps.isEmpty else { return [] }
+        let level = AudioLoudness.speechLevel(in: audioURL, speech: TranscriptCoverage.merged(segments))
+        var warnings: [String] = []
         // Десять самых длинных: запись с сотней дыр сломана целиком, и сто
         // чтений звука этого не исправят.
         for gap in gaps.prefix(10) {
-            guard let sound = AudioLoudness.sound(in: audioURL, range: gap, louderThan: threshold) else { continue }
+            guard let sound = AudioLoudness.lostSpeech(in: audioURL, range: gap, speechLevel: level) else { continue }
             warnings.append("Пропуск \(TranscriptCoverage.describe(sound)): в ответе сервиса нет текста для этого участка.")
         }
-        if !warnings.isEmpty {
-            Diagnostics.note(
-                "ElevenLabs: пропусков \(warnings.count), покрытие "
-                + "\(Int(TranscriptCoverage.share(segments, duration: duration) * 100))%"
-            )
-        }
+        // В файл журнала и тогда, когда все участки оказались тишиной: по этой
+        // строке с телефона видно, что проверка была и что она решила.
+        Diagnostics.note(
+            "ElevenLabs: участков без слов \(gaps.count), с речью \(warnings.count), "
+            + "уровень речи \(level.map { String(format: "%.4f", $0) } ?? "не измерен"), покрытие "
+            + "\(Int(TranscriptCoverage.share(segments, duration: duration) * 100))%"
+        )
         return warnings
     }
 

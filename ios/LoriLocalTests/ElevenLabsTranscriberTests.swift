@@ -287,6 +287,67 @@ final class ElevenLabsTranscriberTests: XCTestCase {
         XCTAssertTrue(transcript.warnings.isEmpty, "ложный пропуск: \(transcript.warnings)")
     }
 
+    /// Запись «минута разговора — проверяемый участок — минута разговора» с
+    /// шумом комнаты: так выглядели пропуски на записи владельца 43:28.
+    private func conversation(around middle: [Float]) throws -> URL {
+        let url = FileManager.default.temporaryDirectory.appending(path: "gap-\(UUID().uuidString).wav")
+        try SyntheticSound.write(SyntheticSound.conversation(around: middle, seed: 71), to: url)
+        return url
+    }
+
+    /// Ответ сервиса со словами только на заданных отрезках: «слово» каждые
+    /// полсекунды, точка — на каждом десятом.
+    private static func words(on ranges: [ClosedRange<TimeInterval>]) -> String {
+        var items: [String] = []
+        var texts: [String] = []
+        for range in ranges {
+            var time = range.lowerBound
+            var count = 0
+            while time + 0.4 <= range.upperBound {
+                count += 1
+                let text = count.isMultiple(of: 10) ? "слово." : "слово"
+                items.append(
+                    #"{"text":"\#(text)","start":\#(time),"end":\#(time + 0.4),"type":"word","speaker_id":"speaker_0"}"#
+                )
+                texts.append(text)
+                time += 0.5
+            }
+        }
+        return #"{"text":"\#(texts.joined(separator: " "))","language_code":"rus","words":[\#(items.joined(separator: ","))]}"#
+    }
+
+    /// **Случай владельца целиком через движок.** Минута тишины со щелчками,
+    /// стуками, кашлем и клавиатурой, слов сервиса на ней нет — и плашки нет:
+    /// это молчание, а не потерянная речь.
+    func testSilentMinuteWithClicksAndCoughsIsNotAGap() async throws {
+        let long = try conversation(around: SyntheticSound.busySilence(speech: 0.1, seed: 74))
+        defer { try? FileManager.default.removeItem(at: long) }
+        let answer = Self.words(on: [0...60, 120...180])
+
+        let transcript = try await engine { _, _ in .json(answer) }.transcribe(audioURL: long)
+
+        XCTAssertFalse(transcript.segments.isEmpty, "реплики на речи есть")
+        XCTAssertTrue(transcript.warnings.isEmpty, "ложный пропуск над тишиной: \(transcript.warnings)")
+    }
+
+    /// А речь, которую сервис пропустил, по-прежнему называется — даже тихая:
+    /// ради этого проверка и существует.
+    func testSpeechTheServiceSkippedIsStillReported() async throws {
+        let long = try conversation(around: SyntheticSound.speechLike(seconds: 60, level: 0.05, seed: 75))
+        defer { try? FileManager.default.removeItem(at: long) }
+        let answer = Self.words(on: [0...60, 120...180])
+
+        let transcript = try await engine { _, _ in .json(answer) }.transcribe(audioURL: long)
+
+        XCTAssertEqual(transcript.warnings.count, 1, "\(transcript.warnings)")
+        // Пропуск по словам — от конца последнего слова (59,9 с) до 2:00; плашка
+        // пишет время с точностью до секунды вниз.
+        let range = try XCTUnwrap(transcript.warnings.first.flatMap(TranscriptCoverage.gap(in:)))
+        XCTAssertGreaterThanOrEqual(range.lowerBound, 59, "плашка называет место внутри пропуска: \(range)")
+        XCTAssertLessThanOrEqual(range.upperBound, 120, "\(range)")
+        XCTAssertGreaterThan(range.upperBound - range.lowerBound, 50, "и почти целиком — речь там всю минуту: \(range)")
+    }
+
     // MARK: - Ключ и ошибки
 
     func testMissingKeyIsNamedByTheAccount() async {
