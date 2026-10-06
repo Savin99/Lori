@@ -28,7 +28,7 @@ struct EngineChip: View {
             .padding(.horizontal, 10)
             .frame(height: 32)
             .background(
-                readiness == .ready ? LoriPalette.bubble : LoriPalette.warn.opacity(0.14),
+                readiness == .ready ? LoriPalette.panelChip : LoriPalette.warn.opacity(0.14),
                 in: Capsule()
             )
             .frame(height: 44)
@@ -75,7 +75,7 @@ struct ModeChip: View {
             .foregroundStyle(LoriPalette.ink)
             .padding(.horizontal, 10)
             .frame(height: 32)
-            .background(LoriPalette.bubble, in: Capsule())
+            .background(LoriPalette.panelChip, in: Capsule())
             .frame(height: 44)
             .contentShape(Capsule())
         }

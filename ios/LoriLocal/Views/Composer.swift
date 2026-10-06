@@ -177,12 +177,16 @@ struct ComposerBar: View {
                         .foregroundStyle(LoriPalette.muted)
                     Spacer(minLength: 0)
                 }
+                .composerAccessory(leading: 14, trailing: 14, minHeight: 36)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("composerStatus")
             }
 
             if model.showsClipboardHint, state != .recording {
                 clipboardRow
+                    // Своих 4 точек слева у строки мало для плашки: текст лёг бы
+                    // вплотную к скруглению.
+                    .composerAccessory(leading: 10, trailing: 0, minHeight: 44)
             }
 
             VStack(alignment: .leading, spacing: 8) {
@@ -196,21 +200,13 @@ struct ComposerBar: View {
             }
             .padding(.horizontal, 7)
             .padding(.vertical, 7)
-            // Скругление непрерывное и фиксированное: `Capsule` на двух строках
-            // превращает панель в стадион, а радиус перестаёт держать форму.
-            .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 26, style: .continuous))
-            .overlay(
-                RoundedRectangle(cornerRadius: 26, style: .continuous)
-                    .stroke(LoriPalette.line, lineWidth: 1)
-            )
+            .composerPanelSurface()
         }
         .padding(.horizontal, 20)
         .padding(.top, 8)
         .padding(.bottom, 10)
-        // Подложка сплошная и уходит под полоску «домой». Полупрозрачная пропускала
-        // текст карточек сквозь панель: в тёмной теме заливка карточки — шесть
-        // процентов белого, и строки списка читались прямо поверх чипов.
-        .background(LoriPalette.canvas.ignoresSafeArea(edges: .bottom))
+        .composerGlassGroup()
+        .composerBackdrop()
         .animation(reduceMotion ? nil : .easeOut(duration: 0.22), value: state)
         .onChange(of: model.attached.count) { _, count in
             if count <= Self.collapsedCount { expanded = false }
@@ -525,6 +521,84 @@ struct ComposerBar: View {
     }
 }
 
+// MARK: - Поверхность панели
+
+/// Как нижняя панель лежит поверх списка.
+///
+/// iOS 26 — жидкое стекло (владелец, 6 октября 2026: «внизу, где селектор, его
+/// нужно сделать в стиле Apple жидкое стекло»). Панель — слой управления над
+/// контентом: список прокручивается под ней и просвечивает. Читаемость держит
+/// само стекло — вариант `.regular` размывает то, что под ним, и подстраивает
+/// яркость (HIG, «Materials»), — а край прокрутки под панелью (`safeAreaBar` в
+/// `ContentView`) ещё и гасит строки у нижнего края. Поэтому сплошной подложки,
+/// которой раньше закрывали проступавший текст, на iOS 26 нет.
+///
+/// Ниже iOS 26 — ровно как было: сплошная карточка на сплошной подложке.
+private extension View {
+    /// Сама панель: скруглённый прямоугольник 26 — на iOS 26 стеклянный.
+    ///
+    /// Стекло без оттенка и без `interactive()`: цвет Apple советует оставлять
+    /// главному действию (HIG, «Liquid Glass color»), а реакция на касание — для
+    /// отдельных кнопок, панель же — подложка под несколькими. Чипы и кнопки на ней
+    /// своего стекла не получают: стекло на стекле Apple просит не класть
+    /// («avoid layering Liquid Glass elements on top of each other»).
+    @ViewBuilder
+    func composerPanelSurface() -> some View {
+        // Скругление непрерывное и фиксированное: `Capsule` на двух строках
+        // превращает панель в стадион, а радиус перестаёт держать форму.
+        let shape = RoundedRectangle(cornerRadius: 26, style: .continuous)
+        if #available(iOS 26, *) {
+            glassEffect(.regular, in: shape)
+        } else {
+            background(LoriPalette.card, in: shape)
+                .overlay(shape.stroke(LoriPalette.line, lineWidth: 1))
+        }
+    }
+
+    /// Строка над панелью — подсказка буфера или «Добавляю…». На iOS 26 под ней
+    /// нет сплошной подложки, и голый текст читался бы прямо по карточкам, поэтому
+    /// у строки своя стеклянная плашка — рядом с панелью, а не на ней (как
+    /// мини-плеер над полосой вкладок). Ниже iOS 26 строка как была.
+    @ViewBuilder
+    func composerAccessory(leading: CGFloat, trailing: CGFloat, minHeight: CGFloat) -> some View {
+        if #available(iOS 26, *) {
+            padding(.leading, leading)
+                .padding(.trailing, trailing)
+                .frame(minHeight: minHeight)
+                .glassEffect(.regular, in: RoundedRectangle(cornerRadius: 22, style: .continuous))
+        } else {
+            self
+        }
+    }
+
+    /// Стеклянные формы панели — в одном контейнере: так Apple советует ради
+    /// скорости отрисовки («Applying Liquid Glass to custom views»). Интервал меньше
+    /// просвета между строкой и панелью (8): при большем формы сливались бы в одну
+    /// и в покое.
+    @ViewBuilder
+    func composerGlassGroup() -> some View {
+        if #available(iOS 26, *) {
+            GlassEffectContainer(spacing: 4) { self }
+        } else {
+            self
+        }
+    }
+
+    /// Подложка под всей панелью — только ниже iOS 26.
+    @ViewBuilder
+    func composerBackdrop() -> some View {
+        if #available(iOS 26, *) {
+            self
+        } else {
+            // Подложка сплошная и уходит под полоску «домой». Полупрозрачная
+            // пропускала текст карточек сквозь панель: в тёмной теме заливка
+            // карточки — шесть процентов белого, и строки списка читались прямо
+            // поверх чипов.
+            background(LoriPalette.canvas.ignoresSafeArea(edges: .bottom))
+        }
+    }
+}
+
 /// Строка записи: пауза, таймер, живая волна, отмена.
 struct RecordingRow: View {
     @ObservedObject var recorder: AudioCaptureStore
@@ -538,7 +612,7 @@ struct RecordingRow: View {
                     .font(LoriFont.small.weight(.bold))
                     .foregroundStyle(LoriPalette.ink)
                     .frame(width: 34, height: 34)
-                    .background(LoriPalette.canvas, in: Circle())
+                    .background(LoriPalette.panelButton, in: Circle())
                     .frame(width: 44, height: 44)
                     .contentShape(Circle())
             }
