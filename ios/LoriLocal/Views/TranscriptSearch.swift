@@ -50,11 +50,16 @@ final class TranscriptSearchStore: ObservableObject {
     /// Индексируются все записи: запись без расшифровки тоже должна находиться по
     /// заголовку, иначе её не отыскать вообще никак. Заголовки считает экран — они
     /// живут в хранилищах главного актора, а файлы читаются уже фоном.
-    func reindex(_ workspace: WorkspaceStore, title: (WorkspaceEntry) -> String) {
+    ///
+    /// `keepingHits` — пересборка под открытым поиском (`refresh`): находки остаются
+    /// на экране, пока не готовы новые, и «Готовлю поиск…» не мигает.
+    func reindex(_ workspace: WorkspaceStore, keepingHits: Bool = false, title: (WorkspaceEntry) -> String) {
         indexTask?.cancel()
         searchTask?.cancel()
-        isIndexing = true
-        hits = []
+        if !keepingHits {
+            isIndexing = true
+            hits = []
+        }
         let candidates = workspace.audio.map { entry in
             Candidate(
                 entry: entry,
@@ -84,6 +89,22 @@ final class TranscriptSearchStore: ObservableObject {
             self.indexTask = nil
             self.scheduleSearch(delay: false)
         }
+    }
+
+    /// Рабочая папка поменялась, пока поиск открыт: запись, открытую из поиска,
+    /// удалили или переименовали на её экране. Находки без файла снимаются сразу —
+    /// иначе тап открыл бы то, чего уже нет, — а индекс пересобирается фоном, и
+    /// переименованная запись возвращается под новым заголовком.
+    func refresh(_ workspace: WorkspaceStore, title: (WorkspaceEntry) -> String) {
+        let present = Set(workspace.audio.map(\.relativePath))
+        hits = Self.present(hits, in: present)
+        documents.removeAll { !present.contains($0.entry.relativePath) }
+        reindex(workspace, keepingHits: true, title: title)
+    }
+
+    /// Находки, чья запись ещё лежит в рабочей папке.
+    nonisolated static func present(_ hits: [SearchHit], in paths: Set<String>) -> [SearchHit] {
+        hits.filter { paths.contains($0.entry.relativePath) }
     }
 
     func apply(_ query: String) {

@@ -194,6 +194,68 @@ final class QueueSummaryTests: XCTestCase {
     }
 }
 
+/// Поиск под открытым листом: запись удалили или переименовали на её экране —
+/// находка без файла уходит сразу, а переименованная возвращается под новым именем.
+@MainActor
+final class SearchRefreshTests: XCTestCase {
+    private var root: URL!
+    private var workspace: WorkspaceStore!
+    private var store: TranscriptSearchStore!
+
+    override func setUp() async throws {
+        root = FileManager.default.temporaryDirectory
+            .appending(path: "LoriSearchRefresh-\(UUID().uuidString)", directoryHint: .isDirectory)
+        workspace = WorkspaceStore(rootURL: root)
+        workspace.start()
+        let recordings = root.appending(path: "Recordings", directoryHint: .isDirectory)
+        try FileManager.default.createDirectory(at: recordings, withIntermediateDirectories: true)
+        for (name, text) in [("Совещание", "Обсудили бюджет на квартал."), ("Планёрка", "Бюджет рекламы режем на треть.")] {
+            let audio = recordings.appending(path: "\(name).m4a")
+            try Data("звук".utf8).write(to: audio)
+            _ = try workspace.saveTranscript(Transcript(text: text), for: audio)
+        }
+        try workspace.refresh()
+        store = TranscriptSearchStore()
+        store.reindex(workspace, title: \.displayName)
+        await waitUntil { !self.store.isIndexing }
+        store.apply("бюджет")
+        await waitUntil { self.store.hits.count == 2 }
+        XCTAssertEqual(store.hits.count, 2, "обе записи находятся по тексту")
+    }
+
+    override func tearDown() async throws {
+        try? FileManager.default.removeItem(at: root)
+    }
+
+    private func waitUntil(_ condition: @MainActor () -> Bool) async {
+        let deadline = Date().addingTimeInterval(3)
+        while !condition(), Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(20))
+        }
+    }
+
+    func testDeletedRecordLeavesResultsAtOnce() async throws {
+        try workspace.moveToTrash("Recordings/Совещание.m4a")
+        store.refresh(workspace, title: \.displayName)
+        XCTAssertEqual(
+            store.hits.map(\.entry.relativePath), ["Recordings/Планёрка.m4a"],
+            "находка удалённой записи уходит сразу, до пересборки индекса"
+        )
+        await waitUntil { !self.store.isIndexing }
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertEqual(store.hits.map(\.entry.relativePath), ["Recordings/Планёрка.m4a"], "и не возвращается после неё")
+    }
+
+    func testRenamedRecordComesBackUnderNewName() async throws {
+        let renamed = try workspace.renameRecording(at: "Recordings/Совещание.m4a", toName: "Бюджет на квартал")
+        store.refresh(workspace, title: \.displayName)
+        XCTAssertFalse(store.hits.contains { $0.entry.relativePath == "Recordings/Совещание.m4a" }, "старый путь не открыть")
+        await waitUntil { self.store.hits.contains { $0.entry.relativePath == renamed } }
+        XCTAssertTrue(store.hits.contains { $0.entry.relativePath == renamed }, "запись снова находится — под новым путём")
+        XCTAssertEqual(store.hits.count, 2)
+    }
+}
+
 /// Одно сообщение на всё действие, с причинами от сервисов как есть.
 final class ImportNoticeTests: XCTestCase {
     func testNothingRejectedMeansNoMessage() {

@@ -200,9 +200,7 @@ struct ContentView: View {
                         searchFocused = true
                         // Тот же заголовок, что на карточке: строка поиска и так
                         // подписана датой, повторять её в заголовке незачем.
-                        search.reindex(workspace) { entry in
-                            cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry)
-                        }
+                        search.reindex(workspace, title: searchTitle)
                     }
                     CircleIconButton(symbol: "gearshape", label: "Настройки") { showSettings = true }
                 }
@@ -647,6 +645,12 @@ struct ContentView: View {
     /// Заголовок на карточке. У записи без заголовка — «Запись 14:58», без «вчера»
     /// и без даты: день назван заголовком секции над карточкой, а «Запись 12 августа»
     /// у трёх записей одного дня было бы одним и тем же словом.
+    /// Заголовок находки поиска — тот же, что на карточке: строка поиска и так
+    /// подписана датой, повторять её в заголовке незачем.
+    private func searchTitle(_ entry: WorkspaceEntry) -> String {
+        cardTitle(RecordTitle.resolve(entry, summaries: summaries, previews: previews), entry)
+    }
+
     private func cardTitle(_ resolved: RecordTitle, _ entry: WorkspaceEntry) -> String {
         resolved.source == .date ? "Запись \(HomeFormat.time(entry.modifiedAt))" : resolved.title
     }
@@ -961,7 +965,11 @@ struct ContentView: View {
             .sheet(isPresented: $showSettings) {
                 SettingsRoot(transcription: transcription, topics: topics)
             }
-            .sheet(item: $opened) { record in
+            // Запись, открытую из поиска, могли удалить или переименовать на её экране:
+            // находки без файла уходят сразу, индекс пересобирается под новые имена.
+            .sheet(item: $opened, onDismiss: {
+                if isSearching { search.refresh(workspace, title: searchTitle) }
+            }) { record in
                 TranscriptScreen(
                     entry: record.entry,
                     transcription: transcription,
