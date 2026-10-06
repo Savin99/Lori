@@ -850,7 +850,11 @@ in `Application Support/Lori/Models`. Rules that matter:
   процентами и остатком **этой** записи (рядом с процентами, а не в первой строке — там он читался
   бы как время всей пачки), полоса (без доли — бегущий отрезок, при «Уменьшении движения» стоит),
   «Дальше: …, ещё N», «Остановить» с подтверждением → `cancelAll`, заметки «жду память» и «идёт,
-  пока Lori открыта · почему?». Тап открывает текущую запись.
+  пока Lori открыта · почему?». Тап открывает текущую запись. При параллельной расшифровке (2–3
+  записи) блок говорит о самой давней из идущих, остальные — строкой «Ещё идёт: …» («Ещё идут: 2
+  записи»), счёт — диапазоном «2–3 из 5»: «2 из 5» при двух идущих читалось бы так, будто вторая
+  ждёт; «Дальше» — только ждущие (`QueueSummary`). `cancelAll` снимает и прерванные записи, поэтому
+  вопрос перед «Остановить» о них говорит, когда они есть (`StopQueueCopy`).
 - **Карточка отвечает на три вопроса**: что это (заголовок из `RecordTitle`, до двух строк, на всю
   ширину — плашки-иконки нет), что внутри (описание, до двух строк, с заглавной), что с ней —
   строка состояния **только у неготовой** записи: «В очереди · 3-я», полоса и «Расшифровываю · 63% ·
@@ -860,8 +864,10 @@ in `Application Support/Lori/Models`. Rules that matter:
   заголовка — «Запись 14:58», без «вчера». Кнопка на карточке — `borderless` и лежит поверх строки
   состояния: иначе она забирает тап по строке `List` и сливается с текстом в один элемент VoiceOver.
   Ошибку записи алертом не показываем — она уже на карточке и строкой на экране записи, а алерт
-  списка поверх открытого листа этот лист закрывал (`ContentView.activeError` пропускает ошибки,
-  которые лежат в `TranscriptionService.failed`).
+  списка поверх открытого листа этот лист закрывал. Сервис кладёт её ещё и в общую строку
+  `lastError`, и главный экран снимает её оттуда сразу (`onChange`), пока она лежит в `failed`:
+  иначе «Повторить», удаление или переименование убирали запись из `failed`, и устаревший текст
+  вставал алертом «Lori» и выбивал лист (`testRetryFromRecordScreenShowsNoStaleAlert`).
 - **Акцент один — оливковый, и задаётся на уровне окна** (`.tint` в `LoriLocalApp` плюс
   `AccentColor` в ассетах). Системный синий рядом с оливковым читался вторым акцентом: зелёная
   галочка движка и синяя галочка режима на одном экране. `.tint`, поставленный внутри
@@ -907,7 +913,12 @@ in `Application Support/Lori/Models`. Rules that matter:
   не делает, а занятость записи проверяется ещё раз в момент «Готово».
 - Search covers card titles (`RecordTitle`) and transcript text; one hit per recording, and it opens
   the recording. Сниппет — слова реплики без `**[0:34–1:12]**`, «S1:» и служебных строк (тот же
-  разбор `TranscriptDocument`), «ё» ищется как «е».
+  разбор `TranscriptDocument`), «ё» ищется как «е». Когда закрывается лист записи, открытой из
+  поиска, находки без файла (запись удалили или переименовали на её экране) уходят сразу, а индекс
+  пересобирается фоном (`TranscriptSearchStore.refresh`): иначе старая находка открывала
+  несуществующий файл.
+- Правку текста (`TranscriptEditorSheet`) не теряют ни смахивание, ни «Отменить», ни плашка
+  записи: с несохранённой правкой всё идёт через «Выйти без сохранения?».
 
 ## Экспорт расшифровки
 
@@ -1025,17 +1036,22 @@ python3 design/whisper/fetch_model.py   # кэш ~/Library/Caches/lori-models, �
 UI tests need seeding, because the simulator neither records nor recognizes:
 
 ```bash
-xcrun simctl install <udid> <built .app>
-xcrun simctl privacy <udid> grant microphone ru.ilyaqa.lori.local
+python3 design/qa/install-qa.py <built .app> <udid> --simulator
+xcrun simctl privacy <udid> grant microphone ru.ilyaqa.lori.local.qa
 ./design/qa/seed-audio.sh <udid>
 ```
+
+Весь набор UI-тестов на чистом симуляторе — в порядке из `design/qa/README.md`, «Полный прогон
+на чистом симуляторе»: посев, дважды `testZZ1…` (он оставляет записи с «fail»), потом остальное.
+Shell-команды агента — с абсолютными путями, без `cd` в `ios/`: среда агента оставляет в текущем
+каталоге пустую `.claude/.cc-writes`, и `xcodegen` добавляет её в проект.
 
 `Form` rows below the fold do not exist in the accessibility tree — a UI test must scroll to a field
 before asking `exists`, and it cannot scroll back up to a field it passed. A sheet dismissing with an
 animation leaves buttons under it existing but not hittable: wait for `isHittable` before tapping.
 
 Two agent sessions must not run `xcodebuild … test` on the same simulator: each run relaunches
-`ru.ilyaqa.lori.local`, the other run's app dies mid-test and XCTest reports `Test crashed with signal
+`ru.ilyaqa.lori.local.qa`, the other run's app dies mid-test and XCTest reports `Test crashed with signal
 kill`. Check `ps aux | grep xcodebuild` first and use separate `-derivedDataPath`.
 
 For physical QA, build the `LoriQA` scheme with configuration `QA`, keeping the

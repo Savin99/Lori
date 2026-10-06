@@ -206,7 +206,8 @@ final class TranscriptionUITests: XCTestCase {
     /// и без плашки человек не знает, что диктофон всё ещё пишет.
     ///
     /// Микрофон надо разрешить заранее, иначе тест упрётся в системный диалог:
-    /// `xcrun simctl privacy booted grant microphone ru.ilyaqa.lori.local`.
+    /// `xcrun simctl privacy <simulator-uuid> grant microphone ru.ilyaqa.lori.local.qa`
+    /// (так и сказано в `design/qa/README.md`, «Полный прогон на чистом симуляторе»).
     func testRecordingBannerIsVisibleOverAnOpenSheet() throws {
         continueAfterFailure = false
         let app = launch()

@@ -66,6 +66,42 @@ python3 design/qa/seed-home.py <simulator-uuid> --untranscribed # ещё одн�
 - прерванное задание с сохранёнными настройками поднимается само при следующем запуске — тесты с
   проверочным движком снимают такую очередь, чтобы запуск без заглушки не отдал её настоящему движку.
 
+## Полный прогон на чистом симуляторе
+
+Порядок важен: часть тестов опирается на записи, которые оставляет `testZZ1…` (две записи с
+«fail» в имени нужны `testFailureKeepsRecordScreenOpen`, одна — `testRetryFromRecordScreenShowsNoStaleAlert`),
+а `Documents/Inbox` чистит любой запуск с `--forget-attachments`. Команды — из корня репозитория,
+с явным UUID; в `ios/` не заходить (`cd`): служебная папка среды агента `.claude/.cc-writes` в
+текущем каталоге попадает в проект при `xcodegen`.
+
+```sh
+U=<simulator-uuid>; DD=<derived-data>
+X="xcodebuild -project ios/LoriLocal.xcodeproj -scheme LoriQA -destination id=$U -derivedDataPath $DD CODE_SIGNING_ALLOWED=NO"
+$X build-for-testing
+python3 ios/design/qa/install-qa.py $DD/Build/Products/QA-iphonesimulator/LoriLocal.app $U --simulator
+# Без разрешения тест плашки записи упрётся в системный вопрос, и тот перекроет остальные тесты.
+xcrun simctl privacy $U grant microphone ru.ilyaqa.lori.local.qa
+ios/design/qa/seed-audio.sh $U                          # «UI sample» — экран записи
+python3 ios/design/qa/seed-home.py $U                   # записи за три дня, одна без расшифровки
+python3 ios/design/qa/seed-home.py $U --untranscribed   # вторая без расшифровки
+ios/design/redesign-2026-10-05/seed-record-states.sh $U # набор снимков экрана записи
+# Две записи с «fail»: testZZ1 дважды, каждый раз сразу после посева Inbox.
+for i in 1 2; do
+  python3 ios/design/qa/seed-home.py $U --inbox-only
+  $X -only-testing:LoriLocalUITests/TranscriptionUITests/testZZ1AttachedPanelAndQueueScreenshots test-without-building
+done
+$X -only-testing:LoriLocalTests test-without-building
+$X -only-testing:LoriLocalUITests \
+   -skip-testing:LoriLocalUITests/TranscriptionUITests/testZZ1AttachedPanelAndQueueScreenshots test-without-building
+```
+
+Записи без расшифровки тесты очереди не расходуют: каждый в конце снимает свою очередь. Если
+прогон упал посреди теста с заглушкой, его задания остались в очереди и при следующем запуске без
+`--ui-stub-engine` уйдут настоящему движку (облачный без ключа — ошибка на карточке, и запись
+выпадает из набора «без расшифровки»). Поэтому после падения первым запускать тест с заглушкой —
+он снимает остаток очереди (`stopQueueIfRunning`), — а записи, ставшие ошибкой, добирать
+`--untranscribed`.
+
 ## Границы защиты
 
 Эти инструменты не перехватывают произвольные команды терминала. Приложение не
