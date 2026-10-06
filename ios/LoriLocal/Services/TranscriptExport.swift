@@ -211,6 +211,36 @@ enum TranscriptExportFormat: String, CaseIterable, Identifiable, Sendable {
 }
 
 extension TranscriptExport {
+    /// Тот же экспорт без плашек «Пропуск A–B», под которыми в записи тишина.
+    ///
+    /// Наружу уходит то же, что видно на экране записи (`GapRecheck`): файл,
+    /// отправленный человеку, не должен нести ложную тревогу, которую экран уже
+    /// спрятал. Файл расшифровки при этом не меняется. `audio` — запись; без неё
+    /// проверять нечем, и замечания уходят как есть.
+    func hidingSilentGaps(audio: URL?, recheck: GapRecheck = .shared) async -> TranscriptExport {
+        guard warnings.contains(where: GapRecheck.isGap) else { return self }
+        // Те же отрезки, что `GapRecheck.speech(in:)` берёт из документа: блоки
+        // экспорта — это строки документа один к одному, и вердикт с экрана
+        // записи находится в кэше, а не считается второй раз.
+        let speech = blocks.compactMap { block -> ClosedRange<TimeInterval>? in
+            guard !block.isApproximate, let start = block.start, let end = block.end, end > start else { return nil }
+            return start...end
+        }
+        let shown = await recheck.visible(warnings, speech: speech, audio: audio)
+        guard shown != warnings else { return self }
+        return TranscriptExport(
+            title: title,
+            recordedAt: recordedAt,
+            duration: duration,
+            detail: detail,
+            topic: topic,
+            engine: engine,
+            mode: mode,
+            warnings: shown,
+            blocks: blocks
+        )
+    }
+
     /// Файл для листа «Поделиться». PDF считается вне главного актора: часовая
     /// расшифровка — это десятки страниц вёрстки, и кнопка не должна на них
     /// подвисать.

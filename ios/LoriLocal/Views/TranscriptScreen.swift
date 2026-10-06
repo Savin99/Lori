@@ -47,6 +47,9 @@ struct TranscriptScreen: View {
     var onDelete: (() throws -> Void)? = nil
 
     @State private var document = TranscriptDocument.empty
+    /// Замечания файла после сверки «пропусков» со звуком (`GapRecheck`); nil —
+    /// сверка ещё не кончилась или в файле не было плашек о пропусках.
+    @State private var checkedWarnings: CheckedWarnings?
     /// Из какого файла собран `document`; nil — ни из какого.
     @State private var loadedFrom: String?
     @State private var isLoadingDocument = false
@@ -174,6 +177,9 @@ struct TranscriptScreen: View {
         // Снаружи стека — внутри плашку перекрывает навигационная панель.
         .recordingBanner { dismiss() }
         .task { open() }
+        // Плашки «Пропуск A–B» из файла сверяются со звуком записи заново:
+        // прежнее правило находило их в обычной тишине. Файл не меняется.
+        .task(id: CheckedWarnings.Request(path: path, warnings: document.warnings)) { await recheckGaps() }
         // Работа кончилась — успехом, ошибкой или отменой: текст перечитывается,
         // а заголовок карточки — без сброса, чтобы не мигнуть датой.
         .onChange(of: isActive) { _, active in
@@ -633,10 +639,11 @@ struct TranscriptScreen: View {
     @ViewBuilder
     private var notices: some View {
         let missingTimecodes = !document.isEmpty && !document.hasTimecodes
-        if !document.warnings.isEmpty || missingTimecodes {
+        let warnings = shownWarnings
+        if !warnings.isEmpty || missingTimecodes {
             VStack(alignment: .leading, spacing: 8) {
                 // Пропуски и срывы — про сам текст: о дырах надо знать до чтения.
-                ForEach(document.warnings, id: \.self) { warning in
+                ForEach(warnings, id: \.self) { warning in
                     StatusStrip(tint: LoriPalette.warn) {
                         Label(warning, systemImage: "exclamationmark.triangle")
                             .font(LoriFont.small)
@@ -647,6 +654,28 @@ struct TranscriptScreen: View {
             }
             .padding(.top, 16)
         }
+    }
+
+    /// Замечания, которые видны на экране: «пропуск», под которым в записи
+    /// тишина, не показывается. Пока сверка идёт, «пропусков» не видно вовсе —
+    /// плашка, мигнувшая и тут же пропавшая, хуже полусекундной задержки; прочие
+    /// замечания (срыв ответа, обрыв по длине) видны сразу.
+    private var shownWarnings: [String] {
+        if let checkedWarnings, checkedWarnings.source == document.warnings {
+            return checkedWarnings.visible
+        }
+        return document.warnings.filter { !GapRecheck.isGap($0) }
+    }
+
+    private func recheckGaps() async {
+        let source = document.warnings
+        guard source.contains(where: GapRecheck.isGap) else {
+            checkedWarnings = nil
+            return
+        }
+        let visible = await GapRecheck.shared.visible(in: document, audio: try? workspace.fileURL(for: path))
+        guard !Task.isCancelled else { return }
+        checkedWarnings = CheckedWarnings(source: source, visible: visible)
     }
 
     /// Почему у расшифровки нет таймкодов. Молчать нельзя: перемотка по таймкоду —
@@ -1163,7 +1192,7 @@ struct TranscriptScreen: View {
     /// Расшифровка уходит наружу файлом: в нём шапка, описание, таймкоды и имена
     /// говорящих — всё, что видно на экране.
     private func export(_ format: TranscriptExportFormat) {
-        let payload = TranscriptExport.make(
+        let draft = TranscriptExport.make(
             document: document,
             title: exportTitle,
             recordedAt: entry.modifiedAt,
@@ -1172,9 +1201,13 @@ struct TranscriptScreen: View {
             topic: topics.topic(for: path),
             names: speakers.names[path] ?? [:]
         )
+        let audio = try? workspace.fileURL(for: path)
         exporting = true
         Task {
             defer { exporting = false }
+            // В файл — те же замечания, что на экране: «пропуск» над тишиной
+            // наружу не уходит. Сверка уже в кэше, если экран успел её сделать.
+            let payload = await draft.hidingSilentGaps(audio: audio)
             do {
                 share = SharePayload(url: try await payload.file(as: format), subject: payload.title)
             } catch {
@@ -1192,6 +1225,19 @@ struct TranscriptScreen: View {
             return
         }
         openURL(url)
+    }
+}
+
+/// Замечания файла после сверки со звуком — и для каких замечаний она сделана:
+/// файл перечитали, и старый ответ к новому тексту не относится.
+private struct CheckedWarnings {
+    let source: [String]
+    let visible: [String]
+
+    /// Что сверять: запись и её замечания. Сменилось одно из двух — сверка заново.
+    struct Request: Equatable {
+        let path: String
+        let warnings: [String]
     }
 }
 
