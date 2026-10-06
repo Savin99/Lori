@@ -89,17 +89,28 @@ enum TranscriptTitle {
 
     /// Заголовок и остаток текста после него — одним проходом, чтобы сниппет
     /// начинался ровно там, где кончился заголовок.
+    ///
+    /// Заголовок — первая **содержательная** фраза среди первых `leadSentences`
+    /// (`lead(in:)`): диалог начинается репликами вроде «Что хотел? Не. Да.», и
+    /// карточка владельца называлась «Что хотел? Не». Короткие реплики в заголовок
+    /// не идут и в сниппет тоже — он продолжает текст после выбранной фразы.
+    /// Содержательной нет — прежнее правило с начала текста.
     static func split(_ text: String) -> (title: String, rest: String)? {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty else { return nil }
-        let end = boundary(in: clean).map { clean.index(clean.startIndex, offsetBy: $0) } ?? clean.endIndex
-        var title = shortened(String(clean[..<end]), limit: titleLimit)
+        let lead = lead(in: clean)
+        let body = clean[(lead?.lowerBound ?? clean.startIndex)...]
+        var end = boundary(in: String(body)).map { body.index(body.startIndex, offsetBy: $0) } ?? body.endIndex
+        // Заголовок не выходит за выбранную фразу: граница «не раньше двенадцати
+        // знаков» иначе приклеила бы к короткой фразе следующую реплику.
+        if let lead, end > lead.upperBound { end = lead.upperBound }
+        var title = shortened(String(body[..<end]), limit: titleLimit)
         // Короткая запись целиком уходит в заголовок вместе со своей точкой.
         while title.hasSuffix(".") { title.removeLast() }
         title = title.trimmingCharacters(in: .whitespaces)
         guard !title.isEmpty else { return nil }
 
-        guard let range = clean.range(of: title) else { return (title, clean) }
+        guard let range = clean.range(of: title, range: body.startIndex..<clean.endIndex) else { return (title, clean) }
         var rest = clean[range.upperBound...]
         // Заголовок обрывается на границе мысли, и продолжение начинается с
         // её знака: «. Дальше…» читается как ошибка вёрстки.
@@ -161,6 +172,89 @@ enum TranscriptTitle {
             }
         }
         return nil
+    }
+
+    // MARK: - Короткие реплики в начале диалога
+
+    /// Сколько первых предложений смотреть в поисках содержательного. В диалоге,
+    /// который прислал владелец, оно шестое: «Что хотел? Не. Да. Сегодня справка.
+    /// По чем? По затратам на эксплуатацию…».
+    static let leadSentences = 8
+    /// Дальше этого числа знаков предложения не ищутся: восемь коротких реплик
+    /// укладываются в пару сотен знаков, а часовую расшифровку целиком в массив
+    /// знаков ради заголовка превращать незачем.
+    static let leadWindow = 600
+
+    /// Содержательная фраза — от трёх слов или от пятнадцати букв, не считая
+    /// слов-откликов. «Сегодня справка» (два слова, четырнадцать букв) ещё нет,
+    /// «По затратам на эксплуатацию» — уже да.
+    static let substantialWords = 3
+    static let substantialLetters = 15
+
+    /// Слова-отклики и междометия: «Да.», «Не.», «Ага.», «Так.» о записи ничего
+    /// не говорят. Только они — не приветствия и не служебные слова: «Здравствуйте,
+    /// давайте начнём встречу» — заголовок, а «Да, хорошо, ладно» — нет.
+    static let fillers: Set<String> = [
+        "да", "нет", "не", "ага", "угу", "ну", "так", "ок", "окей", "ладно", "хорошо", "понятно", "ясно",
+        "вот", "а", "э", "ээ", "эээ", "эм", "мм", "ммм", "хм", "ой", "ах", "алло", "ало", "алле", "слушаю",
+        "да-да", "ага-ага", "угу-угу", "так-так", "нет-нет", "ну-ну", "ок-ок",
+    ]
+
+    /// Первая содержательная фраза среди первых `leadSentences` — от её начала до
+    /// знака конца без самого знака. nil — содержательной нет.
+    static func lead(in text: String) -> Range<String.Index>? {
+        sentences(in: text, limit: leadSentences).first { isSubstantial(text[$0]) }
+    }
+
+    /// Слов без откликов не меньше `substantialWords` или букв в них не меньше
+    /// `substantialLetters`. Числа — тоже слова: «27.08 планёрка по релизу».
+    static func isSubstantial(_ sentence: Substring) -> Bool {
+        let words = sentence
+            .split(whereSeparator: \.isWhitespace)
+            .map { $0.trimmingCharacters(in: CharacterSet.punctuationCharacters.union(.symbols)) }
+            .filter { $0.contains { $0.isLetter || $0.isNumber } }
+        let meaningful = words.filter { !fillers.contains($0.lowercased().replacingOccurrences(of: "ё", with: "е")) }
+        let letters = meaningful.reduce(0) { $0 + $1.filter(\.isLetter).count }
+        return meaningful.count >= substantialWords || letters >= substantialLetters
+    }
+
+    /// Первые предложения текста — от начала до знака конца, без самого знака.
+    ///
+    /// Граница — по тем же правилам, что у `boundary`: знак, за которым пробел или
+    /// конец текста; инициалы, сокращения и «27.08» границей не считаются; серия
+    /// «?!» или «...» — одна граница. Хвост без знака — тоже предложение.
+    static func sentences(in text: String, limit: Int) -> [Range<String.Index>] {
+        let characters = Array(text.prefix(leadWindow))
+        var offsets: [(start: Int, end: Int)] = []
+        var start = 0
+        var index = 0
+        while index < characters.count, offsets.count < limit {
+            guard enders.contains(characters[index]) else {
+                index += 1
+                continue
+            }
+            var last = index
+            while last + 1 < characters.count, enders.contains(characters[last + 1]) { last += 1 }
+            let next: Character? = last + 1 < characters.count ? characters[last + 1] : nil
+            let breaks = next.map { $0.isWhitespace || closers.contains($0) } ?? true
+            let abbreviation = characters[index] == "." && last == index && isAbbreviation(before: index, in: characters)
+            guard breaks, !abbreviation else {
+                index = last + 1
+                continue
+            }
+            if index > start { offsets.append((start, index)) }
+            var cursor = last + 1
+            while cursor < characters.count, characters[cursor].isWhitespace || closers.contains(characters[cursor]) {
+                cursor += 1
+            }
+            start = cursor
+            index = cursor
+        }
+        if offsets.count < limit, start < characters.count { offsets.append((start, characters.count)) }
+        return offsets.map { offset in
+            let from = text.index(text.startIndex, offsetBy: offset.start)
+            return from..<text.index(from, offsetBy: offset.end - offset.start)
+        }
     }
 
     /// Точка после инициала («А. С. Петров»), сокращения или слова с точкой
