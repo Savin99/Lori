@@ -2554,3 +2554,47 @@ workspace.fileURL(for: entry.relativePath))`. Пока её нет, файл, о
 - **Экспорт из списка** — см. выше, не подключён.
 - Gemini: переспрос теперь зовётся реже (только при фразах у уровня речи); на живом ключе не
   проверялось, стабами — да (`GeminiPipelineTests` зелёные без изменений).
+
+## Кнопки экрана записи — в панель навигации — 6 октября 2026
+
+Владелец разметил снимок экрана записи: обвёл «Поделиться» и «Скопировать» под плеером стрелкой к
+«…» и зачеркнул строку движка под заголовком — «мне не нравятся эти кнопки, перенеси наверх». Ветка
+`sunfish/toolbar`. Почему устроено именно так (HIG, «Adopting Liquid Glass», WWDC25, документация
+`ToolbarSpacer`) — в `AGENTS.md`, «Экран записи (5–6 октября 2026)» и «Какой движок отработал».
+
+- **Сделано.** Справа в панели — «Поделиться» (меню PDF / Markdown, прежний экспорт с
+  `hidingSilentGaps`) и «Скопировать» (галочка на 2 с) одной стеклянной группой
+  (`ToolbarItemGroup`), «…» — отдельной (`ToolbarSpacer(.fixed)`, iOS 26). Оливковый — только у
+  «Поделиться», остальное `ink`. Строка движка — заголовок первого раздела «…» («Расшифровано в
+  облаке: ElevenLabs · scribe_v2 · Дословно»). Дата и тема — одной строкой. «…» — из `Label`.
+  Удалён `FlowRow`. Текст записи начинается примерно на 80 точек выше.
+- **Ловушка: XCUITest видит рамки пунктов панели высотой 36 pt, а стекло — 44.** Чем пункт
+  нажимается, показали только тапы на 2–4 pt за рамкой: системный пункт (из `Label`) ловит всё
+  стекло, «…» с голой `Image` ловила только 28 × 36, «‹ Записи» (свой вид со словом) — только 90 × 36.
+  `.frame(minHeight: 44)` у своего вида панель зажимает обратно в 36, а `.labelStyle(.titleAndIcon)`
+  делает пункт системным ценой слова — остаётся голая стрелка. Тест —
+  `testToolbarButtonsAreHitAcrossTheirGlass`.
+- **Ловушка: «Скопировано» проверять сразу после тапа.** Галочка живёт 2 с, а тап XCUITest
+  возвращается, когда приложение успокоилось: проверка после секундного ожидания меню её уже не
+  заставала, и разведка сначала «показала», что «Скопировать» не нажимается вовсе.
+- `ToolbarContent.hidden(_:)` на iOS нет (только macOS 15) — пункты без расшифровки убраны `if` в
+  `@ToolbarContentBuilder`. `.tint` на содержимом пункта панель iOS 26 соблюдает. Документация
+  Apple по новым панелям лежит и в самом Xcode:
+  `IDEIntelligenceChat.framework/…/AdditionalDocumentation/SwiftUI-New-Toolbar-Features.md`.
+- **Проверено** на итоговой сборке, симулятор iPhone 17 Pro (iOS 26.5): модульные — **779
+  выполнено, 8 пропущено, 0 падений** (как до правки); `TranscriptScreenUITests` — **16 из 16**
+  (новые: `testUntranscribedRecordHasNoShareOrCopy`, `testToolbarButtonsAreHitAcrossTheirGlass`,
+  `testCaptureToolbar`); `TranscriptionUITests`, что открывают экран записи, — **10 из 10**
+  (`testShareOffersPDFAndMarkdown`, `testRecordingOpensPlayerWithTranscriptCard`,
+  `testFailureKeepsRecordScreenOpen`, `testRetryFromRecordScreenShowsNoStaleAlert`,
+  `testRenameFromRecordScreenKeepsItOpen`, `testDeleteFromRecordScreenAsksFirst`,
+  `testInlineTranscribeStartsQueueAndStopAsksFirst`, `testQueueBlockOpensTheCurrentRecord`,
+  `testTopicFilterOpensAsMenu`, `testZZ3RecordScreenQueueScreenshots`); пропусков нет. Снимки —
+  `design/redesign-2026-10-05/record-toolbar-*.png`: запись с текстом, открытая «…», запись без
+  расшифровки — в светлой и тёмной теме, и крупный шрифт. Кружок сборки PDF в группе снят один
+  раз временным флагом (флаг удалён).
+- **Не проверено и не сделано.** Телефон — всё снято в симуляторе iPhone 17 Pro (iOS 26.5); iOS 18
+  (цель сборки) не запускалась — там нет стекла и `ToolbarSpacer`, пункты стоят обычным рядом.
+  «‹ Записи» по-прежнему нажимается рамкой 90 × 36: всем стеклом нажималась бы голая стрелка, как
+  системная «Назад», но слово — решение владельца. Снимки `record-transcript-*`,
+  `record-share-menu.png` и прочие от 5 октября показывают прежний экран с капсулами.
