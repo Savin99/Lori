@@ -934,9 +934,13 @@ struct ContentView: View {
             topic: topics.topic(for: entry.relativePath),
             names: speakers.names[entry.relativePath] ?? [:]
         )
+        let audio = try? workspace.fileURL(for: entry.relativePath)
         Task {
+            // Тот же фильтр, что у экрана записи: «пропуск» над тишиной не должен
+            // уезжать в файл только потому, что поделились из списка.
+            let shared = await payload.hidingSilentGaps(audio: audio)
             do {
-                share = SharePayload(url: try await payload.file(as: format), subject: payload.title)
+                share = SharePayload(url: try await shared.file(as: format), subject: shared.title)
             } catch {
                 workspace.lastError = "Не удалось собрать файл: \(error.localizedDescription)"
             }
