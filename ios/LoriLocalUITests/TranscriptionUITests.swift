@@ -706,7 +706,10 @@ final class TranscriptionUITests: XCTestCase {
         tap(app.buttons["Записи"])
         // Лист уезжает с анимацией: пока он не ушёл, «Остановить» под ним не нажать.
         XCTAssertTrue(app.descendants(matching: .any)["recordTitle"].waitForNonExistence(timeout: 5))
-        stopQueueIfRunning(app)
+        // Список пролистан к идущей записи: без этого очередь оставалась и съедала
+        // обе записи без расшифровки при следующем запуске.
+        stopQueueIfRunning(app, listScrolled: true)
+        XCTAssertFalse(app.descendants(matching: .any)["queueBlock"].exists, "очередь снята — записи остаются без расшифровки")
     }
 
     // MARK: - Помощники
@@ -766,9 +769,18 @@ final class TranscriptionUITests: XCTestCase {
     /// Очередь, оставшаяся от прошлого запуска, снимается. Прерванное задание с
     /// сохранёнными настройками поднимается само при запуске, и тест застал бы чужую
     /// работу, а следующий запуск без заглушки отдал бы её настоящему движку.
-    private func stopQueueIfRunning(_ app: XCUIApplication) {
+    ///
+    /// `listScrolled` — тест листал список, и блок очереди (его первая строка) мог
+    /// уйти за край: такой строки в дереве нет, и проверка «очереди нет» молча
+    /// пропускала остановку. Задания оставались, следующий запуск с заглушкой
+    /// доводил их до конца — и записи без расшифровки кончались (так набор
+    /// иссяк на старом симуляторе после `testZZ3…`). Тогда к блоку листаем вверх.
+    private func stopQueueIfRunning(_ app: XCUIApplication, listScrolled: Bool = false) {
         let queue = app.descendants(matching: .any)["queueBlock"]
-        guard queue.waitForExistence(timeout: 3) else { return }
+        let found = listScrolled
+            ? scrollUntilExists(queue, in: app, upwards: true, swipes: 4)
+            : queue.waitForExistence(timeout: 3)
+        guard found else { return }
         tap(app.buttons["stopQueueButton"])
         tap(dialogButton("Остановить", in: app))
         XCTAssertTrue(queue.waitForNonExistence(timeout: 10), "оставшаяся очередь снята")
