@@ -124,10 +124,13 @@ final class TranscriptScreenUITests: XCTestCase {
         }
         save("record-more-menu")
 
-        // Подменю движков: иконка говорит, уйдёт ли запись с телефона.
+        // Подменю движков: только готовые — то же правило, что у шита из панели, —
+        // и иконка говорит, уйдёт ли запись с телефона. Системный движок готов
+        // всегда, а ключа ElevenLabs в Lori QA нет (на этом стоит и
+        // testCaptureRecordStates: облачный движок без ключа даёт ошибку).
         app.buttons["Расшифровать заново"].tap()
-        XCTAssertTrue(app.buttons["GigaAM v3 на iPhone"].waitForExistence(timeout: 3), "движки на выбор")
-        XCTAssertTrue(app.buttons["ElevenLabs Scribe API"].exists)
+        XCTAssertTrue(app.buttons["Apple, на устройстве"].waitForExistence(timeout: 3), "готовый движок на выбор")
+        XCTAssertFalse(app.buttons["ElevenLabs Scribe API"].exists, "движка без ключа в подменю нет")
     }
 
     /// Расшифровка заново заменяет текст — без подтверждения она не начинается.

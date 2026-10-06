@@ -73,6 +73,9 @@ struct TranscriptScreen: View {
     @State private var speakerDraft = ""
     /// Движок, которым просят расшифровать заново, — до подтверждения.
     @State private var retranscribe: TranscriptionEngineKind?
+    /// Готовность движков для подменю «Расшифровать заново» — та же, что у чипа
+    /// панели. Читается при открытии экрана: пока он открыт, настройки закрыты.
+    @StateObject private var engines = EngineDirectory.forInterface()
     /// Модель заголовков, которую предлагают скачать на месте.
     @State private var offeredModel: SummaryVariant?
     /// Человек сам попросил заголовок на этом экране. Только тогда строка даты
@@ -921,12 +924,15 @@ struct TranscriptScreen: View {
                     transcriptFile == nil ? "Расшифровать другим движком" : "Расшифровать заново",
                     systemImage: "arrow.triangle.2.circlepath"
                 ) {
-                    ForEach(TranscriptionEngineKind.allCases) { kind in
+                    ForEach(retranscribeEngines) { engine in
                         // Иконка кодирует не бренд, а главное: уйдёт ли запись с
                         // телефона. Цена ошибки здесь — отправленный наружу звук.
-                        Button(kind.title, systemImage: kind.leavesDevice ? "cloud" : "iphone") {
-                            retranscribe = kind
+                        Button(engine.kind.title, systemImage: engine.kind.leavesDevice ? "cloud" : "iphone") {
+                            retranscribe = engine.kind
                         }
+                    }
+                    if retranscribeEngines.isEmpty {
+                        Text("Готовых движков нет — Настройки → Движок")
                     }
                 }
                 .disabled(isActive)
@@ -983,6 +989,14 @@ struct TranscriptScreen: View {
         } message: { variant in
             Text("Текст никуда не уходит. Модель скачивается один раз — около \(variant.sizeLabel), лучше по Wi‑Fi. Заголовок и описание появятся сами, когда она скачается.")
         }
+    }
+
+    /// Движки подменю «Расшифровать заново» — только готовые, то же правило, что у
+    /// шита из панели (`EngineShortlist`): пункт, который тут же кончится «нет
+    /// ключа», предлагать незачем. Исключения для выбранного в настройках здесь
+    /// нет: подменю — действие, а не выбор, и галочки «выбран» в нём не бывает.
+    private var retranscribeEngines: [EngineDescriptor] {
+        EngineShortlist.engines(EngineCatalog.all, ready: engines.readyKinds, keeping: nil)
     }
 
     private var moreHint: String {
