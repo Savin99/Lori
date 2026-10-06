@@ -4,15 +4,16 @@ import UIKit
 /// Экран записи: прочитать, послушать и отдать наружу файлом.
 ///
 /// Сверху вниз — в том порядке, в каком человек спрашивает о записи: что это
-/// (заголовок, описание, дата, чем расшифровано, тема), послушать (плеер), отдать
-/// (одна главная кнопка «Поделиться»), что с ней сейчас (блок состояния — только
-/// когда есть что сказать) и сам текст.
+/// (заголовок, описание, дата с темой), послушать (плеер), что с ней сейчас (блок
+/// состояния — только когда есть что сказать) и сам текст. Отдать — «Поделиться»
+/// и «Скопировать» — в панели навигации, чем расшифровано — первой строкой «…».
 ///
-/// «Поделиться» — главный глагол экрана, а не иконка в углу. Владелец, 5 октября
-/// 2026: «я чатам там с ИИ не пользуюсь» — расшифровка уходит из Lori файлом, а
-/// вопросы к ней задаются снаружи. Поэтому это крупная капсула под плеером, а в
-/// панели навигации остались только «Записи» и «…»: иконки «Скопировать» и
-/// «Поделиться» в углу дублировали кнопки и спорили с ними за внимание.
+/// «Поделиться» остаётся главным глаголом экрана: владелец, 5 октября 2026, «я
+/// чатам там с ИИ не пользуюсь» — расшифровка уходит из Lori файлом. Но 6 октября
+/// он обвёл две крупные капсулы под плеером и строку движка под заголовком: «мне
+/// не нравятся эти кнопки, перенеси наверх». Капсулы отнимали у текста целую
+/// строку экрана, а строка движка — ещё одну, ради сведения, которое нужно редко.
+/// Главным «Поделиться» теперь делает оливковый цвет — единственный в панели.
 struct TranscriptScreen: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var summaries: SummaryStore
@@ -112,10 +113,6 @@ struct TranscriptScreen: View {
                     header
                     PlayerCard(playback: playback, isRecording: isRecording)
                         .padding(.top, 14)
-                    if showsActions {
-                        actions
-                            .padding(.top, 12)
-                    }
                     if let status {
                         statusBlock(status)
                             .padding(.top, 16)
@@ -232,15 +229,21 @@ struct TranscriptScreen: View {
                     .accessibilityIdentifier("recordDescription")
             }
 
-            Text(titleActivity ?? meta)
-                .font(LoriFont.small.monospacedDigit())
-                .foregroundStyle(LoriPalette.muted)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .padding(.top, 10)
-                .accessibilityLabel(titleActivity ?? spokenMeta)
-                .accessibilityIdentifier("recordingMeta")
-
-            engineAndTopic
+            // Дата и тема — одной строкой: тема справа, а не влезли вместе — тема
+            // уходит под дату (`SplitRow`). В одной строке её высоту держит
+            // 44-точечный чип темы, и дата стоит по его середине. Поля у даты —
+            // для второго случая, крупного шрифта: без них она вставала вплотную
+            // под описание и читалась его последней строкой. Поля поровну сверху
+            // и снизу, иначе в одной строке дата съехала бы с середины чипа.
+            SplitRow {
+                Text(titleActivity ?? meta)
+                    .font(LoriFont.small.monospacedDigit())
+                    .foregroundStyle(LoriPalette.muted)
+                    .padding(.vertical, 8)
+                    .accessibilityLabel(titleActivity ?? spokenMeta)
+                    .accessibilityIdentifier("recordingMeta")
+                topicChip
+            }
         }
     }
 
@@ -294,44 +297,20 @@ struct TranscriptScreen: View {
         return summaryModels.isReady ? "Придумываю заголовок…" : nil
     }
 
-    /// Чем расшифровано — и тема в той же строке, справа.
+    /// Чем расшифровано: «Расшифровано в облаке: ElevenLabs · scribe_v2 · Дословно».
+    /// nil — файл движка не называет. Стоит первой строкой «…», а не под заголовком:
+    /// владелец, 6 октября 2026, зачеркнул эту строку на снимке экрана. Сведение
+    /// нужно, когда решают, расшифровать ли заново, — рядом с этим пунктом оно и
+    /// лежит.
     ///
-    /// Раньше движок стоял в одном ряду с датой и темой, ряд переполнился: дата
-    /// уехала на две строки, имя движка — в многоточие. Теперь у даты своя
-    /// строка, а пара «движок — тема» не режет ни то, ни другое: не влезли
-    /// вместе — тема уходит под движок (`SplitRow`).
-    @ViewBuilder
-    private var engineAndTopic: some View {
-        if let name = document.processingLabel {
-            SplitRow {
-                engineLabel(name)
-                topicChip
-            }
-        } else {
-            topicChip
-        }
-    }
-
-    private func engineLabel(_ name: String) -> some View {
-        let onDevice = document.engineStayedOnDevice
-        let place = onDevice.map { $0 ? " на этом iPhone" : " в облаке" } ?? ""
-        return HStack(spacing: 5) {
-            if let onDevice {
-                // Иконка кодирует не бренд, а главное: уходила ли запись с телефона.
-                Image(systemName: onDevice ? "iphone" : "cloud")
-                    .font(LoriFont.tiny)
-            }
-            Text(name)
-                .font(LoriFont.small)
-                .lineLimit(2)
-        }
-        // В одной строке с темой строку держит её 44-точечный чип; когда тема
-        // уходит вниз, отступ не даёт движку прилипнуть к дате.
-        .padding(.vertical, 6)
-        .foregroundStyle(LoriPalette.muted)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Расшифровано\(place): \(name)")
-        .accessibilityIdentifier("transcriptEngine")
+    /// Место сказано словами: иконку «облако / телефон» заголовок раздела меню не
+    /// показывает, а главное в этой строке — уходила ли запись с телефона, а не
+    /// бренд. Незнакомый движок места не получает: соврать про то, уходила ли
+    /// запись наружу, хуже, чем промолчать.
+    private var engineLine: String? {
+        guard let name = document.processingLabel else { return nil }
+        let place = document.engineStayedOnDevice.map { $0 ? " на этом iPhone" : " в облаке" } ?? ""
+        return "Расшифровано\(place): \(name)"
     }
 
     private var topicChip: some View {
@@ -363,26 +342,31 @@ struct TranscriptScreen: View {
 
     // MARK: - Поделиться и скопировать
 
-    /// Без расшифровки этих кнопок нет вовсе. Раньше они стояли выключенными, и две
-    /// серые капсулы спорили с единственной живой — «Расшифровать». Пока файл
+    /// Без расшифровки этих кнопок нет вовсе: из панели уходит весь пункт, а не
+    /// вид внутри него — иначе на стекле осталась бы пустая подложка (Apple,
+    /// «Adopting Liquid Glass» → «Check how you hide toolbar items»). Выключенные
+    /// серые кнопки спорили бы с единственной живой — «Расшифровать». Пока файл
     /// расшифровки дочитывается, кнопки видны (и выключены): исчезни они на этот
-    /// миг — экран подпрыгнул бы при каждом открытии.
+    /// миг — панель мигала бы при каждом открытии записи.
     private var showsActions: Bool {
         !document.isEmpty || (transcriptFile != nil && !isUntranscribed)
-    }
-
-    private var actions: some View {
-        let enabled = !document.isEmpty
-        return FlowRow(spacing: 10) {
-            shareButton(enabled: enabled)
-            copyButton(enabled: enabled)
-        }
     }
 
     /// Формат выбирается тут же, а не в настройках: PDF нужен, когда расшифровку
     /// отправляют человеку, Markdown — когда её несут в свой редактор или в ИИ, и
     /// это решение каждого раза. Формулировки — те же, что в веб-интерфейсе.
-    private func shareButton(enabled: Bool) -> some View {
+    ///
+    /// Подпись — `Label`: панель показывает от него одну иконку, слово отдаёт
+    /// VoiceOver, а пункт выходит системным — нажимается вся стеклянная кнопка
+    /// 44 pt, а не только рамка значка (см. подпись «…» в `moreMenu`).
+    ///
+    /// Оливковый — единственный цвет в панели: Apple советует красить значок
+    /// панели, только когда цвет что-то значит, например призыв к действию (WWDC25,
+    /// «Build a SwiftUI app with the new design»), а «Поделиться» — главное действие
+    /// экрана. Сплошную заливку (стиль `.prominent`) HIG держит для «Готово» и
+    /// «Отправить»: она «отделяет и красит» пункт — «Поделиться» ушла бы со своей
+    /// подложки, и «Скопировать» осталась бы на ней одна.
+    private var shareMenu: some View {
         Menu {
             ForEach(TranscriptExportFormat.allCases) { format in
                 Button { export(format) } label: {
@@ -392,48 +376,31 @@ struct TranscriptScreen: View {
                 }
             }
         } label: {
-            HStack(spacing: 8) {
-                if exporting {
-                    // PDF длинной записи — это десятки страниц вёрстки: без знака
-                    // работы второе нажатие казалось бы нужным.
-                    ProgressView()
-                        .controlSize(.small)
-                        .tint(LoriPalette.onInk)
-                } else {
-                    Image(systemName: "square.and.arrow.up")
-                }
-                Text("Поделиться")
-            }
-            .font(LoriFont.control)
-            .foregroundStyle(enabled ? LoriPalette.onInk : LoriPalette.muted)
-            .padding(.horizontal, 20)
-            .frame(minHeight: 46)
-            .background(enabled ? LoriPalette.lime : LoriPalette.bubble, in: Capsule())
-            .contentShape(Capsule())
+            Label("Поделиться", systemImage: "square.and.arrow.up")
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled || exporting)
+        .disabled(document.isEmpty)
+        .tint(LoriPalette.lime)
         .accessibilityLabel("Поделиться")
         .accessibilityHint("Выбор формата: PDF или Markdown")
         .accessibilityIdentifier("shareMenu")
     }
 
-    private func copyButton(enabled: Bool) -> some View {
+    /// PDF длинной записи — это десятки страниц вёрстки: без знака работы второе
+    /// нажатие казалось бы нужным. Пока файл собирается, на месте «Поделиться» —
+    /// кружок, и нажать её второй раз нельзя.
+    private var exportProgress: some View {
+        ProgressView()
+            .accessibilityLabel("Собираю файл")
+    }
+
+    /// Копирует то же, что и прежняя кнопка: текст с именами говорящих
+    /// (`outgoingText`). Галочка на две секунды отвечает там же, где нажали.
+    private var copyButton: some View {
         Button(action: copy) {
-            HStack(spacing: 8) {
-                Image(systemName: copied ? "checkmark" : "doc.on.doc")
-                Text(copied ? "Скопировано" : "Скопировать")
-            }
-            .font(LoriFont.control)
-            .foregroundStyle(enabled ? LoriPalette.ink : LoriPalette.muted)
-            .padding(.horizontal, 18)
-            .frame(minHeight: 46)
-            .background(LoriPalette.card, in: Capsule())
-            .overlay(Capsule().stroke(LoriPalette.line, lineWidth: 1))
-            .contentShape(Capsule())
+            Label(copied ? "Скопировано" : "Скопировать", systemImage: copied ? "checkmark" : "doc.on.doc")
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
+        .disabled(document.isEmpty)
+        .tint(LoriPalette.ink)
         .accessibilityLabel(copied ? "Скопировано" : "Скопировать")
         .accessibilityHint("Текст расшифровки с именами говорящих")
         .accessibilityIdentifier("copyTranscript")
@@ -906,11 +873,31 @@ struct TranscriptScreen: View {
 
     // MARK: - Панель навигации
 
+    /// Слева «‹ Записи», справа две группы: «Поделиться» со «Скопировать» — и
+    /// отдельно «…».
+    ///
+    /// На iOS 26 панель кладёт соседние пункты на одну стеклянную подложку, а
+    /// фиксированный `ToolbarSpacer` разводит их на разные. Группы — по совету Apple:
+    /// вместе то, что делает одно дело (HIG «Toolbars» → «Item groupings»;
+    /// «Adopting Liquid Glass» → «Menus and toolbars»), а «…» — в своей группе у
+    /// самого края, как в примере документации `ToolbarSpacer`: «тег, поделиться |
+    /// ещё». Отдать текст наружу — одно дело, «…» — всё прочее о записи. Групп
+    /// выходит три — больше HIG и не советует. Иконки и слова на одной подложке не
+    /// смешиваются: «‹ Записи» со словом — в своей группе.
+    ///
+    /// Цвет: панель монохромна, оливковый — только у «Поделиться» (см. `shareMenu`).
+    /// Акцент окна оливковый (`LoriLocalApp`), поэтому остальным пунктам цвет текста
+    /// задан явно: четыре оливковых значка в ряд главного не выделяли бы.
+    ///
+    /// Ниже iOS 26 стекла и `ToolbarSpacer` нет: те же пункты стоят обычным рядом.
     @ToolbarContentBuilder
     private var toolbarContent: some ToolbarContent {
         // «Готово» в углу не говорило, куда возвращает. Слово стоит текстом, а
         // не `Label`: панель iOS 26 показывает у `Label` одну иконку, и от
-        // «‹ Расшифровки» на экране оставалась голая стрелка.
+        // «‹ Расшифровки» на экране оставалась голая стрелка (и с
+        // `.labelStyle(.titleAndIcon)` тоже). Цена — свой вид в панели нажимается
+        // только своей рамкой, 90 × 36, а не всем стеклом: `.frame(minHeight: 44)`
+        // панель зажимает обратно в 36 (замерено тапами у краёв, 6 октября).
         ToolbarItem(placement: .topBarLeading) {
             Button { dismiss() } label: {
                 HStack(spacing: 3) {
@@ -919,7 +906,21 @@ struct TranscriptScreen: View {
                     Text("Записи")
                 }
             }
+            .tint(LoriPalette.ink)
             .accessibilityLabel("Записи")
+        }
+        if showsActions {
+            ToolbarItemGroup(placement: .topBarTrailing) {
+                if exporting {
+                    exportProgress
+                } else {
+                    shareMenu
+                }
+                copyButton
+            }
+            if #available(iOS 26, *) {
+                ToolbarSpacer(.fixed, placement: .topBarTrailing)
+            }
         }
         ToolbarItem(placement: .topBarTrailing) {
             moreMenu
@@ -929,15 +930,16 @@ struct TranscriptScreen: View {
     /// Только то, что работает. Разложено по смыслу: назвать, править, отдать или
     /// расшифровать заново, удалить. Единым списком «Удалить» стояло вплотную к
     /// «Отправить в Obsidian».
+    ///
+    /// Первой строкой — чем расшифровано (`engineLine`), заголовком первого
+    /// раздела: заголовок раздела в меню не нажимается и не выглядит выключенным
+    /// пунктом, а читается подписью ко всему меню.
     private var moreMenu: some View {
         Menu {
-            Section {
-                if onRename != nil {
-                    Button("Переименовать", systemImage: "pencil") { beginRename() }
-                        .disabled(!canRename)
-                }
-                Button("Придумать заголовок и описание", systemImage: "text.quote") { requestTitle() }
-                    .disabled(document.isEmpty || summaryRunner.running == path)
+            if let engineLine {
+                Section(engineLine) { namingItems }
+            } else {
+                Section { namingItems }
             }
             Section {
                 // Пока запись считается заново, правка ушла бы в файл, который
@@ -972,8 +974,13 @@ struct TranscriptScreen: View {
                 }
             }
         } label: {
-            Image(systemName: "ellipsis")
+            // `Label`, а не голая `Image`: из `Label` панель делает свой системный
+            // пункт, и нажимается вся стеклянная кнопка 44 pt. Голую картинку она
+            // вставляла чужим видом, и нажатие ловила только рамка 28 × 36 — тап
+            // у края стекла не открывал меню (замерено тапами у краёв, 6 октября).
+            Label("Ещё", systemImage: "ellipsis")
         }
+        .tint(LoriPalette.ink)
         .accessibilityLabel("Ещё")
         .accessibilityHint(moreHint)
         .accessibilityIdentifier("transcriptMenu")
@@ -1020,6 +1027,17 @@ struct TranscriptScreen: View {
         }
     }
 
+    /// Назвать запись: переименовать и придумать заголовок с описанием.
+    @ViewBuilder
+    private var namingItems: some View {
+        if onRename != nil {
+            Button("Переименовать", systemImage: "pencil") { beginRename() }
+                .disabled(!canRename)
+        }
+        Button("Придумать заголовок и описание", systemImage: "text.quote") { requestTitle() }
+            .disabled(document.isEmpty || summaryRunner.running == path)
+    }
+
     /// Движки подменю «Расшифровать заново» — только готовые, то же правило, что у
     /// шита из панели (`EngineShortlist`): пункт, который тут же кончится «нет
     /// ключа», предлагать незачем. Исключения для выбранного в настройках здесь
@@ -1030,6 +1048,7 @@ struct TranscriptScreen: View {
 
     private var moreHint: String {
         var items: [String] = []
+        if engineLine != nil { items.append("чем расшифровано") }
         if onRename != nil { items.append("переименовать") }
         items += ["заголовок и описание", "правка текста", "тема", "Obsidian"]
         items.append(transcriptFile == nil ? "расшифровать другим движком" : "расшифровать заново")
@@ -1468,10 +1487,11 @@ private struct ProgressTrack: View {
 // MARK: - Раскладки
 
 /// Два элемента в строку — первый слева, второй справа, а если вместе не
-/// влезают, второй уходит под первый. Ничего не режется: имя движка многоточием
-/// уже теряли. Своя раскладка, а не `ViewThatFits` с двумя вариантами: каждый
-/// элемент объявлен один раз и существует в одном экземпляре, так что кнопка и
-/// её место в дереве доступности не зависят от того, какой вариант выбран.
+/// влезают, второй уходит под первый. Ничего не режется: в общем ряду с датой и
+/// темой имя движка уже уходило в многоточие. Своя раскладка, а не `ViewThatFits`
+/// с двумя вариантами: каждый элемент объявлен один раз и существует в одном
+/// экземпляре, так что кнопка и её место в дереве доступности не зависят от того,
+/// какой вариант выбран.
 private struct SplitRow: Layout {
     var spacing: CGFloat = 12
 
@@ -1509,60 +1529,6 @@ private struct SplitRow: Layout {
 
     private func fitsInline(_ sizes: [CGSize], width: CGFloat) -> Bool {
         sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, sizes.count - 1)) <= width
-    }
-}
-
-/// Элементы слева направо с переносом на следующую строку — кнопки «Поделиться» и
-/// «Скопировать» на узком экране или крупном шрифте встают друг под другом.
-private struct FlowRow: Layout {
-    var spacing: CGFloat = 10
-
-    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
-        let rows = arrange(subviews, width: proposal.width ?? .infinity)
-        let width = rows.flatMap { $0 }.map { $0.frame.maxX }.max() ?? 0
-        let height = rows.last?.map { $0.frame.maxY }.max() ?? 0
-        return CGSize(width: proposal.width ?? width, height: height)
-    }
-
-    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
-        for row in arrange(subviews, width: bounds.width) {
-            for item in row {
-                subviews[item.index].place(
-                    at: CGPoint(x: bounds.minX + item.frame.minX, y: bounds.minY + item.frame.minY),
-                    anchor: .topLeading,
-                    proposal: ProposedViewSize(item.frame.size)
-                )
-            }
-        }
-    }
-
-    private struct Item {
-        let index: Int
-        let frame: CGRect
-    }
-
-    private func arrange(_ subviews: Subviews, width: CGFloat) -> [[Item]] {
-        var rows: [[Item]] = [[]]
-        var x: CGFloat = 0
-        var y: CGFloat = 0
-        var rowHeight: CGFloat = 0
-        for index in subviews.indices {
-            var size = subviews[index].sizeThatFits(.unspecified)
-            if size.width > width {
-                // Шире строки — пусть переносит свой текст, а не вылезает за край.
-                size = subviews[index].sizeThatFits(ProposedViewSize(width: width, height: nil))
-            }
-            if x > 0, x + size.width > width {
-                y += rowHeight + spacing
-                x = 0
-                rowHeight = 0
-                rows.append([])
-            }
-            rows[rows.count - 1].append(Item(index: index, frame: CGRect(origin: CGPoint(x: x, y: y), size: size)))
-            x += size.width + spacing
-            rowHeight = max(rowHeight, size.height)
-        }
-        return rows
     }
 }
 

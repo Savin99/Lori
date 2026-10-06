@@ -138,8 +138,10 @@ final class TranscriptionUITests: XCTestCase {
         )
         card.tap()
 
-        let share = app.buttons["shareMenu"]
-        XCTAssertTrue(share.waitForExistence(timeout: 5), "кнопка «Поделиться» на экране записи")
+        // С 6 октября 2026 «Поделиться» — в панели навигации экрана записи, а не
+        // капсулой под плеером.
+        let share = app.navigationBars.buttons["shareMenu"]
+        XCTAssertTrue(share.waitForExistence(timeout: 5), "«Поделиться» — в панели экрана записи")
         // Кнопка включается, когда экран дочитал расшифровку, — это доля секунды
         // после появления. Проверка сразу же пропускала тест на записи с текстом.
         let enabled = XCTNSPredicateExpectation(predicate: NSPredicate(format: "isEnabled == true"), object: share)

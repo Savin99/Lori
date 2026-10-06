@@ -1,8 +1,9 @@
 import XCTest
 
-/// Экран записи по замыслу 5 октября 2026: заголовок и описание, плеер, главная
-/// кнопка «Поделиться» рядом со «Скопировать», блок состояния и текст, в котором
-/// перематывает таймкод, а реплику можно выделить.
+/// Экран записи по замыслу 5–6 октября 2026: заголовок и описание, дата с темой,
+/// плеер, блок состояния и текст, в котором перематывает таймкод, а реплику можно
+/// выделить. «Поделиться» и «Скопировать» — одной группой в панели навигации рядом
+/// с «…», а чем расшифровано — первой строкой «…».
 ///
 /// Обычные проверки идут на записи из `design/qa/seed-audio.sh` — «UI sample»:
 /// две реплики с таймкодами и меткой говорящего. Снимки состояний — на наборе
@@ -34,14 +35,35 @@ final class TranscriptScreenUITests: XCTestCase {
         XCTAssertTrue(app.buttons["Слушать"].exists, "плеер на экране")
         XCTAssertTrue(app.buttons["Скорость воспроизведения"].exists, "скорость рядом с плеером")
 
-        let share = app.buttons["shareMenu"]
-        XCTAssertTrue(share.isEnabled, "с расшифровкой «Поделиться» доступна")
-        XCTAssertEqual(app.buttons.matching(identifier: "shareMenu").count, 1, "«Поделиться» одна — без дубля в панели")
-        XCTAssertTrue(app.buttons["copyTranscript"].isEnabled, "«Скопировать» рядом и доступна")
+        // «Поделиться» и «Скопировать» — одной группой в панели навигации, рядом с
+        // «…», а не капсулами под плеером (владелец, 6 октября 2026).
+        let bar = app.navigationBars.firstMatch
+        let share = bar.buttons["shareMenu"]
+        let copy = bar.buttons["copyTranscript"]
+        let more = bar.buttons["transcriptMenu"]
+        XCTAssertTrue(share.isEnabled, "с расшифровкой «Поделиться» доступна — в панели навигации")
+        XCTAssertTrue(copy.isEnabled, "«Скопировать» рядом и доступна")
+        XCTAssertEqual(share.label, "Поделиться")
+        XCTAssertEqual(copy.label, "Скопировать")
+        XCTAssertEqual(app.buttons.matching(identifier: "shareMenu").count, 1, "«Поделиться» одна — без дубля под плеером")
+        XCTAssertEqual(app.buttons.matching(identifier: "copyTranscript").count, 1, "«Скопировать» одна")
+        XCTAssertLessThan(share.frame.maxX, copy.frame.minX, "сначала «Поделиться», за ней «Скопировать»")
+        XCTAssertLessThan(copy.frame.maxX, more.frame.minX, "«…» — у самого края")
+        XCTAssertLessThan(share.frame.maxY, title.frame.minY, "кнопки над заголовком, а не под плеером")
+
+        // Строки «чем расшифровано» под заголовком больше нет — она первой строкой «…».
+        XCTAssertFalse(app.descendants(matching: .any)["transcriptEngine"].exists, "строка движка ушла из шапки")
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Расшифровано")).firstMatch.exists,
+            "пока «…» закрыта, движка на экране нет"
+        )
+        // Дата с длительностью и тема — одной строкой, раз вместе влезают.
+        let chip = app.buttons["topicChip"]
         XCTAssertEqual(
             app.descendants(matching: .any).matching(identifier: "topicChip").count, 1,
             "тема назначается прямо с экрана записи"
         )
+        XCTAssertEqual(meta.frame.midY, chip.frame.midY, accuracy: 2, "дата и тема — одной строкой")
         XCTAssertFalse(
             app.descendants(matching: .any)["transcriptionStatus"].exists,
             "у расшифрованной записи блока состояния нет"
@@ -105,7 +127,7 @@ final class TranscriptScreenUITests: XCTestCase {
         let matches = app.staticTexts.matching(NSPredicate(format: "label == %@", "Раз, два, три, четыре, пять."))
         XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 5))
         matches.element(boundBy: matches.count - 1).press(forDuration: 1.2)
-        // «Скопировать» из меню текста, а не одноимённая кнопка экрана.
+        // «Скопировать» из меню текста, а не одноимённая кнопка панели.
         let copy = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@ AND identifier != %@", "Скопировать", "copyTranscript"))
             .firstMatch
@@ -113,15 +135,24 @@ final class TranscriptScreenUITests: XCTestCase {
         save("record-text-selection")
     }
 
-    /// В «…» только то, что работает; «Скопировать» и «Поделиться» живут на экране.
+    /// В «…» только то, что работает; «Скопировать» и «Поделиться» стоят рядом с ней
+    /// в панели. Первой строкой «…» — чем расшифровано: подпись, а не пункт.
     func testMoreMenuListsRecordActions() throws {
         let app = launch()
         try open(sample, in: app)
 
         app.buttons["transcriptMenu"].tap()
+        // «UI sample» расшифрован GigaAM на телефоне — место сказано словами.
+        let engine = app.staticTexts["Расшифровано на этом iPhone: GigaAM v3 CTC (int8)"]
+        XCTAssertTrue(engine.waitForExistence(timeout: 3), "движок — первой строкой «…»")
+        XCTAssertFalse(app.buttons[engine.label].exists, "строка движка не нажимается")
         for item in ["Придумать заголовок и описание", "Править текст", "Тема", "Отправить в Obsidian", "Расшифровать заново"] {
             XCTAssertTrue(app.buttons[item].waitForExistence(timeout: 3), "в «…» нет пункта «\(item)»")
         }
+        XCTAssertLessThan(
+            engine.frame.maxY, app.buttons["Придумать заголовок и описание"].frame.minY,
+            "строка движка — над пунктами"
+        )
         save("record-more-menu")
 
         // Подменю движков: только готовые — то же правило, что у шита из панели, —
@@ -270,6 +301,61 @@ final class TranscriptScreenUITests: XCTestCase {
         XCTAssertTrue(offer.waitForNonExistence(timeout: 5))
     }
 
+    /// Пока текста нет, «Поделиться» и «Скопировать» нет вовсе — ни выключенными, ни
+    /// пустым стеклом в панели; нет и строки движка в «…». Тест ничего не нажимает:
+    /// запись без расшифровки нужна тестам очереди.
+    func testUntranscribedRecordHasNoShareOrCopy() throws {
+        let app = launch()
+        try openCard(withStatus: "Без расшифровки", in: app)
+        XCTAssertTrue(app.buttons["transcribeAction"].waitForExistence(timeout: 5), "это запись без расшифровки")
+        XCTAssertFalse(app.buttons["shareMenu"].exists, "без текста «Поделиться» нет")
+        XCTAssertFalse(app.buttons["copyTranscript"].exists, "без текста «Скопировать» нет")
+
+        app.buttons["transcriptMenu"].tap()
+        XCTAssertTrue(app.buttons["Тема"].waitForExistence(timeout: 3), "«…» открылась")
+        XCTAssertFalse(
+            app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Расшифровано")).firstMatch.exists,
+            "без расшифровки нет и строки движка"
+        )
+        app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88)).tap()
+        XCTAssertTrue(app.buttons["Тема"].waitForNonExistence(timeout: 5))
+    }
+
+    /// Точка нажатия пунктов панели — вся стеклянная кнопка 44 pt, а не рамка значка
+    /// 36 pt, которую видит XCUITest. Так бывает, когда пункт системный — из `Label`;
+    /// «…» с голой `Image` ловила нажатие только рамкой 28 × 36. Тапы — у краёв
+    /// стекла, за рамкой пункта: на 3 точки выше, на 2 ниже, на 4 левее.
+    func testToolbarButtonsAreHitAcrossTheirGlass() throws {
+        let app = launch()
+        try open(sample, in: app)
+        let origin = app.coordinate(withNormalizedOffset: .zero)
+        func outside(_ element: XCUIElement, dx: CGFloat = 0, dy: CGFloat) -> XCUICoordinate {
+            let frame = element.frame
+            let x = dx < 0 ? frame.minX + dx : frame.midX
+            let y = dy < 0 ? frame.minY + dy : (dy > 0 ? frame.maxY + dy : frame.midY)
+            return origin.withOffset(CGVector(dx: x, dy: y))
+        }
+        let away = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88))
+
+        outside(app.buttons["shareMenu"], dy: -3).tap()
+        XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 3), "«Поделиться» нажимается у верхнего края стекла")
+        away.tap()
+        XCTAssertTrue(app.buttons["PDF"].waitForNonExistence(timeout: 5))
+
+        let copy = app.buttons["copyTranscript"]
+        outside(copy, dy: 2).tap()
+        let copied = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", "Скопировано"), object: copy)
+        XCTAssertEqual(XCTWaiter().wait(for: [copied], timeout: 1.5), .completed, "«Скопировать» нажимается у нижнего края стекла")
+
+        let more = app.buttons["transcriptMenu"]
+        for point in [outside(more, dy: -3), outside(more, dx: -4, dy: 0)] {
+            point.tap()
+            XCTAssertTrue(app.buttons["Тема"].waitForExistence(timeout: 3), "«…» нажимается у края стекла")
+            away.tap()
+            XCTAssertTrue(app.buttons["Тема"].waitForNonExistence(timeout: 5))
+        }
+    }
+
     // MARK: - Снимки состояний
 
     /// Снимки экрана записи в светлой и тёмной теме — для глаз, а не для проверок.
@@ -325,6 +411,39 @@ final class TranscriptScreenUITests: XCTestCase {
 
         try openCard(withStatus: "Без расшифровки", in: app)
         shoot("record-untranscribed", in: app)
+        close(app)
+    }
+
+    /// Панель после 6 октября — снимки для глаз: запись с текстом, «…» со строкой
+    /// движка и запись без расшифровки, в светлой и тёмной теме. Запись без
+    /// расшифровки только открывается: снимкам состояний она нужна такой.
+    func testCaptureToolbar() throws {
+        let app = launch(engine: "elevenlabs", extra: ["--recovery-probe"])
+        try XCTSkipUnless(
+            find("Совещание по бюджету", in: app).exists,
+            "нет набора снимков — прогони design/redesign-2026-10-05/seed-record-states.sh"
+        )
+        try open("Совещание по бюджету", in: app)
+        shoot("record-toolbar-transcript", in: app)
+
+        let engine = app.staticTexts["Расшифровано в облаке: ElevenLabs · scribe_v2 · Дословно"]
+        for dark in [false, true] {
+            XCUIDevice.shared.appearance = dark ? .dark : .light
+            settle(app)
+            tap(app.buttons["transcriptMenu"])
+            XCTAssertTrue(engine.waitForExistence(timeout: 3), "облачный движок — первой строкой «…», с местом")
+            Thread.sleep(forTimeInterval: 0.8)
+            save("record-toolbar-menu-\(dark ? "dark" : "light")")
+            app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88)).tap()
+            XCTAssertTrue(engine.waitForNonExistence(timeout: 5))
+        }
+        XCUIDevice.shared.appearance = .light
+        close(app)
+
+        try openCard(withStatus: "Без расшифровки", in: app)
+        XCTAssertFalse(app.buttons["shareMenu"].exists, "без текста «Поделиться» нет")
+        XCTAssertFalse(app.buttons["copyTranscript"].exists, "без текста «Скопировать» нет")
+        shoot("record-toolbar-untranscribed", in: app)
         close(app)
     }
 
