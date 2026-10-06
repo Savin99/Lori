@@ -192,6 +192,60 @@ final class QueueSummaryTests: XCTestCase {
         XCTAssertNil(summary.remaining)
         XCTAssertNil(summary.note)
     }
+
+    /// Параллельная расшифровка: блок говорит о самой давней из идущих, вторая —
+    /// строкой «Ещё идёт», а номер — диапазоном: «2 из 4» при двух идущих читалось
+    /// бы так, будто вторая ещё ждёт.
+    func testParallelRecordIsNamedAndCounted() throws {
+        let summary = try XCTUnwrap(QueueSummary.make(
+            current: "a.m4a", queued: ["d.m4a"], batchDone: 1, batchTotal: 4,
+            fraction: 0.4, remaining: nil, note: nil, waitingForMemory: [],
+            alsoRunning: ["b.m4a"], title: title
+        ))
+        XCTAssertEqual(summary.counter, "2–3 из 4")
+        XCTAssertEqual(summary.alongside, "Ещё идёт: Интервью Маши")
+        XCTAssertEqual(summary.next, "Дальше: Планёрка", "идущие вместе с текущей в «Дальше» не попадают")
+    }
+
+    /// Три сразу: остальные две — числом, а сама текущая в счёт не входит.
+    func testThreeParallelRecordsAreCountedNotListed() throws {
+        let summary = try XCTUnwrap(QueueSummary.make(
+            current: "a.m4a", queued: [], batchDone: 0, batchTotal: 3,
+            fraction: nil, remaining: nil, note: nil, waitingForMemory: [],
+            alsoRunning: ["a.m4a", "b.m4a", "c.m4a"], title: title
+        ))
+        XCTAssertEqual(summary.counter, "1–3 из 3")
+        XCTAssertEqual(summary.alongside, "Ещё идут: 2 записи")
+        XCTAssertNil(summary.next)
+    }
+
+    /// Пока ни одна не идёт, говорить «ещё идёт» не о чем.
+    func testWaitingQueueHasNoAlongside() throws {
+        let summary = try XCTUnwrap(QueueSummary.make(
+            current: nil, queued: ["b.m4a"], batchDone: 0, batchTotal: 1,
+            fraction: nil, remaining: nil, note: nil, waitingForMemory: [],
+            alsoRunning: ["c.m4a"], title: title
+        ))
+        XCTAssertNil(summary.alongside)
+    }
+
+    func testRangeCounterStaysWithinTheBatch() {
+        XCTAssertEqual(QueueSummary.counter(done: 1, total: 5, running: 1), "2 из 5", "одна — как в Dynamic Island")
+        XCTAssertEqual(QueueSummary.counter(done: 3, total: 5, running: 3), "4–5 из 5", "за итог не выходит")
+        XCTAssertEqual(QueueSummary.counter(done: 4, total: 5, running: 2), "5 из 5")
+    }
+}
+
+/// Вопрос перед «Остановить»: `cancelAll` снимает и прерванные записи.
+final class StopQueueCopyTests: XCTestCase {
+    func testInterruptedRecordsAreMentionedOnlyWhenThereAreSome() {
+        XCTAssertEqual(StopQueueCopy.message(interrupted: 0), "Записи останутся — расшифровку можно запустить снова.")
+        XCTAssertEqual(
+            StopQueueCopy.message(interrupted: 1),
+            "Прерванная запись тоже снимется: сама она уже не продолжится. Записи останутся — расшифровку можно запустить снова."
+        )
+        XCTAssertTrue(StopQueueCopy.message(interrupted: 3).hasPrefix("Прерванные записи (3) тоже снимутся"))
+    }
 }
 
 /// Поиск под открытым листом: запись удалили или переименовали на её экране —

@@ -213,6 +213,9 @@ struct QueueSummary: Equatable {
     var next: String?
     /// Хоть одна ждущая запись упёрлась в память.
     var waitsForMemory: Bool
+    /// Кто идёт вместе с ней, когда расшифровка параллельная (2–3 записи):
+    /// «Ещё идёт: Интервью Маши», «Ещё идут: 2 записи». nil — идёт одна.
+    var alongside: String? = nil
 
     static func make(
         current: String?,
@@ -223,9 +226,12 @@ struct QueueSummary: Equatable {
         remaining: TimeInterval?,
         note: String?,
         waitingForMemory: Set<String>,
+        alsoRunning: [String] = [],
         title: (String) -> String
     ) -> QueueSummary? {
         guard let focus = current ?? queued.first else { return nil }
+        // «Дальше» — только ждущие: идущие вместе с текущей сюда не попадают, о них
+        // говорит `alongside`.
         let rest = current == nil ? Array(queued.dropFirst()) : queued
         var next: String?
         if let first = rest.first {
@@ -233,8 +239,15 @@ struct QueueSummary: Equatable {
             if rest.count > 1 { next? += ", ещё \(rest.count - 1)" }
         }
         let running = current != nil
+        let others = running ? alsoRunning.filter { $0 != focus } : []
+        var alongside: String?
+        switch others.count {
+        case 0: alongside = nil
+        case 1: alongside = "Ещё идёт: \(title(others[0]))"
+        default: alongside = "Ещё идут: \(HomeFormat.records(others.count))"
+        }
         return QueueSummary(
-            counter: batchTotal > 1 ? TranscriptionService.counter(done: batchDone, total: batchTotal) : nil,
+            counter: batchTotal > 1 ? Self.counter(done: batchDone, total: batchTotal, running: 1 + others.count) : nil,
             focusPath: focus,
             title: title(focus),
             isWaiting: !running,
@@ -242,8 +255,37 @@ struct QueueSummary: Equatable {
             remaining: running ? remaining : nil,
             note: running && fraction == nil ? note.flatMap { $0.isEmpty ? nil : $0 } : nil,
             next: next,
-            waitsForMemory: !waitingForMemory.isEmpty
+            waitsForMemory: !waitingForMemory.isEmpty,
+            alongside: alongside
         )
+    }
+
+    /// «2 из 5», а когда идут сразу несколько — «2–3 из 5». Номер одной записи при
+    /// двух идущих читался бы так, будто вторая ещё ждёт. С одной — тот же текст,
+    /// что в Dynamic Island (`TranscriptionService.counter`).
+    static func counter(done: Int, total: Int, running: Int) -> String {
+        guard running > 1 else { return TranscriptionService.counter(done: done, total: total) }
+        let total = max(total, 1)
+        let first = min(max(done, 0) + 1, total)
+        let last = min(max(done, 0) + running, total)
+        return first == last ? "\(first) из \(total)" : "\(first)–\(last) из \(total)"
+    }
+}
+
+/// Вопрос перед «Остановить» в блоке очереди. `cancelAll` снимает и прерванные
+/// записи — иначе они поднялись бы сами при ближайшем возвращении в приложение, —
+/// и когда такие есть, вопрос говорит и о них: молча снятая прерванная запись
+/// выглядела бы потерянной.
+enum StopQueueCopy {
+    static let title = "Остановить расшифровку?"
+
+    static func message(interrupted: Int) -> String {
+        let keep = "Записи останутся — расшифровку можно запустить снова."
+        switch interrupted {
+        case ...0: return keep
+        case 1: return "Прерванная запись тоже снимется: сама она уже не продолжится. \(keep)"
+        default: return "Прерванные записи (\(interrupted)) тоже снимутся: сами они уже не продолжатся. \(keep)"
+        }
     }
 }
 

@@ -625,6 +625,9 @@ struct ContentView: View {
             remaining: current.flatMap(transcription.remainingTime(for:)),
             note: current.flatMap(transcription.progressText(for:)),
             waitingForMemory: transcription.waitingForMemory,
+            // Параллельная расшифровка: блок говорит о самой давней из идущих, а
+            // остальные — строкой «Ещё идёт».
+            alsoRunning: transcription.running.union(transcription.starting).subtracting([current].compactMap { $0 }).sorted(),
             title: title(forPath:)
         )
     }
@@ -1021,14 +1024,14 @@ struct ContentView: View {
                 Text(DeleteRecordCopy.message(active: transcription.state(for: entry.relativePath).isActive))
             }
             .confirmationDialog(
-                "Остановить расшифровку?",
+                StopQueueCopy.title,
                 isPresented: $showStopQueue,
                 titleVisibility: .visible
             ) {
                 Button("Остановить", role: .destructive) { transcription.cancelAll() }
                 Button("Не останавливать", role: .cancel) {}
             } message: {
-                Text("Записи останутся — расшифровку можно запустить снова.")
+                Text(StopQueueCopy.message(interrupted: transcription.interrupted.count))
             }
             .alert("Переименовать", isPresented: isPresented($renameTarget)) {
                 TextField("Название", text: $renameDraft)

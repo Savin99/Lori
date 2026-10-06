@@ -355,6 +355,10 @@ struct QueueBlock: View {
             } else if let note = summary.note {
                 self.note(note, color: LoriPalette.muted)
             }
+            if let alongside = summary.alongside {
+                note(alongside, color: LoriPalette.muted)
+                    .lineLimit(1)
+            }
             if summary.waitsForMemory {
                 note("Следующая ждёт свободную память телефона", color: LoriPalette.warn)
             }

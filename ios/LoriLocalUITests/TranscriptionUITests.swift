@@ -403,6 +403,37 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(queue.waitForNonExistence(timeout: 10))
     }
 
+    /// Две записи сразу (настройка «одновременно» = 2): блок очереди говорит о самой
+    /// давней, о второй — строкой «Ещё идёт», а счёт — диапазоном «1–2 из 2», а не
+    /// «1 из 2», будто вторая ещё ждёт. В конце очередь снимается — обе записи
+    /// остаются без расшифровки для следующих тестов.
+    func testParallelQueueShowsTheOtherRunningRecord() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 90, concurrency: 2)
+        stopQueueIfRunning(app)
+
+        let first = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(first, in: app), "нет записи без расшифровки — seed-home.py --untranscribed")
+        scroll(to: first, in: app)
+        tap(first)
+        let second = startAction(in: app)
+        try XCTSkipUnless(scrollUntilExists(second, in: app), "нужны две записи без расшифровки — seed-home.py --untranscribed")
+        scroll(to: second, in: app)
+        tap(second)
+
+        let queue = app.descendants(matching: .any)["queueBlock"]
+        XCTAssertTrue(scrollUntilExists(queue, in: app, upwards: true), "блок очереди над списком")
+        XCTAssertTrue(queue.waitForLabel(containing: "Ещё идёт: ", timeout: 10), "вторая идущая названа: \(queue.label)")
+        XCTAssertTrue(queue.label.contains("1–2 из 2"), "счёт — диапазоном: \(queue.label)")
+        XCTAssertFalse(queue.label.contains("Дальше"), "ждущих нет — «Дальше» не о чем: \(queue.label)")
+        save(XCUIScreen.main.screenshot(), named: "home-queue-parallel")
+
+        tap(app.buttons["stopQueueButton"])
+        XCTAssertTrue(app.staticTexts["Остановить расшифровку?"].waitForExistence(timeout: 5))
+        tap(dialogButton("Остановить", in: app))
+        XCTAssertTrue(queue.waitForNonExistence(timeout: 10), "обе сняты")
+    }
+
     /// Меню `+` без «Настроек»: шестерёнка в шапке — единственный вход туда.
     func testPlusMenuHasNoSettings() throws {
         continueAfterFailure = false
@@ -687,14 +718,20 @@ final class TranscriptionUITests: XCTestCase {
     ///
     /// `stub` — проверочный движок Lori QA (`--ui-stub-engine`): симулятор не
     /// расшифровывает, а очередь и полосы иначе не увидеть.
+    ///
+    /// `concurrency` — сколько записей считать сразу. Задаётся всегда, по той же
+    /// причине, что и движок: тесты очереди ждут, что вторая запись постоит в
+    /// очереди, и не должны зависеть от того, что выставлено в настройках.
     private func launch(
         engine: String = "gigaam",
         stub: Bool = false,
         stubSeconds: Int = 24,
+        concurrency: Int = 1,
         forgetAttachments: Bool = true
     ) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments += ["-transcriptionEngine", stub ? "elevenlabs" : engine, "-titlesHintDismissed", "NO"]
+        app.launchArguments += ["-transcriptionConcurrency", String(concurrency)]
         if forgetAttachments { app.launchArguments.append("--forget-attachments") }
         if stub { app.launchArguments += ["--ui-stub-engine", "--ui-stub-seconds", String(stubSeconds)] }
         app.launch()
@@ -854,6 +891,11 @@ private extension XCUIElement {
     /// меняется не сразу, а когда список переедет за записью.
     func waitForLabel(_ label: String, timeout: TimeInterval) -> Bool {
         let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label == %@", label), object: self)
+        return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
+    }
+
+    func waitForLabel(containing text: String, timeout: TimeInterval) -> Bool {
+        let expectation = XCTNSPredicateExpectation(predicate: NSPredicate(format: "label CONTAINS %@", text), object: self)
         return XCTWaiter().wait(for: [expectation], timeout: timeout) == .completed
     }
 }
