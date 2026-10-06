@@ -469,6 +469,47 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(title.waitForNonExistence(timeout: 5))
     }
 
+    /// «Повторить» после ошибки не поднимает алерт с прошлой ошибкой. Сервис кладёт
+    /// ошибку записи ещё и в общую строку `lastError`, а главный экран прятал её,
+    /// только пока та же ошибка лежит в `failed`. Повтор убирает запись оттуда — и
+    /// устаревший текст вставал алертом «Lori» поверх открытого листа. Всё в одном
+    /// запуске: запись с «fail» падает, «Повторить» на её экране — ни алерта, ни
+    /// закрытого листа; потом она падает снова — и снова только строкой.
+    func testRetryFromRecordScreenShowsNoStaleAlert() throws {
+        continueAfterFailure = false
+        let app = launch(stub: true, stubSeconds: 12)
+        stopQueueIfRunning(app)
+
+        let failing = cards(in: app).matching(NSPredicate(format: "label CONTAINS %@", "(fail)")).firstMatch
+        try XCTSkipUnless(scrollUntilExists(failing, in: app), "нет записи с «fail» в имени — прогони seed-home.py --inbox-only и testZZ1")
+        scroll(to: failing, in: app)
+        tap(failing)
+        let title = app.descendants(matching: .any)["recordTitle"]
+        XCTAssertTrue(title.waitForExistence(timeout: 5), "экран записи открыт")
+        let status = app.descendants(matching: .any)["transcriptionStatus"]
+        let failure = app.staticTexts["Не получилось расшифровать"]
+        // Запись после прошлых прогонов — с ошибкой и «Повторить»; без неё — «Расшифровать».
+        let retry = status.buttons["Повторить"]
+        let start = retry.waitForExistence(timeout: 3) ? retry : app.buttons["transcribeAction"]
+
+        // Первая ошибка — в этом запуске: только так общая строка ошибки заполнена.
+        tap(start)
+        XCTAssertTrue(failure.waitForNonExistence(timeout: 5), "запись снова в работе")
+        XCTAssertTrue(failure.waitForExistence(timeout: 30), "заглушка роняет «fail»")
+        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 2), "ошибка — строкой, без алерта")
+
+        // Повтор: ошибка уходит из `failed`, а прежний текст не должен всплыть алертом.
+        tap(status.buttons["Повторить"])
+        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 3), "после «Повторить» алерта с прошлой ошибкой нет")
+        XCTAssertTrue(title.exists, "лист записи открыт")
+        XCTAssertTrue(failure.waitForExistence(timeout: 30), "запись падает снова")
+        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 2), "и снова без алерта")
+        XCTAssertTrue(title.exists, "лист записи остался открытым")
+        tap(app.buttons["Записи"])
+        XCTAssertTrue(title.waitForNonExistence(timeout: 5))
+        XCTAssertFalse(app.alerts.firstMatch.waitForExistence(timeout: 2), "и на главном экране алерта нет")
+    }
+
     /// Переименование с экрана записи не закрывает лист: путь записи меняется, а
     /// экран остаётся и показывает новое имя. Имя возвращается назад — набор для
     /// тестов экрана записи («UI sample») ищет запись по прежнему заголовку.

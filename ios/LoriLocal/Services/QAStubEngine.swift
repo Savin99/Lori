@@ -7,7 +7,10 @@ import Foundation
 /// карточке иначе не увидеть иначе как на телефоне владельца. Заглушка считает
 /// секунд двадцать с честными долями и кладёт правдоподобную расшифровку с
 /// таймкодами и говорящими. Файл с «fail» в имени она роняет — так видна строка
-/// ошибки с «Повторить».
+/// ошибки с «Повторить». Текст ошибки у каждого файла свой (имя в конце): одинаковый
+/// текст у нескольких записей прятал бы ошибки экрана, которые смотрят, лежит ли
+/// этот текст ещё в `TranscriptionService.failed`, — так было с устаревшим алертом
+/// после «Повторить» (`testRetryFromRecordScreenShowsNoStaleAlert`).
 ///
 /// Включается только тремя условиями сразу, и ни одно из них не бывает у личного
 /// приложения:
@@ -86,7 +89,7 @@ struct QAStubTranscriber: Transcribing {
             // как настоящий движок, — между кусками.
             try await Task.sleep(for: .seconds(pause))
             if failing, step == steps / 3 {
-                throw TranscriptionError.api("Нет связи с сервисом. Проверь интернет и нажми «Повторить».")
+                throw TranscriptionError.api(Self.failure(for: base))
             }
             let ready = result.segments.prefix(result.segments.count * (step + 1) / steps)
             if !ready.isEmpty {
@@ -95,6 +98,12 @@ struct QAStubTranscriber: Transcribing {
         }
         progress(steps, steps)
         return result
+    }
+
+    /// Ошибка файла с «fail» в имени. Первая фраза — та, что встаёт на карточку, —
+    /// у всех одна; имя файла в конце делает текст своим у каждой записи.
+    nonisolated static func failure(for base: String) -> String {
+        "Нет связи с сервисом. Проверь интернет и нажми «Повторить». Файл: \(base)."
     }
 
     /// Правдоподобная расшифровка: реплики двух говорящих с диапазонами времени.

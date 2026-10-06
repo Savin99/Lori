@@ -82,7 +82,7 @@ final class QAStubEngineTests: XCTestCase {
             _ = try await stub.transcribe(audioURL: URL(fileURLWithPath: "/tmp/Звонок (fail).m4a"))
             XCTFail("файл с «fail» в имени обязан упасть")
         } catch let error as TranscriptionError {
-            XCTAssertEqual(error, .api("Нет связи с сервисом. Проверь интернет и нажми «Повторить»."))
+            XCTAssertEqual(error, .api("Нет связи с сервисом. Проверь интернет и нажми «Повторить». Файл: Звонок (fail)."))
         } catch {
             XCTFail("ошибка не та: \(error)")
         }

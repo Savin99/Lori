@@ -160,6 +160,15 @@ struct ContentView: View {
                     mode: measure.mode
                 )
             }
+            // Ошибка записи живёт на её карточке и на экране записи, а в общую строку
+            // сервиса (`lastError`) попадает заодно. Снимаем её оттуда сразу, пока она
+            // ещё лежит в `failed`: «Повторить», удаление и переименование убирают запись
+            // из `failed`, и устаревший текст вставал алертом «Lori» — а алерт главного
+            // экрана закрывал открытый лист записи (`testRetryFromRecordScreenShowsNoStaleAlert`).
+            .onChange(of: transcription.lastError) { _, error in
+                guard let error, transcription.failed.values.contains(error) else { return }
+                transcription.lastError = nil
+            }
         }
         .tint(LoriPalette.lime)
     }
@@ -660,6 +669,8 @@ struct ContentView: View {
     /// Что показать алертом. Ошибку расшифровки конкретной записи алертом не
     /// показываем: она уже стоит на карточке с «Повторить», а алерт посреди
     /// пачки из пяти записей только прерывает. Остальные ошибки — как были.
+    /// Главное здесь делает `onChange(of: transcription.lastError)` — снимает такую
+    /// ошибку из общей строки; проверка ниже закрывает кадр до того, как он сработал.
     private var activeError: String? {
         if let error = workspace.lastError ?? startError { return error }
         guard let error = transcription.lastError else { return nil }
