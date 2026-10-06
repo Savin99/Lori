@@ -29,6 +29,9 @@ final class TranscriptionUITests: XCTestCase {
     }
 
     /// Панель: движок и режим — два чипа, у движка без режимов чип исчезает.
+    /// Шит движка — только готовые движки и выбранный (владелец, 6 октября 2026:
+    /// «в селекторе не нужно показывать модели, которых нет»), остальные — в
+    /// настройках, куда ведёт строка в конце шита.
     func testPanelShowsEngineAndModeChips() throws {
         continueAfterFailure = false
         let app = launch()
@@ -38,15 +41,32 @@ final class TranscriptionUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["modeChip"].exists, "рядом — режим движка")
         XCTAssertTrue(app.buttons["recordButton"].exists)
         XCTAssertTrue(app.buttons["importButton"].exists, "импорт — рядом, а не в меню")
-        save(XCUIScreen.main.screenshot(), named: "panel")
+        // Панель на iOS 26 — стекло над списком: читаемость проверяется глазами в
+        // обеих темах, поверх карточек, уходящих под панель.
+        shoot(named: "panel")
 
         engineChip.tap()
         XCTAssertTrue(
             app.staticTexts["На телефоне"].waitForExistence(timeout: 5),
             "шит делит движки по тому, где считается расшифровка"
         )
-        XCTAssertTrue(app.staticTexts["В облаке"].exists)
-        save(XCUIScreen.main.screenshot(), named: "engine-picker")
+        // Проверки не зависят от того, что лежит в Lori QA: готовый движок виден
+        // без бейджа, неготовый не виден вовсе — кроме выбранного GigaAM. Значит,
+        // бейджей «Нет ключа» и «Нет модели» в шите быть не может.
+        // Бейдж ищется по подписи, а не среди `staticTexts`: текст внутри кнопки-строки
+        // сливается в подпись самой кнопки, и отдельного элемента у него может не быть.
+        let row = { (id: String) in app.descendants(matching: .any)["engineRow.\(id)"] }
+        let labelled = { (text: String) in
+            app.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", text)).firstMatch
+        }
+        XCTAssertTrue(row("gigaam").exists, "выбранный движок виден, даже когда не готов")
+        XCTAssertTrue(row("apple").exists, "системный движок готов всегда")
+        XCTAssertFalse(labelled("Нет ключа").exists, "облачного движка без ключа в шите нет")
+        XCTAssertFalse(labelled("Нет модели").exists, "Whisper без модели в шите нет")
+        let cloudRows = ["openai", "gemini", "elevenlabs"].contains { row($0).exists }
+        XCTAssertEqual(app.staticTexts["В облаке"].exists, cloudRows, "пустой раздел не показывается")
+        XCTAssertTrue(app.buttons["engineSettingsLink"].exists, "остальные движки — строкой в настройки")
+        shoot(named: "engine-picker")
 
         // У движка Apple режимов нет — строка должна схлопнуться.
         // Ищем именно кнопку: идентификатор на строке списка достаётся и
@@ -61,6 +81,13 @@ final class TranscriptionUITests: XCTestCase {
             "у движка без режимов чипа режима быть не должно"
         )
         XCTAssertTrue(engineChip.exists, "сам движок остаётся виден")
+
+        // Строка в конце шита открывает экран движка — с полным списком: там
+        // модель качают и ключ вводят.
+        tap(engineChip)
+        tap(app.buttons["engineSettingsLink"])
+        XCTAssertTrue(exists("engineStatus", in: app), "строка ведёт на экран движка")
+        XCTAssertTrue(exists("engineRow.elevenlabs", in: app), "там все движки, и неготовые тоже")
     }
 
     func testRecordingOpensPlayerWithTranscriptCard() throws {

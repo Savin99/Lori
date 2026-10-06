@@ -41,6 +41,26 @@ enum LoriPalette {
     static let obsidian = pair(light: (0.42, 0.29, 0.62, 1), dark: (0.66, 0.55, 0.86, 1))
     static let warn = pair(light: (0.62, 0.44, 0.05, 1), dark: (0.91, 0.73, 0.35, 1))
     static let danger = pair(light: (0.66, 0.16, 0.13, 1), dark: (0.94, 0.48, 0.44, 1))
+
+    /// Заливка чипов и кнопок на стеклянной нижней панели (iOS 26). Нейтральная
+    /// и полупрозрачная, а не сплошная `bubble`: сплошной кружок лежал бы на стекле
+    /// наклейкой и не менялся вместе с тем, что прокручивается под панелью. Не
+    /// акцент — тот один, оливковый.
+    private static let glassFill = pair(light: (0, 0, 0, 0.06), dark: (1, 1, 1, 0.12))
+
+    /// Заливка чипа в нижней панели: на стекле — `glassFill`, на сплошной
+    /// карточке (ниже iOS 26) — прежняя `bubble`.
+    static var panelChip: Color {
+        if #available(iOS 26, *) { return glassFill }
+        return bubble
+    }
+
+    /// Круглая кнопка паузы в панели: на стекле — `glassFill`, ниже iOS 26 —
+    /// прежний цвет холста.
+    static var panelButton: Color {
+        if #available(iOS 26, *) { return glassFill }
+        return canvas
+    }
 }
 
 /// Шрифты приложения. Всё через семантические стили и `relativeTo`,
@@ -79,7 +99,7 @@ struct ContentView: View {
     @StateObject private var search = TranscriptSearchStore()
     @StateObject private var topics = TopicStore()
     @StateObject private var durations = RecordingDurations()
-    @StateObject private var engines = ContentView.makeEngineDirectory()
+    @StateObject private var engines = EngineDirectory.forInterface()
     @StateObject private var composer = ComposerModel()
     @StateObject private var speakers = SpeakerNames()
     @StateObject private var speed = TranscriptionSpeed()
@@ -150,7 +170,7 @@ struct ContentView: View {
                     recordings
                 }
             }
-            .safeAreaInset(edge: .bottom, spacing: 0) { composerBar }
+            .bottomPanel { composerBar }
             .onChange(of: transcription.lastMeasure) { _, measure in
                 guard let measure else { return }
                 speed.record(
@@ -552,7 +572,7 @@ struct ContentView: View {
             )
         )
         .sheet(isPresented: $showEnginePicker) {
-            EnginePicker(directory: engines, selection: $engineRaw)
+            EnginePicker(directory: engines, selection: $engineRaw, transcription: transcription)
         }
         .onChange(of: engineRaw) { engines.refresh() }
         // Типы буфера читаются без содержимого, поэтому проверять их можно и на
@@ -572,17 +592,6 @@ struct ContentView: View {
     /// Выбранный движок в терминах интерфейса.
     private var engine: EngineDescriptor {
         EngineCatalog.descriptor(for: TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam)
-    }
-
-    /// Готовность движков для чипа. С проверочным движком QA считает он, и любой
-    /// выбор в панели честно готов — иначе снимки показывали бы «Нет ключа».
-    private static func makeEngineDirectory() -> EngineDirectory {
-        #if DEBUG
-        if QAStubEngine.enabled {
-            return EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { true })
-        }
-        #endif
-        return EngineDirectory()
     }
 
     // MARK: - Состояние
@@ -965,7 +974,9 @@ struct ContentView: View {
     /// листов и диалогов подряд упирается в проверку типов компилятора.
     private func sheets(_ content: some View) -> some View {
         content
-            .sheet(isPresented: $showSettings) {
+            // В настройках могли скачать модель или ввести ключ, а у экрана движка свой
+            // справочник: без перечитывания чип панели так и говорил бы «Нет ключа».
+            .sheet(isPresented: $showSettings, onDismiss: { engines.refresh() }) {
                 SettingsRoot(transcription: transcription, topics: topics)
             }
             // Запись, открытую из поиска, могли удалить или переименовать на её экране:
@@ -1076,6 +1087,26 @@ struct ContentView: View {
             } message: {
                 Text(activeError ?? "")
             }
+    }
+}
+
+private extension View {
+    /// Нижняя панель над списком.
+    ///
+    /// И `safeAreaInset`, и `safeAreaBar` поднимают конец списка над панелью:
+    /// последняя карточка прокручивается выше неё и не прячется под панелью
+    /// навсегда, а сам список уходит под панель. На iOS 26 — `safeAreaBar`: он
+    /// вдобавок продлевает под панель край прокрутки — размытие, которое Apple
+    /// советует для своих полос с контентом под ними («Adopting Liquid Glass» →
+    /// «Optimize for legibility when content scrolls beneath controls»). Ниже
+    /// iOS 26 панель на сплошной подложке, и край ей не нужен.
+    @ViewBuilder
+    func bottomPanel(@ViewBuilder _ panel: () -> some View) -> some View {
+        if #available(iOS 26, *) {
+            safeAreaBar(edge: .bottom, spacing: 0) { panel() }
+        } else {
+            safeAreaInset(edge: .bottom, spacing: 0) { panel() }
+        }
     }
 }
 
