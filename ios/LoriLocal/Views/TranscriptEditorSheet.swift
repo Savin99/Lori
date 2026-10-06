@@ -35,9 +35,7 @@ struct TranscriptEditorSheet: View {
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
-                    Button("Отменить") {
-                        if isDirty { confirmDiscard = true } else { dismiss() }
-                    }
+                    Button("Отменить") { requestClose() }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Готово") {
@@ -80,7 +78,14 @@ struct TranscriptEditorSheet: View {
         .interactiveDismissDisabled(isDirty)
         // Снаружи стека — по той же причине, что и в настройках: внутри плашку
         // перекрывает навигационная панель.
-        .recordingBanner { dismiss() }
+        .recordingBanner { requestClose() }
+    }
+
+    /// Уйти с несохранённой правкой можно только через вопрос «Выйти без
+    /// сохранения?» — и по «Отменить», и по плашке записи. Раньше плашка закрывала
+    /// лист сразу, мимо вопроса, и правка пропадала молча.
+    private func requestClose() {
+        if isDirty { confirmDiscard = true } else { dismiss() }
     }
 
     /// Экран правит сам файл расшифровки — значит и наружу уходит он же, файлом
