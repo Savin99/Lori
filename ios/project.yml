@@ -35,6 +35,20 @@ settings:
     # кнопки приходили английскими: `EditButton` показывал «Edit» посреди
     # «Словаря» и «Хранилища».
     DEVELOPMENT_LANGUAGE: ru
+    # Bundle ID, имя и версия — на уровне проекта, а не цели: их делят
+    # приложение и встроенное расширение Live Activity. ID расширения обязан
+    # начинаться с ID приложения (`<приложение>.RecordingActivity`) в каждой
+    # конфигурации, а версия и номер сборки — совпадать с приложением: иначе
+    # сборка предупреждает, а установка встроенного расширения не гарантирована.
+    # Номер сборки для IPA Shelf поднимается здесь.
+    LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local
+    LORI_DISPLAY_NAME: Lori
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "9"
+  configs:
+    QA:
+      LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local.qa
+      LORI_DISPLAY_NAME: Lori QA
 # ONNX Runtime — чтобы GigaAM ставился одной кнопкой: готовых Core ML-моделей
 # GigaAM никто не публикует, а int8-ONNX лежит на HuggingFace открыто.
 packages:
@@ -58,6 +72,10 @@ targets:
     platform: iOS
     sources:
       - path: LoriLocal
+      # Атрибуты Live Activity и интенты её кнопок — общие с расширением:
+      # расширение рисует кнопки, а интенты система исполняет в процессе
+      # приложения (`LiveActivityIntent`).
+      - path: Shared
     postBuildScripts:
       - name: Personal API keys
         script: 'python3 "${SRCROOT}/tools/embed-api-keys.py"'
@@ -71,6 +89,8 @@ targets:
         product: MLXLMCommon
       - package: ArgmaxOSS
         product: WhisperKit
+      # Расширение с Live Activity записи: островок и экран блокировки.
+      - target: RecordingActivity
     # Без entitlements Keychain на симуляторе отвечает «A required entitlement
     # isn't present» (-34018): рантаймам iOS 17+ нужен application-identifier,
     # а он появляется только вместе с обработкой entitlements при подписи.
@@ -113,13 +133,27 @@ targets:
           NSAllowsLocalNetworking: true
         # Работа не должна обрываться, когда человек ушёл из приложения или запер
         # телефон: расшифровка часовой записи идёт минутами. Держит её
-        # `BGContinuedProcessingTask` (iOS 26) — он же и рисует полосу прогресса в
-        # Dynamic Island и на локскрине, поэтому расширения-виджета здесь нет.
-        # Своего ActivityKit-Live Activity не заводим: ему нужен отдельный таргет
-        # расширения (ещё один App ID против лимита бесплатной команды), фонового
-        # времени он не даёт вовсе, а полоса вышла бы второй рядом с системной.
+        # `BGContinuedProcessingTask` (iOS 26) — он же и рисует полосу прогресса
+        # расшифровки в Dynamic Island и на локскрине, и своей полосы у неё нет.
+        #
+        # `audio` — запись разговора идёт и тогда, когда человек вышел из Lori
+        # (владелец, 24 октября 2026). Без него iOS глушит микрофон при уходе в
+        # фон, и запись обрывается на первой же секунде вне приложения.
         UIBackgroundModes:
+          - audio
           - processing
+        # Live Activity — только у записи: кнопки «Пауза», «Продолжить»,
+        # «Расшифровать» в островке и на экране блокировки. Системная полоса
+        # расшифровки их дать не может. Расшифровка своей активности не заводит.
+        NSSupportsLiveActivities: true
+        # Схема ссылок — сам bundle ID: у Lori и Lori QA она своя, и ссылка из
+        # островка не откроет чужую сборку. Ссылкой открывается Lori, когда
+        # «Расшифровать» нажали при движке на телефоне: заявку на фоновую
+        # расшифровку iOS принимает только от приложения на виду.
+        CFBundleURLTypes:
+          - CFBundleURLName: $(PRODUCT_BUNDLE_IDENTIFIER)
+            CFBundleURLSchemes:
+              - $(PRODUCT_BUNDLE_IDENTIFIER)
         # Здесь — **базовый** идентификатор, без `.*`. Проверено на iOS 26.5 (см.
         # `TranscriptionRunway`): запись с шаблоном планировщик не принимает вовсе
         # («Registration rejected; … is not advertised in the application's
@@ -129,10 +163,7 @@ targets:
           - $(PRODUCT_BUNDLE_IDENTIFIER).transcribe
     settings:
       base:
-        PRODUCT_BUNDLE_IDENTIFIER: ru.ilyaqa.lori.local
-        MARKETING_VERSION: "1.0"
-        CURRENT_PROJECT_VERSION: "9"
-        LORI_DISPLAY_NAME: Lori
+        PRODUCT_BUNDLE_IDENTIFIER: $(LORI_APP_BUNDLE_ID)
         ENABLE_USER_SCRIPT_SANDBOXING: NO
         GENERATE_INFOPLIST_FILE: NO
         TARGETED_DEVICE_FAMILY: "1,2"
@@ -140,10 +171,31 @@ targets:
         # Тот же оливковый, что и `LoriPalette.lime`. Нужен системным экранам,
         # которые рисует не SwiftUI: пикер файлов, шит «Поделиться», алерты.
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-      configs:
-        QA:
-          PRODUCT_BUNDLE_IDENTIFIER: ru.ilyaqa.lori.local.qa
-          LORI_DISPLAY_NAME: Lori QA
+  # Live Activity записи: островок и экран блокировки. Расширение только рисует:
+  # состояние приходит в `ContentState` от приложения, кнопки — интенты, которые
+  # система исполняет в процессе приложения. App Group не нужен — её бесплатная
+  # команда не подписывает.
+  RecordingActivity:
+    type: app-extension
+    platform: iOS
+    sources:
+      - path: RecordingActivity
+      - path: Shared
+    info:
+      path: RecordingActivity/Info.plist
+      properties:
+        CFBundleDisplayName: $(LORI_DISPLAY_NAME)
+        CFBundleShortVersionString: $(MARKETING_VERSION)
+        CFBundleVersion: $(CURRENT_PROJECT_VERSION)
+        CFBundleLocalizations: [ru]
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.widgetkit-extension
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: $(LORI_APP_BUNDLE_ID).RecordingActivity
+        GENERATE_INFOPLIST_FILE: NO
+        TARGETED_DEVICE_FAMILY: "1,2"
+        APPLICATION_EXTENSION_API_ONLY: YES
   LoriLocalTests:
     type: bundle.unit-test
     platform: iOS

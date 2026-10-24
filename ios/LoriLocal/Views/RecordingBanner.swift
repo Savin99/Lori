@@ -4,7 +4,7 @@ import SwiftUI
 /// главного экрана, и под открытым листом её не видно: человек редактировал заметку,
 /// не зная, что диктофон всё ещё пишет. Нажатие закрывает лист и возвращает к пилюле.
 struct RecordingBanner: View {
-    @EnvironmentObject private var recorder: AudioCaptureStore
+    @EnvironmentObject private var recorder: RecordingController
     let close: () -> Void
 
     var body: some View {
@@ -51,7 +51,7 @@ struct RecordingBanner: View {
 /// Рекордер берётся из окружения, чтобы не тащить его параметром
 /// через инициализаторы всех листов.
 private struct RecordingBannerModifier: ViewModifier {
-    @EnvironmentObject private var recorder: AudioCaptureStore
+    @EnvironmentObject private var recorder: RecordingController
     let close: () -> Void
 
     func body(content: Content) -> some View {
