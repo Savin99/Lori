@@ -93,3 +93,443 @@ final class TranscriptionRecoveryTests: XCTestCase {
         XCTAssertNotEqual(first, BackgroundTranscriptionTransport.requestID(request, jobID: "job1"))
     }
 }
+
+// MARK: - Фоновая расшифровка не обрывается (24 октября 2026)
+
+/// Доля для полосы фоновой задачи, запись, оставленная ждать системную передачу, и
+/// пробуждение системой после убитого процесса.
+///
+/// Свой класс в этом файле, а не свой файл: новый файл тестов требует пересборки
+/// `LoriLocal.xcodeproj` через xcodegen, а проект в эти дни правит соседняя ветка.
+@MainActor
+final class BackgroundTransferTests: XCTestCase {
+    private var fixture: QueueFixture!
+    private let restored = [
+        TranscriptionSettings.engineKey, TranscriptionSettings.concurrencyKey,
+        TranscriptionSettings.elevenLabsBaseURLKey, TranscriptionSettings.elevenLabsModelKey,
+        TranscriptionSettings.elevenLabsModeKey, TranscriptionSettings.vocabularyKey,
+        TranscriptionSettings.languageKey, TranscriptionSettings.timecodesKey,
+        TranscriptionSettings.speakerLabelsKey,
+    ]
+    private var saved: [String: Any] = [:]
+
+    override func setUp() async throws {
+        saved = [:]
+        for key in restored {
+            if let value = UserDefaults.standard.object(forKey: key) { saved[key] = value }
+            UserDefaults.standard.removeObject(forKey: key)
+        }
+    }
+
+    override func tearDown() async throws {
+        fixture?.cleanUp()
+        StubURLProtocol.reset()
+        for key in restored { UserDefaults.standard.removeObject(forKey: key) }
+        for (key, value) in saved { UserDefaults.standard.set(value, forKey: key) }
+    }
+
+    /// Ждёт, пока главная очередь отдаст всё, что в неё положили раньше: доклады
+    /// транспорта о фазе запроса приходят через `DispatchQueue.main` и по порядку.
+    private func drainMainQueue() async {
+        await withCheckedContinuation { continuation in
+            DispatchQueue.main.async { continuation.resume() }
+        }
+    }
+
+    // MARK: Доля для полосы фоновой задачи
+
+    /// Формула целиком: загрузка меряется байтами, ожидание ответа — оценкой по времени,
+    /// которая движется и через час, а «готово» не ставит никто, кроме завершения. Потолок
+    /// 0,95 — множитель всей доли: первая версия обрезала по нему, и тест поймал, что
+    /// оценка ожидания вставала на 18-й минуте.
+    func testBackgroundShareMeasuresTheUploadAndEstimatesTheAnswerBelowOne() {
+        typealias Service = TranscriptionService
+        let single = Service.Parts(done: 0, total: 1)
+
+        // Аудио ещё готовится, запроса нет — мерить нечего: оценка по времени, как велит контракт.
+        let preparing = Service.backgroundShare(parts: single, transfer: nil, waited: 0, elapsed: 60)
+        XCTAssertEqual(preparing.source, .estimate)
+        let ceiling = Service.inFlightCeiling
+        XCTAssertEqual(preparing.value, ceiling * Service.elapsedShare(seconds: 60), accuracy: 1e-12)
+        XCTAssertGreaterThan(preparing.value, 0, "ноль на подготовке планировщик принимает за подвисшую задачу")
+        let threeHours = Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 3 * 3600).value
+        let threeHoursAndSecond = Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 3 * 3600 + 1).value
+        XCTAssertGreaterThan(threeHoursAndSecond, threeHours, "и оценка без доли не упирается в потолок: прежняя прямая стояла с 27-й минуты")
+        XCTAssertEqual(Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 60), preparing,
+                       "движок ещё ни разу не сказал о частях — то же самое")
+
+        // Загрузка: половина куска — это отправка тела, доля по байтам системы.
+        let sending = Service.backgroundShare(parts: single, transfer: .sending(sent: 40, expected: 100), waited: 3, elapsed: 70)
+        XCTAssertEqual(sending.source, .upload)
+        XCTAssertEqual(sending.value, ceiling * 0.2, accuracy: 1e-12)
+        let unknown = Service.backgroundShare(parts: single, transfer: .sending(sent: 500, expected: -1), waited: 3, elapsed: 70)
+        XCTAssertEqual(unknown.value, 0, "объём неизвестен — отправка начата, а не сделана")
+
+        // Тело ушло: от половины и дальше — оценка по времени ожидания.
+        let justSent = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 0, elapsed: 90)
+        XCTAssertEqual(justSent.source, .answer)
+        XCTAssertEqual(justSent.value, ceiling * 0.5, accuracy: 1e-12)
+        let twoMinutes = Service.backgroundShare(parts: single, transfer: .awaiting, waited: Service.answerHalfTime, elapsed: 210)
+        XCTAssertEqual(twoMinutes.value, ceiling * 0.75, accuracy: 1e-12, "за `answerHalfTime` закрыта половина остатка")
+
+        var previous = justSent.value
+        for minute in 1...180 {
+            let value = Service.backgroundShare(parts: single, transfer: .awaiting, waited: Double(minute) * 60, elapsed: 0).value
+            XCTAssertGreaterThan(value, previous, "оценка обязана двигаться и на \(minute)-й минуте ожидания")
+            XCTAssertLessThan(value, ceiling, "идущая запись не доходит до потолка, пока ответа нет")
+            previous = value
+        }
+        let hour = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 3600, elapsed: 0).value
+        let hourAndSecond = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 3601, elapsed: 0).value
+        XCTAssertGreaterThan(
+            (hourAndSecond - hour) * Double(TranscriptionRunway.unitsPerRecord), 1,
+            "и через час за секунду полоса сдвигается хотя бы на единицу"
+        )
+
+        // Ответ в руках («1 из 1»), запись разбирается и сохраняется — потолок, но не сотня.
+        let answered = Service.backgroundShare(parts: Service.Parts(done: 1, total: 1), transfer: nil, waited: 0, elapsed: 300)
+        XCTAssertEqual(answered.source, .parts)
+        XCTAssertEqual(answered.value, ceiling, accuracy: 1e-12)
+        XCTAssertLessThan(answered.value, 1, "сотню ставит только настоящее завершение")
+
+        // По частям: готовые части плюс доля текущей.
+        let parts = Service.Parts(done: 3, total: 9)
+        XCTAssertEqual(Service.backgroundShare(parts: parts, transfer: .sending(sent: 1, expected: 2), waited: 0, elapsed: 0).value,
+                       ceiling * 3.25 / 9, accuracy: 1e-12)
+        XCTAssertEqual(Service.backgroundShare(parts: parts, transfer: .awaiting, waited: 0, elapsed: 0).value,
+                       ceiling * 3.5 / 9, accuracy: 1e-12)
+        let local = Service.backgroundShare(parts: Service.Parts(done: 3, total: 10), transfer: nil, waited: 0, elapsed: 1800)
+        XCTAssertEqual(local.source, .parts)
+        XCTAssertEqual(local.value, ceiling * 0.3, accuracy: 1e-12, "у записи с частями оценка по времени не подменяет измеренное")
+    }
+
+    func testTransferPhaseIsReadFromTheSystemCounters() {
+        XCTAssertEqual(TransferPhase.from(sent: 0, expected: 100).sentShare, 0)
+        XCTAssertEqual(TransferPhase.from(sent: 45, expected: 100).sentShare ?? -1, 0.45, accuracy: 1e-12)
+        XCTAssertEqual(TransferPhase.from(sent: 100, expected: 100), .awaiting, "тело ушло целиком — ждём ответ")
+        XCTAssertEqual(TransferPhase.from(sent: 120, expected: 100), .awaiting)
+        let unknown = TransferPhase.from(sent: 10, expected: -1)
+        XCTAssertTrue(unknown.isSending)
+        XCTAssertNil(unknown.sentShare, "долю из неизвестного объёма не выдумываем")
+        XCTAssertFalse(TransferPhase.awaiting.isSending)
+    }
+
+    // MARK: Карточка и экран
+
+    /// Доля загрузки подписана «Отправляю», а не «Расшифровываю»: в конце загрузки
+    /// запись ещё не расшифрована. Ждём ответ — полоса бегущим отрезком, без процента.
+    func testCardSaysSendingWithTheUploadShareThenWaitsForTheService() throws {
+        let sending = try XCTUnwrap(RecordStatus.make(state: .sending(0.453), hasTranscript: false, fraction: nil, remaining: nil))
+        XCTAssertEqual(sending.text, "Отправляю · 45%")
+        XCTAssertEqual(sending.fraction, 0.453)
+        XCTAssertTrue(sending.showsBar)
+        XCTAssertNil(sending.action)
+        XCTAssertEqual(sending.tone, .working)
+        XCTAssertEqual(RecordStatus.make(state: .sending(nil), hasTranscript: false, fraction: nil, remaining: nil)?.text, "Отправляю")
+
+        let waiting = try XCTUnwrap(RecordStatus.make(state: .awaitingService, hasTranscript: true, fraction: 0.4, remaining: 30))
+        XCTAssertEqual(waiting.text, "Жду ответ сервиса")
+        XCTAssertNil(waiting.fraction, "сколько ждать ответа, не знает никто — процента нет")
+        XCTAssertTrue(waiting.showsBar)
+        XCTAssertNil(waiting.action, "ни «Продолжить», ни «Повторить»: запись не прервана")
+
+        for state in [TranscriptionRecordState.sending(0.1), .awaitingService] {
+            XCTAssertTrue(state.isActive, "\(state): запись занята")
+            XCTAssertFalse(state.allowsRename, "\(state): задание держит путь")
+        }
+    }
+
+    /// Запись одним запросом получает фазу от транспорта (здесь движок докладывает сам —
+    /// так же, как транспорт, через `BackgroundTranscriptionTransport.report`).
+    func testServiceShowsTheTransferPhaseOfASingleRequestRecord() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a"])
+        let gate = QueueGate()
+        let service = TranscriptionService(
+            engines: [.elevenLabs: ReportingEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 }
+        )
+        let path = "Облако.m4a"
+        service.enqueue(try fixture.entry(path), in: fixture.workspace, using: .elevenLabs)
+
+        await gate.waitForArrivals(1)
+        await drainMainQueue()
+        XCTAssertEqual(service.state(for: path), .sending(0.3))
+        XCTAssertEqual(service.progressText(for: path), "отправляю запись · 30%")
+        XCTAssertNil(service.progressFraction(for: path), "доля загрузки не выдаётся за долю расшифровки")
+        XCTAssertEqual(service.backgroundShare(for: path).source, .upload)
+
+        await gate.release()
+        await gate.waitForArrivals(2)
+        await drainMainQueue()
+        XCTAssertEqual(service.state(for: path), .awaitingService)
+        XCTAssertEqual(service.progressText(for: path), "жду ответ сервиса")
+        XCTAssertEqual(service.backgroundShare(for: path).source, .answer)
+        XCTAssertGreaterThanOrEqual(
+            service.backgroundShare(for: path).value,
+            TranscriptionService.inFlightCeiling * TranscriptionService.uploadWeight,
+            "тело ушло — половина куска сделана"
+        )
+
+        await gate.release()
+        await service.waitForDrain()
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Облако.md"))
+        XCTAssertTrue(service.transfer.isEmpty, "после записи фаза не висит")
+    }
+
+    // MARK: Истечение фонового времени
+
+    /// Главное правило захода: истечение не трогает облачную запись, чей запрос у
+    /// системной передачи, — она не «Прервано», не отменена и доделывается, когда
+    /// приходит ответ. Локальная рядом прерывается, как и раньше.
+    func testExpiryLeavesACloudRecordInSystemTransferAndInterruptsALocalOne() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a", "Телефон.m4a"])
+        UserDefaults.standard.set(2, forKey: TranscriptionSettings.concurrencyKey)
+        let gate = QueueGate()
+        let asked = Asked()
+        let service = TranscriptionService(
+            engines: [.elevenLabs: QueueEngine(gate: gate), .gigaam: QueueEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 },
+            transfers: .init(holds: { asked.ids.append($0); return true }, hasAnswer: { _ in false }, takeDeferral: { _ in false })
+        )
+        service.enqueue(try fixture.entry("Облако.m4a"), in: fixture.workspace, using: .elevenLabs)
+        service.enqueue(try fixture.entry("Телефон.m4a"), in: fixture.workspace, using: .gigaam)
+        await gate.waitForArrivals(2)
+
+        let parked = service.interruptEverything()
+        XCTAssertEqual(parked, ["Облако.m4a"])
+        XCTAssertEqual(asked.ids.count, 1, "у локального движка у системы ничего нет — его и не спрашиваем")
+        XCTAssertEqual(service.state(for: "Облако.m4a"), .awaitingService, "не «Прервано»: ответ придёт сам")
+        XCTAssertFalse(service.isInterrupted("Облако.m4a"))
+        XCTAssertEqual(service.state(for: "Телефон.m4a"), .interrupted)
+        XCTAssertEqual(
+            InterruptedRecords.load(from: fixture.store),
+            ["Облако.m4a": .elevenLabs, "Телефон.m4a": .gigaam],
+            "облачная запись остаётся в файле: убьют процесс — её доделает пробуждение по расписке"
+        )
+
+        await gate.openAll()
+        let outcome = await service.waitForDrain()
+        XCTAssertEqual(outcome?.succeeded, ["Облако.m4a"], "оставленная ждать запись доделана, а не отменена")
+        XCTAssertEqual(outcome?.interrupted, ["Телефон.m4a"])
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Облако.md"))
+        XCTAssertThrowsError(try fixture.workspace.readText(at: "Transcripts/Телефон.md"))
+        XCTAssertEqual(InterruptedRecords.load(from: fixture.store), ["Телефон.m4a": .gigaam])
+    }
+
+    /// Облачная запись, у которой у системы ничего нет (готовит аудио, разбирает ответ),
+    /// прерывается как раньше: продолжение по расписке ничего не отправит заново.
+    func testExpiryInterruptsACloudRecordThatHoldsNothingAtTheSystem() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a"])
+        let gate = QueueGate()
+        let service = TranscriptionService(
+            engines: [.elevenLabs: QueueEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 },
+            transfers: .init(holds: { _ in false })
+        )
+        service.enqueue(try fixture.entry("Облако.m4a"), in: fixture.workspace, using: .elevenLabs)
+        await gate.waitForArrivals(1)
+
+        XCTAssertEqual(service.interruptEverything(), [])
+        XCTAssertEqual(service.state(for: "Облако.m4a"), .interrupted)
+        await gate.openAll()
+        let outcome = await service.waitForDrain()
+        XCTAssertEqual(outcome?.interrupted, ["Облако.m4a"])
+    }
+
+    /// Человек вернулся, пока запись ждала систему: она снова обычная идущая запись.
+    func testReturnToTheAppTurnsAParkedRecordBackIntoARunningOne() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a"])
+        let gate = QueueGate()
+        let service = TranscriptionService(
+            engines: [.elevenLabs: QueueEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 },
+            transfers: .init(holds: { _ in true })
+        )
+        service.enqueue(try fixture.entry("Облако.m4a"), in: fixture.workspace, using: .elevenLabs)
+        await gate.waitForArrivals(1)
+        service.applicationDidEnterBackground()
+        XCTAssertEqual(service.interruptEverything(), ["Облако.m4a"])
+        XCTAssertEqual(service.state(for: "Облако.m4a"), .awaitingService)
+
+        service.applicationDidBecomeActive(in: fixture.workspace)
+        XCTAssertEqual(service.state(for: "Облако.m4a"), .running, "на экране фаза видна вживую, а не по отметке")
+        await gate.openAll()
+        await service.waitForDrain()
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Облако.md"))
+    }
+
+    // MARK: Постановка из фона
+
+    /// «Расшифровать» из Dynamic Island, когда Lori не на экране: запись обязана пойти
+    /// сразу под запасным окном, а не ждать в очереди возвращения в приложение. Раньше
+    /// `admit` шёл до `batchDidStart`, окна ещё не было, и запись оставалась в очереди.
+    func testRecordQueuedFromTheBackgroundStartsUnderTheGraceWindow() async throws {
+        fixture = try QueueFixture(files: ["Из фона.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate, kind: .elevenLabs)
+        var hooks = TranscriptionRunway.SystemHooks()
+        hooks.isActive = { false }
+        hooks.setScreenAwake = { _ in }
+        hooks.notifications = NotificationCenter()
+        let runway = TranscriptionRunway(service: service, hooks: hooks)
+        service.runway = runway
+        service.applicationDidEnterBackground()
+
+        service.enqueue(try fixture.entry("Из фона.m4a"), in: fixture.workspace, using: .elevenLabs)
+        XCTAssertNil(service.queuePosition(for: "Из фона.m4a"), "запись не осталась ждать в очереди")
+        XCTAssertTrue(service.isActive("Из фона.m4a"))
+        XCTAssertTrue(runway.canExecuteInBackground, "её держит запасное окно")
+
+        await gate.waitForArrivals(1)
+        await gate.openAll()
+        await service.waitForDrain()
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Из фона.md"))
+    }
+
+    // MARK: Пробуждение системой после убитого процесса
+
+    nonisolated private static let receiptAnswer = #"{"text":"Ответ из расписки.","language_code":"rus","words":[{"text":"Ответ","start":0.0,"end":0.3,"type":"word"},{"text":" ","start":0.3,"end":0.35,"type":"spacing"},{"text":"из","start":0.35,"end":0.5,"type":"word"},{"text":" ","start":0.5,"end":0.55,"type":"spacing"},{"text":"расписки.","start":0.55,"end":0.95,"type":"word"}]}"#
+
+    /// Задание ElevenLabs и ровно тот запрос, который его движок отправит для этой записи:
+    /// запрос записывается подставной сессией, а не собирается в тесте руками — расписка
+    /// подходит только к байт-в-байт тому же телу.
+    private func cloudJob(for url: URL) async throws -> (job: TranscriptionJob, requestID: String) {
+        // Адрес, которого нет: если транспорт всё-таки отправит запрос, тест увидит это
+        // по ошибке записи, а не по счёту за чужую расшифровку.
+        UserDefaults.standard.set("https://stub.invalid/v1", forKey: TranscriptionSettings.elevenLabsBaseURLKey)
+        let job = TranscriptionJob.capture(kind: .elevenLabs)
+        let recorder = ElevenLabsTranscriber(session: StubURLProtocol.session { _, _ in .json(Self.receiptAnswer) }, keyProvider: { "тест-ключ" })
+        _ = try await TranscriptionJob.$current.withValue(job) { try await recorder.transcribe(audioURL: url) }
+        let sent = try XCTUnwrap(StubURLProtocol.requests.first)
+        var request = URLRequest(url: try XCTUnwrap(sent.request.url))
+        request.httpMethod = sent.request.httpMethod
+        request.httpBody = sent.body
+        return (job, BackgroundTranscriptionTransport.requestID(request, jobID: job.id))
+    }
+
+    /// Пробуждение с пределом времени: настоящая фоновая сессия в тестовом хосте отвечает
+    /// за миллисекунды, но зависни она — тест обязан упасть, а не повесить весь прогон.
+    private func wake(_ service: TranscriptionService) async throws -> TranscriptionService.SystemWakeReport {
+        let finished = expectation(description: "пробуждение доделано")
+        let box = WakeBox()
+        let workspace = fixture.workspace
+        Task { @MainActor in
+            box.report = await service.finishAfterSystemWake(in: workspace)
+            finished.fulfill()
+        }
+        await fulfillment(of: [finished], timeout: 60)
+        return try XCTUnwrap(box.report)
+    }
+
+    private func wakeService() -> TranscriptionService {
+        TranscriptionService(
+            engines: [.elevenLabs: ElevenLabsTranscriber(keyProvider: { "тест-ключ" }), .gigaam: QueueEngine(gate: QueueGate())],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 }
+        )
+    }
+
+    /// Процесс убили, пока запрос был у системы; ответ пришёл распиской, система подняла
+    /// приложение в фоне. Запись доделывается по расписке — без нового запроса, — а
+    /// локальная рядом не поднимается вовсе.
+    func testWakeFinishesARecordFromItsReceiptWithoutANewRequest() async throws {
+        fixture = try QueueFixture()
+        let audio = fixture.root.appending(path: "Облако.wav")
+        try AudioFixture.wav(at: audio)
+        try fixture.addAudio("Телефон.m4a")
+        try fixture.workspace.refresh()
+        let (job, requestID) = try await cloudJob(for: audio)
+        defer { BackgroundTranscriptionTransport.shared.cancel(jobID: job.id) }
+        try BackgroundTranscriptionTransport.saveReceipt(
+            status: 200, headers: ["Content-Type": "application/json"],
+            url: URL(string: "https://stub.invalid/v1/speech-to-text")!,
+            body: Data(Self.receiptAnswer.utf8), for: requestID
+        )
+        let local = TranscriptionJob.capture(kind: .gigaam)
+        try InterruptedRecords.saveJobs(["Облако.wav": job, "Телефон.m4a": local], to: fixture.store)
+        XCTAssertTrue(BackgroundTranscriptionTransport.shared.hasAnswer(forJob: job.id))
+
+        let service = wakeService()
+        XCTAssertTrue(service.isInterrupted("Облако.wav"), "после перезапуска запись «Прервано» — до пробуждения")
+        let launched = BackgroundTranscriptionTransport.shared.launchedTransfers
+        let requests = StubURLProtocol.requests.count
+
+        let report = try await wake(service)
+
+        XCTAssertEqual(report.resumed, ["Облако.wav"], "локальная по пробуждению не поднимается")
+        XCTAssertEqual(report.outcome?.succeeded, ["Облако.wav"])
+        let text = try fixture.workspace.readText(at: "Transcripts/Облако.md")
+        XCTAssertTrue(text.contains("Ответ из расписки."), text)
+        XCTAssertEqual(BackgroundTranscriptionTransport.shared.launchedTransfers, launched, "ни одной новой передачи")
+        XCTAssertEqual(StubURLProtocol.requests.count, requests)
+        XCTAssertNil(service.error(for: "Облако.wav"))
+        XCTAssertTrue(service.isInterrupted("Телефон.m4a"))
+        XCTAssertEqual(InterruptedRecords.load(from: fixture.store), ["Телефон.m4a": .gigaam])
+        XCTAssertFalse(BackgroundTranscriptionTransport.shared.hasAnswer(forJob: job.id), "расписка убрана вместе с заданием")
+    }
+
+    /// По заданию есть ответ, но не на тот запрос, который нужен сейчас (у задания по
+    /// частям — ответ на прошлую часть): в фоне новый запрос не уходит. Запись остаётся
+    /// «Прервано» со своим заданием — не ошибка и не отмена — и продолжится при возвращении.
+    func testWakeDoesNotSendARequestThatHasNoAnswerYet() async throws {
+        fixture = try QueueFixture()
+        let audio = fixture.root.appending(path: "Облако.wav")
+        try AudioFixture.wav(at: audio)
+        try fixture.workspace.refresh()
+        let (job, _) = try await cloudJob(for: audio)
+        defer { BackgroundTranscriptionTransport.shared.cancel(jobID: job.id) }
+        try BackgroundTranscriptionTransport.saveReceipt(
+            status: 200, headers: ["Content-Type": "application/json"],
+            url: URL(string: "https://stub.invalid/v1/speech-to-text")!,
+            body: Data(Self.receiptAnswer.utf8), for: job.id + "_" + String(repeating: "0", count: 64)
+        )
+        try InterruptedRecords.saveJobs(["Облако.wav": job], to: fixture.store)
+
+        let service = wakeService()
+        let launched = BackgroundTranscriptionTransport.shared.launchedTransfers
+
+        let report = try await wake(service)
+
+        XCTAssertEqual(report.resumed, ["Облако.wav"])
+        XCTAssertEqual(BackgroundTranscriptionTransport.shared.launchedTransfers, launched, "в фоне новая отправка не начата")
+        XCTAssertTrue(service.isInterrupted("Облако.wav"), "запись ждёт возвращения в Lori")
+        XCTAssertNil(service.error(for: "Облако.wav"), "это не ошибка сервиса")
+        XCTAssertThrowsError(try fixture.workspace.readText(at: "Transcripts/Облако.md"), "без ответа ничего не сохранено")
+        XCTAssertEqual(InterruptedRecords.jobs(from: fixture.store)["Облако.wav"]?.id, job.id, "задание то же — продолжение, а не новая отправка")
+    }
+}
+
+@MainActor
+private final class WakeBox {
+    var report: TranscriptionService.SystemWakeReport?
+}
+
+/// Кого сервис спрашивал о системной передаче.
+@MainActor
+private final class Asked {
+    var ids: [String] = []
+}
+
+/// Движок, который докладывает фазы запроса так же, как транспорт, — через
+/// `BackgroundTranscriptionTransport.report` — и ждёт шлагбаума на каждой.
+private struct ReportingEngine: Transcribing {
+    let name = "ElevenLabs · проверка"
+    let gate: QueueGate
+
+    func isAvailable() async -> Bool { true }
+
+    func transcribe(audioURL: URL, progress: @Sendable (Int, Int) -> Void) async throws -> Transcript {
+        progress(0, 1)
+        BackgroundTranscriptionTransport.report?(.sending(sent: 30, expected: 100))
+        await gate.arrive("отправка")
+        BackgroundTranscriptionTransport.report?(.awaiting)
+        await gate.arrive("ожидание")
+        BackgroundTranscriptionTransport.report?(.answered)
+        progress(1, 1)
+        return Transcript(text: "готово")
+    }
+}
