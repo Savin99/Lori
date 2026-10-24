@@ -600,8 +600,6 @@ final class TranscriptionService: ObservableObject {
     /// Куски движка «done из total» как есть — доля для полосы фоновой задачи складывается
     /// из них и из фазы запроса текущего куска (`backgroundShare`).
     private var parts: [String: Parts] = [:]
-    /// С какой минуты запрос в нынешней фазе: ожидание ответа меряется от конца загрузки.
-    private var transferSince: [String: Date] = [:]
 
     struct Parts: Equatable, Sendable {
         let done: Int
@@ -1306,7 +1304,9 @@ final class TranscriptionService: ObservableObject {
             case parts = "по частям движка"
             /// Тело запроса уходит — доля по байтам, которые отправила система.
             case upload = "по загрузке"
-            /// Тело ушло, ответа ещё нет: сколько ждём — оценка по времени.
+            /// Тело уходит, но байты стоят или объём неизвестен — оценка по времени отправки.
+            case uploadEstimate = "по оценке времени: отправка"
+            /// Запрос этой части уже ждал ответа: дальше — оценка по времени ожидания.
             case answer = "по оценке времени: ждём ответ сервиса"
             /// Измерять нечего (запись готовит аудио, движок одним куском).
             case estimate = "по оценке времени: доли нет"
@@ -1330,56 +1330,102 @@ final class TranscriptionService: ObservableObject {
     /// час — стоящую полосу планировщик снимает, а ответ на трёхчасовую запись идёт минуты.
     nonisolated static let answerHalfTime: TimeInterval = 120
 
+    /// Запрос текущей части — то, из чего считается её доля. Секунды, а не даты: функция
+    /// доли чистая.
+    struct RequestProgress: Equatable, Sendable {
+        /// Наибольшая доля тела, которую система отправила в этой части; nil — объём неизвестен.
+        var sent: Double?
+        /// Сколько секунд с первого доклада транспорта в этой части.
+        var sending: TimeInterval
+        /// Сколько секунд с начала ожидания ответа в этой части; nil — ещё не ждали.
+        var waited: TimeInterval?
+    }
+
     /// Доля одной идущей записи для полосы фоновой задачи — чистая функция.
     ///
-    /// Контракт (`AGENTS.md`): записи без доли отдают оценку по времени, заведомо
-    /// приблизительную и с потолком ниже единицы. Раньше `pump` брал только измеренное, и
-    /// у ElevenLabs — вся запись одним запросом — доля была ноль всю загрузку и всё
-    /// ожидание ответа: ровно то, что планировщик принимает за подвисшую задачу.
+    /// Контракт (`AGENTS.md`): полоса обязана двигаться, записи без доли отдают оценку по
+    /// времени, заведомо приблизительную и с потолком ниже единицы. Раньше `pump` брал
+    /// только измеренное, и у ElevenLabs — вся запись одним запросом — доля была ноль всю
+    /// загрузку и всё ожидание ответа: ровно то, что планировщик принимает за подвисшую задачу.
+    ///
+    /// Кусок — пополам: загрузка тела, потом ожидание ответа.
+    /// - ждали ответа хоть раз в этой части (`waited`) — дальше только время ожидания. Его
+    ///   не сбрасывают ни опросы Gemini (каждый GET приходит ожиданием с нуля), ни повтор
+    ///   ElevenLabs без словаря (вторая загрузка с нуля): иначе доля в этих фазах стояла бы;
+    /// - тело уходит — байты системы, но не меньше оценки по времени отправки: байты могут
+    ///   стоять (объём неизвестен, сеть встала, система придержала передачу), а стоящую
+    ///   полосу планировщик снимает;
+    /// - запроса в этой части не было — части движка, а если и их нет — `elapsedShare`.
     ///
     /// - `parts`: куски движка как он их назвал (`progress(done, total)`); nil — не звал.
-    /// - `transfer`: где запрос текущего куска (`TransferPhase`); nil — запроса нет.
-    /// - `waited`: сколько длится нынешняя фаза запроса (для ожидания ответа).
+    /// - `request`: запрос текущей части (`RequestProgress`); nil — запроса не было.
     /// - `elapsed`: сколько идёт запись — для оценки, когда мерить нечего.
     nonisolated static func backgroundShare(
         parts: Parts?,
-        transfer: TransferPhase?,
-        waited: TimeInterval,
+        request: RequestProgress?,
         elapsed: TimeInterval
     ) -> BackgroundShare {
         let total = max(parts?.total ?? 1, 1)
         let done = Double(min(max(parts?.done ?? 0, 0), total))
-        // Доля от 0 до 1; единица — только «все части готовы». Потолок — множителем ниже.
-        let whole: Double
-        let source: BackgroundShare.Source
-        switch transfer {
-        case let phase? where phase.isSending:
-            // Объём неизвестен — отправка считается начатой, а не сделанной.
-            whole = (done + uploadWeight * (phase.sentShare ?? 0)) / Double(total)
-            source = .upload
-        case .awaiting?:
-            let wait = max(0, waited)
-            whole = (done + uploadWeight + (1 - uploadWeight) * wait / (wait + answerHalfTime)) / Double(total)
-            source = .answer
-        default:
+        guard let request else {
             if let parts, parts.total > 1 || parts.done >= max(parts.total, 1) {
                 // Движок режет на части — или сказал «1 из 1»: ответ уже в руках.
-                whole = done / Double(total)
-                source = .parts
-            } else {
-                // Своя кривая с потолком 0,9 — сюда её и берём как есть.
-                return BackgroundShare(value: inFlightCeiling * elapsedShare(seconds: elapsed), source: .estimate)
+                return BackgroundShare(value: inFlightCeiling * done / Double(total), source: .parts)
             }
+            // Своя кривая с потолком 0,9 — сюда её и берём как есть.
+            return BackgroundShare(value: inFlightCeiling * elapsedShare(seconds: elapsed), source: .estimate)
         }
-        return BackgroundShare(value: inFlightCeiling * min(1, max(0, whole)), source: source)
+        let piece: Double
+        let source: BackgroundShare.Source
+        if let waited = request.waited {
+            let wait = max(0, waited)
+            piece = uploadWeight + (1 - uploadWeight) * wait / (wait + answerHalfTime)
+            source = .answer
+        } else {
+            let seconds = max(0, request.sending)
+            let byTime = seconds / (seconds + answerHalfTime)
+            let byBytes = min(1, max(0, request.sent ?? 0))
+            piece = uploadWeight * max(byBytes, byTime)
+            source = request.sent != nil && byBytes >= byTime ? .upload : .uploadEstimate
+        }
+        return BackgroundShare(value: inFlightCeiling * min(1, (done + piece) / Double(total)), source: source)
     }
+
+    /// Часы запроса текущей части записи — для полосы фоновой задачи и журнала.
+    private struct RequestClock {
+        /// Какой части они принадлежат (`Parts.done` на момент первого доклада).
+        let part: Int
+        /// Первый доклад транспорта в этой части.
+        let started: Date
+        /// Наибольшая известная доля отправленного тела в этой части.
+        var sent: Double?
+        /// Начало ожидания ответа в этой части: первое «тело ушло» или первый ответ. Дальше
+        /// не сбрасывается до следующей части — см. `backgroundShare`.
+        var waiting: Date?
+        /// Начало отправки и ожидания текущего запроса и было ли у него тело — для журнала:
+        /// опросы без тела туда не пишем.
+        var requestSending: Date?
+        var requestWaiting: Date?
+        var requestHadBody = false
+    }
+
+    private var clocks: [String: RequestClock] = [:]
 
     /// Доля идущей записи сейчас — то, что фоновая задача складывает в свою полосу.
     func backgroundShare(for path: String, now: Date = Date()) -> BackgroundShare {
-        Self.backgroundShare(
+        let part = parts[path]?.done ?? 0
+        let request = clocks[path].flatMap { clock -> RequestProgress? in
+            // Часы прошлой части к этой не относятся: она началась с нуля.
+            guard clock.part == part else { return nil }
+            return RequestProgress(
+                sent: clock.sent,
+                sending: now.timeIntervalSince(clock.started),
+                waited: clock.waiting.map { now.timeIntervalSince($0) }
+            )
+        }
+        return Self.backgroundShare(
             parts: parts[path],
-            transfer: transfer[path],
-            waited: transferSince[path].map { now.timeIntervalSince($0) } ?? 0,
+            request: request,
             elapsed: startedAt[path].map { now.timeIntervalSince($0) } ?? 0
         )
     }
@@ -1388,33 +1434,52 @@ final class TranscriptionService: ObservableObject {
     ///
     /// Строку состояния меняет только у записи одним запросом: у записи по частям своя
     /// строка «часть 3 из 9, жду ответ», и сбивать её процентами текущей части незачем.
-    /// В журнал — только смена фазы, а не каждый процент.
-    func transferChanged(_ path: String, _ phase: TransferPhase) {
+    /// В журнал — только смены, а не каждый процент и не каждый опрос Gemini.
+    func transferChanged(_ path: String, _ phase: TransferPhase, now: Date = Date()) {
         guard running.contains(path) else { return }
         let previous = transfer[path]
-        let now = Date()
+        let part = parts[path]?.done ?? 0
+        var clock = clocks[path].flatMap { $0.part == part ? $0 : nil } ?? RequestClock(part: part, started: now)
         switch phase {
-        case .answered:
-            if previous == .awaiting, let since = transferSince[path] {
-                Journal.append("передача «\(path)»: ответ сервиса через \(Int(now.timeIntervalSince(since))) с ожидания")
-            }
-            transfer[path] = nil
-            transferSince[path] = nil
-            return
-        case .awaiting:
-            if previous != .awaiting {
-                let sent = previous?.isSending == true ? transferSince[path].map { " за \(Int(now.timeIntervalSince($0))) с" } ?? "" : ""
-                Journal.append("передача «\(path)»: тело ушло целиком\(sent), жду ответ сервиса — полоса дальше по оценке времени")
-                transferSince[path] = now
-            }
         case let .sending(_, expected):
             if previous?.isSending != true {
+                clock.requestSending = now
                 let size = expected > 0 ? ", \(max(1, expected / 1024 / 1024)) МБ" : ""
-                Journal.append("передача «\(path)»: система отправляет запись\(size) — полоса по загрузке")
-                transferSince[path] = now
+                if clock.waiting == nil, clock.sent == nil {
+                    Journal.append("передача «\(path)»: система отправляет запись\(size) — полоса по загрузке")
+                } else if expected >= 1024 * 1024 {
+                    // Повтор (ElevenLabs без словаря) или загрузка после короткого запроса (Gemini).
+                    Journal.append("передача «\(path)»: снова отправляю\(size) — полоса дальше по времени")
+                }
             }
+            clock.requestHadBody = true
+            if let share = phase.sentShare { clock.sent = max(clock.sent ?? 0, share) }
+            transfer[path] = phase
+        case .awaiting:
+            if clock.requestWaiting == nil { clock.requestWaiting = now }
+            if clock.waiting == nil {
+                clock.waiting = now
+                let sent = clock.requestSending.map { " за \(Int(now.timeIntervalSince($0))) с" } ?? ""
+                Journal.append(
+                    clock.requestHadBody
+                        ? "передача «\(path)»: тело ушло целиком\(sent), жду ответ сервиса — полоса дальше по оценке времени"
+                        : "передача «\(path)»: жду ответ сервиса — полоса по оценке времени"
+                )
+            }
+            transfer[path] = .awaiting
+        case .answered:
+            if clock.requestHadBody, let since = clock.requestWaiting {
+                Journal.append("передача «\(path)»: ответ сервиса через \(Int(now.timeIntervalSince(since))) с ожидания")
+            }
+            // Ответ на запрос этой части пришёл — дальше её доля идёт только временем, даже
+            // если следующий запрос части снова начнёт загрузку с нуля.
+            if clock.waiting == nil { clock.waiting = now }
+            clock.requestSending = nil
+            clock.requestWaiting = nil
+            clock.requestHadBody = false
+            transfer[path] = nil
         }
-        transfer[path] = phase
+        clocks[path] = clock
         guard fraction[path] == nil else { return }
         switch phase {
         case .sending: progress[path] = phase.sentShare.map { "отправляю запись · \(Int(($0 * 100).rounded(.down)))%" } ?? "отправляю запись"
@@ -1590,7 +1655,7 @@ final class TranscriptionService: ObservableObject {
             partial[entry.relativePath] = nil
             remaining[entry.relativePath] = nil
             transfer[entry.relativePath] = nil
-            transferSince[entry.relativePath] = nil
+            clocks[entry.relativePath] = nil
             parts[entry.relativePath] = nil
         }
 

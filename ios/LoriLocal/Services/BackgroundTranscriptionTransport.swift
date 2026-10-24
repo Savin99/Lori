@@ -37,7 +37,13 @@ enum TransferPhase: Equatable, Sendable {
     /// (`NSURLSessionTransferSizeUnknown`, −1) — это ещё отправка, а не «готово»: у
     /// загрузки из файла его не бывает (документация `didSendBodyData`: объём берётся из
     /// длины файла), но гадать на нём нельзя.
+    ///
+    /// Ноль — тела нет вовсе: так выглядит GET и задача, подхваченная у системы после
+    /// перезапуска (`countOfBytesExpectedToSend` у загрузки без тела — 0). Отправлять тут
+    /// нечего, значит, ждём ответ. Раньше ноль шёл в «объём неизвестен», и полоса фоновой
+    /// задачи стояла на нуле, пока не придёт ответ.
     static func from(sent: Int64, expected: Int64) -> TransferPhase {
+        if expected == 0 { return .awaiting }
         guard expected > 0 else { return .sending(sent: max(0, sent), expected: -1) }
         guard sent < expected else { return .awaiting }
         return .sending(sent: max(0, sent), expected: expected)

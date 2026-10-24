@@ -144,61 +144,81 @@ final class BackgroundTransferTests: XCTestCase {
     /// оценка ожидания вставала на 18-й минуте.
     func testBackgroundShareMeasuresTheUploadAndEstimatesTheAnswerBelowOne() {
         typealias Service = TranscriptionService
+        typealias Request = Service.RequestProgress
         let single = Service.Parts(done: 0, total: 1)
+        let ceiling = Service.inFlightCeiling
 
         // Аудио ещё готовится, запроса нет — мерить нечего: оценка по времени, как велит контракт.
-        let preparing = Service.backgroundShare(parts: single, transfer: nil, waited: 0, elapsed: 60)
+        let preparing = Service.backgroundShare(parts: single, request: nil, elapsed: 60)
         XCTAssertEqual(preparing.source, .estimate)
-        let ceiling = Service.inFlightCeiling
         XCTAssertEqual(preparing.value, ceiling * Service.elapsedShare(seconds: 60), accuracy: 1e-12)
         XCTAssertGreaterThan(preparing.value, 0, "ноль на подготовке планировщик принимает за подвисшую задачу")
-        let threeHours = Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 3 * 3600).value
-        let threeHoursAndSecond = Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 3 * 3600 + 1).value
+        let threeHours = Service.backgroundShare(parts: nil, request: nil, elapsed: 3 * 3600).value
+        let threeHoursAndSecond = Service.backgroundShare(parts: nil, request: nil, elapsed: 3 * 3600 + 1).value
         XCTAssertGreaterThan(threeHoursAndSecond, threeHours, "и оценка без доли не упирается в потолок: прежняя прямая стояла с 27-й минуты")
-        XCTAssertEqual(Service.backgroundShare(parts: nil, transfer: nil, waited: 0, elapsed: 60), preparing,
+        XCTAssertEqual(Service.backgroundShare(parts: nil, request: nil, elapsed: 60), preparing,
                        "движок ещё ни разу не сказал о частях — то же самое")
 
         // Загрузка: половина куска — это отправка тела, доля по байтам системы.
-        let sending = Service.backgroundShare(parts: single, transfer: .sending(sent: 40, expected: 100), waited: 3, elapsed: 70)
+        let sending = Service.backgroundShare(parts: single, request: Request(sent: 0.4, sending: 3), elapsed: 70)
         XCTAssertEqual(sending.source, .upload)
         XCTAssertEqual(sending.value, ceiling * 0.2, accuracy: 1e-12)
-        let unknown = Service.backgroundShare(parts: single, transfer: .sending(sent: 500, expected: -1), waited: 3, elapsed: 70)
-        XCTAssertEqual(unknown.value, 0, "объём неизвестен — отправка начата, а не сделана")
+
+        // Объём неизвестен — оценка по времени отправки. Здесь раньше стояло
+        // `XCTAssertEqual(unknown.value, 0)`: тест закреплял неподвижную полосу на всю
+        // отправку, ровно то, за что планировщик снимает задачу (ревью 24 октября 2026).
+        let unknown = Service.backgroundShare(parts: single, request: Request(sent: nil, sending: 60), elapsed: 70)
+        XCTAssertEqual(unknown.source, .uploadEstimate)
+        XCTAssertGreaterThan(unknown.value, 0)
+        XCTAssertGreaterThan(
+            Service.backgroundShare(parts: single, request: Request(sent: nil, sending: 61), elapsed: 71).value, unknown.value,
+            "и движется со временем"
+        )
+        // Байты стоят — время всё равно двигает, но в половину загрузки и не выше.
+        let stuck = Service.backgroundShare(parts: single, request: Request(sent: 0.1, sending: 600), elapsed: 700)
+        XCTAssertEqual(stuck.source, .uploadEstimate)
+        XCTAssertGreaterThan(stuck.value, ceiling * 0.05)
+        XCTAssertLessThan(stuck.value, ceiling * Service.uploadWeight, "отправка не выдаётся за ожидание ответа")
 
         // Тело ушло: от половины и дальше — оценка по времени ожидания.
-        let justSent = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 0, elapsed: 90)
+        let justSent = Service.backgroundShare(parts: single, request: Request(sent: 1, sending: 10, waited: 0), elapsed: 90)
         XCTAssertEqual(justSent.source, .answer)
         XCTAssertEqual(justSent.value, ceiling * 0.5, accuracy: 1e-12)
-        let twoMinutes = Service.backgroundShare(parts: single, transfer: .awaiting, waited: Service.answerHalfTime, elapsed: 210)
+        let twoMinutes = Service.backgroundShare(parts: single, request: Request(sent: 1, sending: 130, waited: Service.answerHalfTime), elapsed: 210)
         XCTAssertEqual(twoMinutes.value, ceiling * 0.75, accuracy: 1e-12, "за `answerHalfTime` закрыта половина остатка")
 
         var previous = justSent.value
         for minute in 1...180 {
-            let value = Service.backgroundShare(parts: single, transfer: .awaiting, waited: Double(minute) * 60, elapsed: 0).value
+            let waited = Double(minute) * 60
+            let value = Service.backgroundShare(parts: single, request: Request(sent: 1, sending: waited, waited: waited), elapsed: 0).value
             XCTAssertGreaterThan(value, previous, "оценка обязана двигаться и на \(minute)-й минуте ожидания")
             XCTAssertLessThan(value, ceiling, "идущая запись не доходит до потолка, пока ответа нет")
             previous = value
         }
-        let hour = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 3600, elapsed: 0).value
-        let hourAndSecond = Service.backgroundShare(parts: single, transfer: .awaiting, waited: 3601, elapsed: 0).value
+        let hour = Service.backgroundShare(parts: single, request: Request(sent: 1, sending: 3600, waited: 3600), elapsed: 0).value
+        let hourAndSecond = Service.backgroundShare(parts: single, request: Request(sent: 1, sending: 3601, waited: 3601), elapsed: 0).value
         XCTAssertGreaterThan(
             (hourAndSecond - hour) * Double(TranscriptionRunway.unitsPerRecord), 1,
             "и через час за секунду полоса сдвигается хотя бы на единицу"
         )
+        // Повтор загрузки в той же части (ElevenLabs без словаря) ожидание не обнуляет.
+        let retry = Service.backgroundShare(parts: single, request: Request(sent: 0.1, sending: 300, waited: 200), elapsed: 300)
+        XCTAssertEqual(retry.source, .answer)
+        XCTAssertGreaterThan(retry.value, justSent.value)
 
         // Ответ в руках («1 из 1»), запись разбирается и сохраняется — потолок, но не сотня.
-        let answered = Service.backgroundShare(parts: Service.Parts(done: 1, total: 1), transfer: nil, waited: 0, elapsed: 300)
+        let answered = Service.backgroundShare(parts: Service.Parts(done: 1, total: 1), request: nil, elapsed: 300)
         XCTAssertEqual(answered.source, .parts)
         XCTAssertEqual(answered.value, ceiling, accuracy: 1e-12)
         XCTAssertLessThan(answered.value, 1, "сотню ставит только настоящее завершение")
 
         // По частям: готовые части плюс доля текущей.
         let parts = Service.Parts(done: 3, total: 9)
-        XCTAssertEqual(Service.backgroundShare(parts: parts, transfer: .sending(sent: 1, expected: 2), waited: 0, elapsed: 0).value,
+        XCTAssertEqual(Service.backgroundShare(parts: parts, request: Request(sent: 0.5, sending: 0), elapsed: 0).value,
                        ceiling * 3.25 / 9, accuracy: 1e-12)
-        XCTAssertEqual(Service.backgroundShare(parts: parts, transfer: .awaiting, waited: 0, elapsed: 0).value,
+        XCTAssertEqual(Service.backgroundShare(parts: parts, request: Request(sent: 1, sending: 0, waited: 0), elapsed: 0).value,
                        ceiling * 3.5 / 9, accuracy: 1e-12)
-        let local = Service.backgroundShare(parts: Service.Parts(done: 3, total: 10), transfer: nil, waited: 0, elapsed: 1800)
+        let local = Service.backgroundShare(parts: Service.Parts(done: 3, total: 10), request: nil, elapsed: 1800)
         XCTAssertEqual(local.source, .parts)
         XCTAssertEqual(local.value, ceiling * 0.3, accuracy: 1e-12, "у записи с частями оценка по времени не подменяет измеренное")
     }
@@ -208,10 +228,59 @@ final class BackgroundTransferTests: XCTestCase {
         XCTAssertEqual(TransferPhase.from(sent: 45, expected: 100).sentShare ?? -1, 0.45, accuracy: 1e-12)
         XCTAssertEqual(TransferPhase.from(sent: 100, expected: 100), .awaiting, "тело ушло целиком — ждём ответ")
         XCTAssertEqual(TransferPhase.from(sent: 120, expected: 100), .awaiting)
+        XCTAssertEqual(
+            TransferPhase.from(sent: 0, expected: 0), .awaiting,
+            "тела нет вовсе (GET, задача, подхваченная у системы после перезапуска) — ждём ответ, а не «объём неизвестен»"
+        )
         let unknown = TransferPhase.from(sent: 10, expected: -1)
         XCTAssertTrue(unknown.isSending)
         XCTAssertNil(unknown.sentShare, "долю из неизвестного объёма не выдумываем")
         XCTAssertFalse(TransferPhase.awaiting.isSending)
+    }
+
+    /// Часы запроса части не сбрасываются опросами и повтором: доля растёт через все фазы.
+    /// Раньше каждая фаза начинала ожидание с нуля — опросы Gemini (каждый GET приходит
+    /// ожиданием, ответ его сбрасывал) и вторая загрузка ElevenLabs без словаря держали
+    /// полосу на месте.
+    func testRequestClockIsNotResetByPollsOrARetry() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a"])
+        let gate = QueueGate()
+        let service = TranscriptionService(
+            engines: [.elevenLabs: QueueEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 }
+        )
+        let path = "Облако.m4a"
+        service.enqueue(try fixture.entry(path), in: fixture.workspace, using: .elevenLabs)
+        await gate.waitForArrivals(1)
+        // Доклады — по порядку и со своим временем: так тест не зависит от часов.
+        let start = Date()
+        func at(_ seconds: TimeInterval) -> Date { start.addingTimeInterval(seconds) }
+        var shares: [Double] = []
+        func sample(_ seconds: TimeInterval) { shares.append(service.backgroundShare(for: path, now: at(seconds)).value) }
+
+        // ElevenLabs: загрузка, ожидание, отказ из-за словаря и вторая загрузка с нуля.
+        service.transferChanged(path, .sending(sent: 0, expected: 100), now: at(0)); sample(1)
+        service.transferChanged(path, .sending(sent: 60, expected: 100), now: at(5)); sample(6)
+        service.transferChanged(path, .awaiting, now: at(10)); sample(20)
+        service.transferChanged(path, .answered, now: at(30)); sample(31)
+        service.transferChanged(path, .sending(sent: 0, expected: 100), now: at(32)); sample(33)
+        service.transferChanged(path, .sending(sent: 50, expected: 100), now: at(40)); sample(41)
+        // Gemini: опросы — каждый GET приходит ожиданием, ответ приходит через секунды.
+        for poll in 0..<5 {
+            let t = 50 + Double(poll) * 10
+            service.transferChanged(path, .awaiting, now: at(t)); sample(t + 1)
+            service.transferChanged(path, .answered, now: at(t + 2)); sample(t + 3)
+        }
+        for (index, pair) in zip(shares, shares.dropFirst()).enumerated() {
+            XCTAssertLessThan(pair.0, pair.1, "доля обязана расти на шаге \(index + 1): \(shares)")
+        }
+        XCTAssertEqual(
+            service.backgroundShare(for: path, now: at(100)).source, .answer,
+            "после первого ожидания часть идёт временем, и повтор загрузки её не откатывает"
+        )
+        await gate.openAll()
+        await service.waitForDrain()
     }
 
     // MARK: Карточка и экран
