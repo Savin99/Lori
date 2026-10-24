@@ -1,5 +1,6 @@
 import CryptoKit
 import Foundation
+import os
 import UIKit
 
 /// Где сейчас запрос облачного задания — по счёту самой системной передачи.
@@ -88,13 +89,23 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     /// несколько килобайт, а экрану и полосе хватает целых процентов.
     private var reporters: [String: @Sendable (TransferPhase) -> Void] = [:]
     private var lastMark: [String: Int] = [:]
-    /// Запросы, отданные системе и ещё не закончившиеся. По ним решается, можно ли
-    /// оставить запись ждать, когда фоновое время кончилось.
-    private var inSystem: Set<String> = []
-    /// Задания, по которым в режиме `answersOnly` понадобилась новая отправка.
-    private var deferredJobs: Set<String> = []
-    /// Сколько новых передач отдано системе за жизнь процесса — для тестов и журнала.
-    private var launched = 0
+    /// То, что читают с главного потока, — под своим замком, а не на `queue`.
+    ///
+    /// Очередь транспорта пишет на диск тело запроса (запись в десятки мегабайт), и
+    /// `queue.sync` с главного потока ждал бы эту запись. Худшее место для такого ожидания —
+    /// обработчик истечения фонового времени (`interruptEverything` спрашивает
+    /// `holdsTransfer`): у него считаные секунды. Пишет сюда по-прежнему только `queue`.
+    private struct Visible {
+        /// Запросы, отданные системе и ещё не закончившиеся. По ним решается, можно ли
+        /// оставить запись ждать, когда фоновое время кончилось.
+        var inSystem: Set<String> = []
+        /// Задания, по которым в режиме `answersOnly` понадобилась новая отправка.
+        var deferredJobs: Set<String> = []
+        /// Сколько новых передач отдано системе за жизнь процесса — для тестов и журнала.
+        var launched = 0
+    }
+
+    private let visible = OSAllocatedUnfairLock(initialState: Visible())
 
     private lazy var session: URLSession = {
         let config = URLSessionConfiguration.background(withIdentifier: Self.identifier)
@@ -195,7 +206,7 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                                 return
                             }
                             if let live = tasks.first(where: { $0.taskDescription == id && $0.state != .completed }) {
-                                self.inSystem.insert(id)
+                                self.visible.withLock { _ = $0.inSystem.insert(id) }
                                 self.publish(id, TransferPhase.from(sent: live.countOfBytesSent, expected: live.countOfBytesExpectedToSend))
                                 Journal.append("передача: запрос задания уже у системы — жду его ответ, новый не отправляю")
                                 return
@@ -207,7 +218,7 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                                 // сбоем сервиса. Отметка по заданию нужна сервису, чтобы не сохранить
                                 // то, что движок соберёт без этого ответа (Gemini умеет продолжать
                                 // после неудачного переспроса).
-                                self.deferredJobs.insert(job.id)
+                                self.visible.withLock { _ = $0.deferredJobs.insert(job.id) }
                                 Journal.append("передача: в фоне новую отправку не начинаю — задание продолжится, когда Lori откроют")
                                 self.resolve(id, .failure(CancellationError()))
                                 return
@@ -229,8 +240,10 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                                 }
                                 task.taskDescription = id
                                 task.resume()
-                                self.inSystem.insert(id)
-                                self.launched += 1
+                                self.visible.withLock { state in
+                                    state.inSystem.insert(id)
+                                    state.launched += 1
+                                }
                                 self.publish(id, phase)
                             } catch { self.resolve(id, .failure(error)) }
                         }
@@ -274,8 +287,10 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
         guard UUID(uuidString: jobID) != nil else { return }
         queue.async {
             self.cancelledJobs.insert(jobID)
-            self.deferredJobs.remove(jobID)
-            self.inSystem = self.inSystem.filter { !$0.hasPrefix(jobID + "_") }
+            self.visible.withLock { state in
+                state.deferredJobs.remove(jobID)
+                state.inSystem = state.inSystem.filter { !$0.hasPrefix(jobID + "_") }
+            }
             for id in Array(self.waiters.keys) where id.hasPrefix(jobID + "_") {
                 self.resolve(id, .failure(CancellationError()))
             }
@@ -292,11 +307,9 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     // MARK: - Что видно снаружи
 
     /// Лежит ли сейчас у системы запрос этого задания: тело уходит или ответ ещё не пришёл.
-    ///
-    /// Зовётся с главного актора. `sync` здесь безопасен: очередь транспорта главный поток
-    /// никогда не ждёт — туда она только отправляет (`DispatchQueue.main.async`).
+    /// Не ждёт очередь транспорта — см. `Visible`.
     func holdsTransfer(forJob jobID: String) -> Bool {
-        queue.sync { inSystem.contains { $0.hasPrefix(jobID + "_") } }
+        visible.withLock { $0.inSystem.contains { $0.hasPrefix(jobID + "_") } }
     }
 
     /// Пришёл ли по заданию хоть один ответ, лежащий распиской.
@@ -309,10 +322,10 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     /// Отказывался ли транспорт начинать новую отправку по заданию в режиме `answersOnly`.
     /// Отметка снимается: следующий прогон задания — уже другой.
     func takeDeferral(forJob jobID: String) -> Bool {
-        queue.sync { deferredJobs.remove(jobID) != nil }
+        visible.withLock { $0.deferredJobs.remove(jobID) != nil }
     }
 
-    var launchedTransfers: Int { queue.sync { launched } }
+    var launchedTransfers: Int { visible.withLock { $0.launched } }
 
     /// Пересоздать сессию после пробуждения системой и узнать, когда все её события
     /// доставлены (`urlSessionDidFinishEvents`). `completion` зовётся на главной очереди.
@@ -357,7 +370,7 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
         queue.async {
             let body = self.buffers.removeValue(forKey: task.taskIdentifier) ?? Data()
             guard let id = task.taskDescription else { return }
-            self.inSystem.remove(id)
+            self.visible.withLock { _ = $0.inSystem.remove(id) }
             defer { try? FileManager.default.removeItem(at: Self.file(id, "body")) }
             let readError = self.downloadErrors.removeValue(forKey: task.taskIdentifier)
             let status = (task.response as? HTTPURLResponse)?.statusCode
