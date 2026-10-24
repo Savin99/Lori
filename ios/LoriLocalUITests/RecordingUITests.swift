@@ -115,6 +115,49 @@ final class RecordingUITests: XCTestCase {
         XCTAssertTrue(app.buttons["recordButton"].waitForExistence(timeout: 10))
     }
 
+    /// Кнопки островка, пока Lori не на виду: пауза, продолжение и «Сохранить» идут
+    /// интентами в процесс приложения, и запись оказывается в списке, хотя Lori никто
+    /// не открывал. Микрофон тут заглушка — право начать запись из фона
+    /// (`AudioRecordingIntent`) проверяется только на телефоне; здесь — вся проводка.
+    func testIslandButtonsPauseResumeAndSaveWithoutOpeningLori() throws {
+        continueAfterFailure = false
+        let app = launch()
+        let firstBefore = cards(in: app).firstMatch.waitForExistence(timeout: 3)
+            ? cards(in: app).firstMatch.label : ""
+        tap(app.buttons["recordButton"])
+        XCTAssertTrue(app.buttons["Поставить на паузу"].waitForExistence(timeout: 5))
+        sleep(2)
+        XCUIDevice.shared.press(.home)
+        sleep(2)
+
+        let springboard = XCUIApplication(bundleIdentifier: "com.apple.springboard")
+        let island = springboard.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.025))
+        island.press(forDuration: 1.5)
+        let pause = springboard.buttons["Поставить запись на паузу"]
+        XCTAssertTrue(pause.waitForExistence(timeout: 5), "в развёрнутом островке есть «Пауза»")
+        pause.tap()
+
+        let resume = springboard.buttons["Продолжить запись"]
+        XCTAssertTrue(resume.waitForExistence(timeout: 5), "после паузы островок предлагает «Продолжить»")
+        save("island-intent-paused")
+        resume.tap()
+        XCTAssertTrue(pause.waitForExistence(timeout: 5), "«Продолжить» снова пишет — островок предлагает «Пауза»")
+        save("island-intent-resumed")
+        sleep(1)
+
+        let finish = springboard.buttons["Остановить и сохранить запись"]
+        XCTAssertTrue(finish.waitForExistence(timeout: 5))
+        finish.tap()
+        XCTAssertTrue(finish.waitForNonExistence(timeout: 10), "после «Сохранить» активность уходит")
+        save("island-intent-saved")
+
+        app.activate()
+        XCTAssertTrue(app.buttons["recordButton"].waitForExistence(timeout: 10), "Lori в покое: запись закончена из островка")
+        let first = cards(in: app).firstMatch
+        XCTAssertTrue(first.waitForExistence(timeout: 5))
+        XCTAssertNotEqual(first.label, firstBefore, "запись из островка — сверху списка")
+    }
+
     // MARK: - Помощники
 
     private func launch() -> XCUIApplication {

@@ -213,7 +213,11 @@ struct RecordingLockScreenView: View {
 
     @ViewBuilder
     private var timer: some View {
-        if stale, state.phase == .recording {
+        if state.phase == .finished {
+            // Прощанию таймер не нужен: запись уже в списке, «0:00» здесь читалось бы
+            // как пустая запись.
+            EmptyView()
+        } else if stale, state.phase == .recording {
             Image(systemName: "exclamationmark.circle")
                 .font(.system(size: 18, weight: .semibold))
                 .foregroundStyle(RecordingTint.muted)
@@ -300,7 +304,9 @@ enum RecordingIslandParts {
 
         var body: some View {
             Group {
-                if stale, state.phase == .recording {
+                if state.phase == .finished {
+                    EmptyView()
+                } else if stale, state.phase == .recording {
                     Image(systemName: "exclamationmark.circle")
                         .font(.system(size: 17, weight: .semibold))
                         .foregroundStyle(RecordingTint.muted)
