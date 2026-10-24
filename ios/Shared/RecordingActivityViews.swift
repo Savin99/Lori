@@ -94,6 +94,11 @@ struct RecordingHeadline: View {
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(RecordingTint.muted)
                     .accessibilityHidden(true)
+            case .saving:
+                Image(systemName: "ellipsis")
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(RecordingTint.muted)
+                    .accessibilityHidden(true)
             case .finished:
                 Image(systemName: "checkmark")
                     .font(.system(size: 13, weight: .bold))
@@ -203,7 +208,7 @@ struct RecordingLockScreenView: View {
                     .font(.footnote)
                     .foregroundStyle(RecordingTint.muted)
             }
-            if state.phase != .finished {
+            if state.showsButtons {
                 RecordingActivityButtons(state: state, finishURL: finishURL)
             }
         }
@@ -334,7 +339,7 @@ enum RecordingIslandParts {
                         .font(.footnote)
                         .foregroundStyle(RecordingTint.muted)
                 }
-                if state.phase != .finished {
+                if state.showsButtons {
                     RecordingActivityButtons(state: state, finishURL: finishURL)
                 }
             }

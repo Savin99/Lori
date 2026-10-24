@@ -26,13 +26,24 @@ enum RecordingAssembler {
     /// Префикс временного файла склейки: недоделанный файл убирается при следующем запуске.
     static let temporaryPrefix = ".assembling-"
 
+    /// Кусок для склейки: файл и повтор в его начале (`RecordingSession.Chunk.trimStart`).
+    struct Piece: Equatable, Sendable {
+        var url: URL
+        var trimStart: TimeInterval = 0
+    }
+
     struct Outcome: Equatable, Sendable {
         /// Длительность готового файла.
         var duration: TimeInterval
-        /// Сколько кусков не прочиталось и в запись не вошло.
-        var skipped: Int
+        /// Куски, которые не прочитались (или в них нет звуковой дорожки) и в запись не
+        /// вошли. Вызывающий откладывает их в корзину — молча стереть нельзя.
+        var unreadable: [URL]
         /// Собрано перекодированием, а не сквозным экспортом.
         var reencoded: Bool
+        /// Сколько повторов на стыках отрезано, в секундах.
+        var trimmed: TimeInterval
+
+        var skipped: Int { unreadable.count }
     }
 
     enum Failure: LocalizedError, Equatable {
@@ -64,23 +75,61 @@ enum RecordingAssembler {
     /// дважды); несколько — остаются на месте, их убирает вызывающий, когда итог
     /// уже в списке.
     static func assemble(_ chunks: [URL], into destination: URL, workDirectory: URL) async throws -> Outcome {
-        var readable: [(url: URL, duration: TimeInterval)] = []
-        for url in chunks {
-            // Кусок короче 50 мс — это старт, который тут же прервали: в нём нет звука.
-            if let duration = RecordingAudio.duration(of: url), duration > 0.05 {
-                readable.append((url, duration))
-            }
+        try await assemble(chunks.map { Piece(url: $0) }, into: destination, workDirectory: workDirectory)
+    }
+
+    /// Повтор в начале куска отрезается, только если предыдущий кусок в запись вошёл:
+    /// пропал предыдущий — повтор и есть единственная копия этого звука.
+    static func assemble(_ pieces: [Piece], into destination: URL, workDirectory: URL) async throws -> Outcome {
+        struct Included {
+            var url: URL
+            /// Ассет держится здесь до конца склейки: дорожка ссылается на него слабо, и
+            /// без него `insertTimeRange` падает с -11800 / -12780 (так и упало 24 октября).
+            var asset: AVURLAsset
+            var track: AVAssetTrack
+            var range: CMTimeRange
         }
-        let skipped = chunks.count - readable.count
-        guard !readable.isEmpty else { throw Failure.nothingToSave }
+        var included: [Included] = []
+        var unreadable: [URL] = []
+        var trimmed: TimeInterval = 0
+        var previousIncluded = false
+        for piece in pieces {
+            // Кусок короче 50 мс — это старт, который тут же прервали: в нём нет звука.
+            guard let length = RecordingAudio.duration(of: piece.url) else {
+                unreadable.append(piece.url)
+                previousIncluded = false
+                continue
+            }
+            guard length > 0.05 else {
+                previousIncluded = false
+                continue
+            }
+            let asset = AVURLAsset(url: piece.url)
+            guard let duration = try? await asset.load(.duration),
+                  let source = try? await asset.loadTracks(withMediaType: .audio).first else {
+                unreadable.append(piece.url)
+                previousIncluded = false
+                continue
+            }
+            var start = CMTime.zero
+            if previousIncluded, piece.trimStart > 0 {
+                let trim = min(piece.trimStart, max(0, duration.seconds - 0.05))
+                start = CMTime(seconds: trim, preferredTimescale: 44_100)
+                trimmed += trim
+            }
+            included.append(Included(url: piece.url, asset: asset, track: source, range: CMTimeRange(start: start, end: duration)))
+            previousIncluded = true
+        }
+        guard !included.isEmpty else { throw Failure.nothingToSave }
 
         try FileManager.default.createDirectory(
             at: destination.deletingLastPathComponent(),
             withIntermediateDirectories: true
         )
-        if readable.count == 1 {
-            try FileManager.default.moveItem(at: readable[0].url, to: destination)
-            return Outcome(duration: readable[0].duration, skipped: skipped, reencoded: false)
+        if included.count == 1, included[0].range.start == .zero {
+            try FileManager.default.moveItem(at: included[0].url, to: destination)
+            let duration = RecordingAudio.duration(of: destination) ?? included[0].range.duration.seconds
+            return Outcome(duration: duration, unreadable: unreadable, reencoded: false, trimmed: 0)
         }
 
         let composition = AVMutableComposition()
@@ -89,12 +138,9 @@ enum RecordingAssembler {
             preferredTrackID: kCMPersistentTrackID_Invalid
         ) else { throw Failure.exportFailed("нет звуковой дорожки") }
         var cursor = CMTime.zero
-        for chunk in readable {
-            let asset = AVURLAsset(url: chunk.url)
-            let duration = try await asset.load(.duration)
-            guard let source = try await asset.loadTracks(withMediaType: .audio).first else { continue }
-            try track.insertTimeRange(CMTimeRange(start: .zero, duration: duration), of: source, at: cursor)
-            cursor = cursor + duration
+        for piece in included {
+            try track.insertTimeRange(piece.range, of: piece.track, at: cursor)
+            cursor = cursor + piece.range.duration
         }
         let expected = cursor.seconds
 
@@ -112,11 +158,11 @@ enum RecordingAssembler {
         }
 
         let actual = try await AVURLAsset(url: temporary).load(.duration).seconds
-        guard abs(actual - expected) <= tolerance(for: expected, parts: readable.count) else {
+        guard abs(actual - expected) <= tolerance(for: expected, parts: included.count) else {
             throw Failure.lengthMismatch(expected: expected, actual: actual)
         }
         try FileManager.default.moveItem(at: temporary, to: destination)
-        return Outcome(duration: actual, skipped: skipped, reencoded: reencoded)
+        return Outcome(duration: actual, unreadable: unreadable, reencoded: reencoded, trimmed: trimmed)
     }
 
     private static func export(_ composition: AVComposition, preset: String, as type: AVFileType, to output: URL) async throws {

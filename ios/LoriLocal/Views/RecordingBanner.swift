@@ -11,11 +11,11 @@ struct RecordingBanner: View {
         Button(action: close) {
             HStack(spacing: 9) {
                 Circle()
-                    .fill(recorder.isPaused ? LoriPalette.muted : LoriPalette.danger)
+                    .fill(recorder.isRecording ? LoriPalette.danger : LoriPalette.muted)
                     .frame(width: 8, height: 8)
-                    .opacity(recorder.isPaused ? 0.5 : 0.55 + 0.45 * min(1, max(0, recorder.level)))
+                    .opacity(recorder.isRecording ? 0.55 + 0.45 * min(1, max(0, recorder.level)) : 0.5)
 
-                Text(recorder.isPaused ? "Запись на паузе" : "Идёт запись")
+                Text(title)
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.ink)
 
@@ -43,8 +43,17 @@ struct RecordingBanner: View {
             }
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(recorder.isPaused ? "Запись на паузе" : "Идёт запись")
+        .accessibilityLabel(title)
         .accessibilityHint("Закрывает экран и возвращает к записи")
+    }
+
+    /// Пока куски склеиваются, запись уже не идёт: «Идёт запись» тут было бы неправдой.
+    private var title: String {
+        switch recorder.phase {
+        case .finishing: "Сохраняю запись"
+        case .paused: "Запись на паузе"
+        default: "Идёт запись"
+        }
     }
 }
 
