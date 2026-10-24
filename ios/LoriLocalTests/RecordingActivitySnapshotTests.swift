@@ -47,7 +47,7 @@ final class RecordingActivitySnapshotTests: XCTestCase {
             for (name, state, stale) in cases {
                 let view = RecordingLockScreenView(state: state, finishURL: url, stale: stale)
                     .frame(width: 364)
-                    .background(RecordingTint.canvas, in: RoundedRectangle(cornerRadius: 24, style: .continuous))
+                    .background(RecordingTint.canvas(for: scheme), in: RoundedRectangle(cornerRadius: 24, style: .continuous))
                     .padding(12)
                     .background(scheme == .dark ? Color(white: 0.12) : Color(white: 0.82))
                 try attach(view, scheme: scheme, named: "activity-lock-\(name)-\(scheme == .dark ? "dark" : "light")")

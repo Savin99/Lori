@@ -972,10 +972,6 @@ struct ContentView: View {
         return text
     }
 
-    private func refresh() {
-        workspace.requestRefresh()
-    }
-
     // MARK: - Листы и диалоги
 
     /// Листы экрана. Отдельными функциями, а не одной цепочкой в `body`: десяток

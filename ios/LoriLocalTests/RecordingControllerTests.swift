@@ -222,8 +222,9 @@ final class RecordingControllerTests: XCTestCase {
         XCTAssertEqual(relaunched.pauseWords, "приложение перезапускалось")
         XCTAssertEqual(relaunched.elapsed, 2, accuracy: 0.1)
         XCTAssertNotNil(relaunched.lastError, "о потерянном куске говорится словами")
-        XCTAssertEqual(fixture.trash().count, 1, "оборванный кусок — в корзину, а не в никуда")
-        XCTAssertTrue(fixture.trash()[0].hasSuffix("-оборвано.m4a"))
+        let trash = fixture.trash()
+        XCTAssertEqual(trash.count, 1, "оборванный кусок — в корзину, а не в никуда")
+        XCTAssertTrue(trash.first?.hasSuffix("-оборвано.m4a") == true, "\(trash)")
 
         fixture.activity.adoptable = true
         await relaunched.reconcileActivity()

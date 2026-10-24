@@ -58,11 +58,10 @@ final class FakeRecordingDevice: RecordingDevice {
 
     func currentInputs() -> [String] { inputs }
 
-    /// Процесс умер посреди куска: файл остаётся без оглавления, `end()` не звали.
+    /// Процесс умер посреди куска: на диске то, что писатель успел записать до `close`.
     func dieMidChunk(seconds: TimeInterval = 2) throws {
         guard let url = activeURL else { return }
-        try RecordingFiles.writeAAC(seconds: seconds, to: url)
-        try RecordingFiles.cutTail(of: url)
+        try RecordingFiles.writeUnclosedAAC(seconds: seconds, to: url)
         activeURL = nil
     }
 
@@ -148,13 +147,25 @@ enum RecordingFiles {
         }
     }
 
-    /// Отрезает хвост файла вместе с оглавлением m4a — так выглядит кусок процесса,
-    /// убитого посреди записи.
-    static func cutTail(of url: URL) throws {
-        let size = try XCTUnwrap(try url.resourceValues(forKeys: [.fileSizeKey]).fileSize)
-        let handle = try FileHandle(forWritingTo: url)
-        try handle.truncate(atOffset: UInt64(size / 2))
-        try handle.close()
+    /// Кусок процесса, убитого посреди записи: копия файла, снятая, пока писатель ещё
+    /// открыт. Обрезать хвост закрытого файла для этого не годится — замер 24 октября
+    /// 2026: закрытый писателем m4a держит `moov` в начале (`ftyp`, `moov`, `free`,
+    /// `mdat`) и читается и без хвоста, а у открытого на месте `moov` нули — его не
+    /// открывает ничто. Ровно это и остаётся от убитого процесса.
+    static func writeUnclosedAAC(seconds: TimeInterval, to url: URL) throws {
+        try? FileManager.default.removeItem(at: url)
+        let source = url.deletingLastPathComponent().appending(path: ".writing-\(UUID().uuidString).m4a")
+        defer { try? FileManager.default.removeItem(at: source) }
+        let rate = 44_100.0
+        let file = try AVAudioFile(forWriting: source, settings: MicrophoneDevice.settings)
+        let frames = Int(seconds * rate)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: file.processingFormat, frameCapacity: AVAudioFrameCount(frames)),
+              let channel = buffer.floatChannelData?[0] else { throw CocoaError(.fileWriteUnknown) }
+        buffer.frameLength = AVAudioFrameCount(frames)
+        for index in 0..<frames { channel[index] = Float(0.3 * sin(Double(index) * 0.05)) }
+        try file.write(from: buffer)
+        try FileManager.default.copyItem(at: source, to: url)
+        withExtendedLifetime(file) {}
     }
 
     static func duration(of url: URL) async throws -> TimeInterval {

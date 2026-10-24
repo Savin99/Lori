@@ -16,13 +16,11 @@ struct RecordingActivityBundle: WidgetBundle {
 struct RecordingActivityWidget: Widget {
     var body: some WidgetConfiguration {
         ActivityConfiguration(for: RecordingActivityAttributes.self) { context in
-            RecordingLockScreenView(
+            LockScreenPresentation(
                 state: context.state,
                 finishURL: context.attributes.finishURL,
                 stale: context.isStale
             )
-            .activityBackgroundTint(RecordingTint.canvas)
-            .activitySystemActionForegroundColor(RecordingTint.ink)
         } dynamicIsland: { context in
             DynamicIsland {
                 DynamicIslandExpandedRegion(.leading, priority: 1) {
@@ -50,5 +48,21 @@ struct RecordingActivityWidget: Widget {
             }
             .keylineTint(RecordingTint.lime)
         }
+    }
+}
+
+/// Экран блокировки. Подложка — под ту тему, в которой рисуется начинка: динамический
+/// цвет в `activityBackgroundTint` система решала светлым, а буквы — тёмной темой,
+/// и на кремовой карточке оставались кремовые буквы (`RecordingTint.canvas(for:)`).
+private struct LockScreenPresentation: View {
+    @Environment(\.colorScheme) private var scheme
+    let state: RecordingActivityAttributes.ContentState
+    let finishURL: URL
+    let stale: Bool
+
+    var body: some View {
+        RecordingLockScreenView(state: state, finishURL: finishURL, stale: stale)
+            .activityBackgroundTint(RecordingTint.canvas(for: scheme))
+            .activitySystemActionForegroundColor(RecordingTint.ink(for: scheme))
     }
 }

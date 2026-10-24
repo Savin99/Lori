@@ -40,10 +40,9 @@ final class RecordingAssemblerTests: XCTestCase {
         let broken = folder.appending(path: "part-2.m4a")
         let good2 = folder.appending(path: "part-3.m4a")
         try RecordingFiles.writeAAC(seconds: 2, to: good1)
-        try RecordingFiles.writeAAC(seconds: 2, to: broken)
-        try RecordingFiles.cutTail(of: broken)
+        try RecordingFiles.writeUnclosedAAC(seconds: 2, to: broken)
         try RecordingFiles.writeAAC(seconds: 1, to: good2)
-        XCTAssertNil(RecordingAudio.duration(of: broken), "m4a без оглавления не читается — на этом держится проверка кусков")
+        XCTAssertNil(RecordingAudio.duration(of: broken), "незакрытый m4a не читается — на этом держится проверка кусков")
 
         let output = folder.appending(path: "Recording.m4a")
         let outcome = try await RecordingAssembler.assemble([good1, broken, good2], into: output, workDirectory: folder)

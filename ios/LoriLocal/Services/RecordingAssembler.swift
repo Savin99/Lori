@@ -11,6 +11,15 @@ import Foundation
 /// Не вышел сквозной экспорт — запасной путь с перекодированием (`AppleM4A`):
 /// записать хоть так лучше, чем не записать.
 ///
+/// **Сквозной экспорт — в контейнер MPEG-4, а не M4A.** Замер 24 октября 2026
+/// (симулятор iOS 26.5): для композиции из кусков AAC `compatibility(ofExportPreset:
+/// Passthrough, outputFileType: .m4a)` — `false`, экспорт в `.m4a` падает с -11838
+/// «Операция остановлена» (внутри -16976); `.mp4` — `true`, и выходит файл с той же
+/// дорожкой `aac`, длиной ровно в сумму кусков (1,5 + 2,0 = 3,5 с по `AVURLAsset`).
+/// Файл всё равно называется `.m4a`: M4A — это тот же MPEG-4 с одной звуковой
+/// дорожкой, отличается только бренд в `ftyp` (`mp42` вместо `M4A `), а по расширению
+/// запись опознают и список, и «Поделиться».
+///
 /// Длительность итога проверяется по самому файлу: экспорт, отдавший «успех» и
 /// половину звука, хуже честной ошибки — куски к тому моменту уже были бы удалены.
 enum RecordingAssembler {
@@ -95,11 +104,11 @@ enum RecordingAssembler {
 
         var reencoded = false
         do {
-            try await export(composition, preset: AVAssetExportPresetPassthrough, to: temporary)
+            try await export(composition, preset: AVAssetExportPresetPassthrough, as: .mp4, to: temporary)
         } catch {
             try? FileManager.default.removeItem(at: temporary)
             reencoded = true
-            try await export(composition, preset: AVAssetExportPresetAppleM4A, to: temporary)
+            try await export(composition, preset: AVAssetExportPresetAppleM4A, as: .m4a, to: temporary)
         }
 
         let actual = try await AVURLAsset(url: temporary).load(.duration).seconds
@@ -110,12 +119,12 @@ enum RecordingAssembler {
         return Outcome(duration: actual, skipped: skipped, reencoded: reencoded)
     }
 
-    private static func export(_ composition: AVComposition, preset: String, to output: URL) async throws {
+    private static func export(_ composition: AVComposition, preset: String, as type: AVFileType, to output: URL) async throws {
         guard let session = AVAssetExportSession(asset: composition, presetName: preset) else {
             throw Failure.exportFailed("экспорт \(preset) недоступен")
         }
         do {
-            try await session.export(to: output, as: .m4a)
+            try await session.export(to: output, as: type)
         } catch {
             throw Failure.exportFailed(error.localizedDescription)
         }

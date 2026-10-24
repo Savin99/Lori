@@ -1,7 +1,7 @@
 import AVFoundation
 import SwiftUI
 
-/// Проигрыватель записи. Отдельный от `AudioCaptureStore`: рекордер только пишет.
+/// Проигрыватель записи. Отдельный от `RecordingController`: диктофон только пишет.
 /// Делегат `AVAudioPlayerDelegate` намеренно не используется — его метод не изолирован
 /// в главном акторе, а сам `AVAudioPlayer` не `Sendable`. Окончание ловит тикер.
 @MainActor

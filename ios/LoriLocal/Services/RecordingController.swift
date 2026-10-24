@@ -401,6 +401,7 @@ final class RecordingController: ObservableObject, RecordingIntentHandling {
     func pauseFromIntent() async {
         let release = hooks.backgroundTime("Lori: пауза из островка")
         defer { release() }
+        await adoptActivityIfNeeded()
         guard pause() else { return await settleOrphanActivity() }
         await activityTask?.value
     }
@@ -408,19 +409,30 @@ final class RecordingController: ObservableObject, RecordingIntentHandling {
     func resumeFromIntent() async {
         let release = hooks.backgroundTime("Lori: продолжить из островка")
         defer { release() }
+        await adoptActivityIfNeeded()
         guard phase == .paused else { return await settleOrphanActivity() }
         resume()
         await activityTask?.value
     }
 
     func finishFromIntent() async {
+        await adoptActivityIfNeeded()
         guard phase == .recording || phase == .paused else { return await settleOrphanActivity() }
         await finish()
     }
 
     func discardFromIntent() async {
+        await adoptActivityIfNeeded()
         guard phase == .recording || phase == .paused else { return await settleOrphanActivity() }
         await discard()
+    }
+
+    /// Lori запустили ради нажатия в островке: `reconcileActivity` из `App.init` мог ещё
+    /// не подобрать активность, а без неё обновление ушло бы в никуда — островок показал
+    /// бы паузу при идущей записи.
+    private func adoptActivityIfNeeded() async {
+        guard session != nil, !presenter.isRunning else { return }
+        _ = await presenter.adopt()
     }
 
     /// Кнопку нажали в активности, у которой записи уже нет (она закончена в
