@@ -1274,9 +1274,15 @@ final class TranscriptionService: ObservableObject {
 
     /// Полчаса взяты как «дольше почти любой записи»: точность тут не нужна, нужна
     /// монотонность и то, чтобы доля не упёрлась в потолок на первой же минуте.
+    ///
+    /// Кривая `t / (t + 30 мин)`, а не прямая до потолка: прямая упиралась в 0,9 на 27-й
+    /// минуте и дальше стояла — ровно то, за что планировщик снимает задачу. До 24 октября
+    /// 2026 эту функцию не звал никто, и ошибка не была видна; тест
+    /// `testBackgroundShareMeasuresTheUploadAndEstimatesTheAnswerBelowOne` держит, что
+    /// доля движется и через три часа.
     nonisolated static func elapsedShare(seconds: TimeInterval, ceiling: Double = 0.9) -> Double {
         guard seconds > 0 else { return 0 }
-        return min(ceiling, seconds / (30 * 60))
+        return ceiling * seconds / (seconds + 30 * 60)
     }
 
     // MARK: - Доля для полосы фоновой задачи
@@ -1303,7 +1309,9 @@ final class TranscriptionService: ObservableObject {
     /// меряется честно, а вторая половина заполняется оценкой и до конца не доходит.
     nonisolated static let uploadWeight = 0.5
     /// Потолок идущей записи. Сотню ставит только настоящее завершение: запись входит в
-    /// счёт «готово», когда сервис её сохранил.
+    /// счёт «готово», когда сервис её сохранил. Это множитель, а не обрезка: обрезка
+    /// останавливала бы оценку ожидания, как только та до неё дотянется (на 18-й минуте
+    /// ожидания при `answerHalfTime` 120 с), а движение и есть смысл оценки.
     nonisolated static let inFlightCeiling = 0.95
     /// Через сколько секунд ожидания ответа закрыта половина остатка. Кривая
     /// `t / (t + T)` нарочно не упирается в потолок: она замедляется, но движется и через
@@ -1329,28 +1337,29 @@ final class TranscriptionService: ObservableObject {
     ) -> BackgroundShare {
         let total = max(parts?.total ?? 1, 1)
         let done = Double(min(max(parts?.done ?? 0, 0), total))
-        let value: Double
+        // Доля от 0 до 1; единица — только «все части готовы». Потолок — множителем ниже.
+        let whole: Double
         let source: BackgroundShare.Source
         switch transfer {
         case let phase? where phase.isSending:
             // Объём неизвестен — отправка считается начатой, а не сделанной.
-            value = (done + uploadWeight * (phase.sentShare ?? 0)) / Double(total)
+            whole = (done + uploadWeight * (phase.sentShare ?? 0)) / Double(total)
             source = .upload
         case .awaiting?:
             let wait = max(0, waited)
-            value = (done + uploadWeight + (1 - uploadWeight) * wait / (wait + answerHalfTime)) / Double(total)
+            whole = (done + uploadWeight + (1 - uploadWeight) * wait / (wait + answerHalfTime)) / Double(total)
             source = .answer
         default:
             if let parts, parts.total > 1 || parts.done >= max(parts.total, 1) {
                 // Движок режет на части — или сказал «1 из 1»: ответ уже в руках.
-                value = done / Double(total)
+                whole = done / Double(total)
                 source = .parts
             } else {
-                value = elapsedShare(seconds: elapsed)
-                source = .estimate
+                // Своя кривая с потолком 0,9 — сюда её и берём как есть.
+                return BackgroundShare(value: inFlightCeiling * elapsedShare(seconds: elapsed), source: .estimate)
             }
         }
-        return BackgroundShare(value: min(inFlightCeiling, max(0, value)), source: source)
+        return BackgroundShare(value: inFlightCeiling * min(1, max(0, whole)), source: source)
     }
 
     /// Доля идущей записи сейчас — то, что фоновая задача складывает в свою полосу.
@@ -1455,10 +1464,11 @@ final class TranscriptionService: ObservableObject {
 
     /// Запись, поднятая пробуждением, упёрлась в запрос без ответа: в фоне его не шлём.
     /// Это не ошибка и не отмена человеком — запись «Прервано» и продолжится сама, как
-    /// только Lori откроют (`resumeOnReturn`, если человек уже здесь).
+    /// только Lori откроют (`applicationDidBecomeActive`: прерванные и поднятые
+    /// пробуждением). Сразу заново её не ставим: без возвращения человека это была бы та
+    /// самая новая отправка из фона, от которой режим и защищает.
     private func deferToReturn(_ path: String) -> String? {
         interrupted.insert(path)
-        if foreground { resumeOnReturn.insert(path) }
         _ = persistJobs()
         Journal.append("фон: «\(path)» нужна новая отправка — в фоне её не начинаю, продолжу при возвращении в Lori")
         return nil
