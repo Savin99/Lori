@@ -70,6 +70,13 @@ final class WorkspaceStore: ObservableObject {
     private var refreshTask: Task<Void, Never>?
     private var refreshGeneration = 0
 
+    /// Рабочая папка, созданная последней. Нужна одному месту — пробуждению системой
+    /// событиями фоновой передачи после убитого процесса (`TranscriptionRunway`): тогда
+    /// экран мог не строиться вовсе, и сервис расшифровки ещё ни разу не видел рабочую
+    /// папку, а ответ сервиса надо сохранить. Слабая ссылка, как у
+    /// `TranscriptionRunway.current`: держит папку приложение, а не это поле.
+    private(set) static weak var current: WorkspaceStore?
+
     init(rootURL: URL? = nil, fileManager: FileManager = .default) {
         self.fileManager = fileManager
         if let rootURL {
@@ -79,6 +86,7 @@ final class WorkspaceStore: ObservableObject {
             root = documents.appending(path: "Lori/Workspace", directoryHint: .isDirectory)
         }
         rootPath = root.path
+        Self.current = self
     }
 
     func start() {

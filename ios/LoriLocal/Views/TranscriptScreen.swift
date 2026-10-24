@@ -411,6 +411,10 @@ struct TranscriptScreen: View {
     private enum Status: Equatable {
         case queued(position: Int, waitsForMemory: Bool)
         case running(starting: Bool)
+        /// Облачная запись одним запросом: тело уходит, доля — по байтам системы.
+        case sending(Double?)
+        /// Тело у сервиса, ждём ответ.
+        case awaitingService
         case interrupted
         case failed(String)
         case untranscribed
@@ -431,6 +435,10 @@ struct TranscriptScreen: View {
             .running(starting: true)
         case .running:
             .running(starting: false)
+        case let .sending(share):
+            .sending(share)
+        case .awaitingService:
+            .awaitingService
         case .interrupted:
             .interrupted
         case let .failed(message):
@@ -468,6 +476,13 @@ struct TranscriptScreen: View {
             }
         case let .running(starting):
             runningStrip(starting: starting)
+        case let .sending(share):
+            transferStrip(
+                title: share.map { "Отправляю запись · \(RecordStatus.percent($0))" } ?? "Отправляю запись",
+                fraction: share
+            )
+        case .awaitingService:
+            transferStrip(title: "Жду ответ сервиса", fraction: nil)
         case .interrupted:
             StatusStrip(tint: LoriPalette.warn) {
                 Label("Расшифровка прервалась", systemImage: "pause.circle")
@@ -517,6 +532,23 @@ struct TranscriptScreen: View {
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.muted)
             }
+        }
+    }
+
+    /// Облачная запись одним запросом — отправка и ожидание ответа. Полоса меряет
+    /// отправленные байты, а не расшифровку: поэтому заголовок говорит «Отправляю», а
+    /// не «Расшифровываю · 100%» в конце загрузки. Пока ждём ответ, доли нет вовсе —
+    /// полоса бегущим отрезком, без выдуманного процента. Строки движка под полосой
+    /// нет: она повторяла бы заголовок.
+    private func transferStrip(title: String, fraction: Double?) -> some View {
+        StatusStrip(tint: LoriPalette.info) {
+            SplitRow {
+                Text(title)
+                    .font(LoriFont.meta.weight(.semibold))
+                    .foregroundStyle(LoriPalette.ink)
+                stripTextButton("Остановить") { transcription.cancel(path) }
+            }
+            ProgressTrack(fraction: fraction, tint: LoriPalette.info)
         }
     }
 

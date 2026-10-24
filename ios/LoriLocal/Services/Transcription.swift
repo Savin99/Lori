@@ -394,6 +394,15 @@ enum TranscriptionRecordState: Equatable, Sendable {
     /// заголовков и проверяет, на месте ли движок.
     case starting
     case running
+    /// Облачная запись одним запросом, и тело запроса сейчас уходит: доля — сколько его
+    /// отправила система (`TransferPhase.sentShare`; nil — объём системе неизвестен).
+    /// Это **не** доля расшифровки, поэтому отдельное состояние, а не `running` с
+    /// процентами: «Расшифровываю · 100%» в конце загрузки было бы враньём.
+    case sending(Double?)
+    /// Запись у сервиса — тело ушло целиком, — и ждём его ответ. Сюда же попадает
+    /// облачная запись, которую оставили ждать, когда фоновое время кончилось: запрос
+    /// у системной передачи, ответ разбудит приложение (`interruptEverything`).
+    case awaitingService
     /// Работу оборвала система; запись встанет в очередь заново при возвращении.
     case interrupted
     /// Последняя попытка кончилась ошибкой; текст — для человека.
@@ -403,7 +412,7 @@ enum TranscriptionRecordState: Equatable, Sendable {
     /// показывать «Без расшифровки» и предлагать «Расшифровать».
     var isActive: Bool {
         switch self {
-        case .queued, .starting, .running: true
+        case .queued, .starting, .running, .sending, .awaitingService: true
         case .idle, .interrupted, .failed: false
         }
     }
@@ -490,6 +499,10 @@ final class TranscriptionService: ObservableObject {
     /// начала новой: фоновая задача читает его уже после того, как очередь опустела,
     /// и в этот промежуток успевает вклиниться следующая пачка.
     @Published private(set) var lastBatch: TranscriptionBatchOutcome?
+    /// Где сейчас запрос облачной записи — по счёту системной передачи
+    /// (`BackgroundTranscriptionTransport.report`). Пусто — запроса нет: запись готовит
+    /// аудио, разбирает ответ или считается на телефоне.
+    @Published private(set) var transfer: [String: TransferPhase] = [:]
 
     private struct Job {
         let entry: WorkspaceEntry
@@ -564,13 +577,46 @@ final class TranscriptionService: ObservableObject {
     }
     private var restartAfterCancel: [String: Restart] = [:]
 
+    /// Что сервис спрашивает у системной фоновой передачи. Отдельной структурой: тест
+    /// подменяет её, не трогая настоящую фоновую сессию (подставной `URLProtocol` в неё
+    /// не встаёт — «Only HTTP and HTTPS protocols are supported (no custom protocols)»).
+    struct SystemTransfers {
+        /// Лежит ли сейчас у системы запрос задания (по id задания).
+        var holds: @MainActor (String) -> Bool = { BackgroundTranscriptionTransport.shared.holdsTransfer(forJob: $0) }
+        /// Пришёл ли по заданию ответ, лежащий распиской.
+        var hasAnswer: @MainActor (String) -> Bool = { BackgroundTranscriptionTransport.shared.hasAnswer(forJob: $0) }
+        /// Отказался ли транспорт начать новую отправку в режиме «только готовые ответы».
+        var takeDeferral: @MainActor (String) -> Bool = { BackgroundTranscriptionTransport.shared.takeDeferral(forJob: $0) }
+    }
+
+    private let transfers: SystemTransfers
+    /// Облачные записи, которые оставили ждать ответ системы, когда фоновое время
+    /// кончилось (`interruptEverything`). Их Swift-задача не отменена и спит вместе с
+    /// процессом; разбудит её ответ сервиса.
+    private var parked: Set<String> = []
+    /// Записи, поднятые пробуждением системы после убитого процесса: доделываются только
+    /// готовыми ответами, без новой отправки (`BackgroundTranscriptionTransport.answersOnly`).
+    private var answersOnly: Set<String> = []
+    /// Куски движка «done из total» как есть — доля для полосы фоновой задачи складывается
+    /// из них и из фазы запроса текущего куска (`backgroundShare`).
+    private var parts: [String: Parts] = [:]
+    /// С какой минуты запрос в нынешней фазе: ожидание ответа меряется от конца загрузки.
+    private var transferSince: [String: Date] = [:]
+
+    struct Parts: Equatable, Sendable {
+        let done: Int
+        let total: Int
+    }
+
     /// Все пять движков создаются сразу: они ничего не занимают до первой расшифровки,
     /// а тестам удобно подменять набор целиком.
     init(
         engines: [TranscriptionEngineKind: any Transcribing]? = nil,
         interruptedStore: URL = InterruptedRecords.url,
-        availableMemory: @escaping @MainActor () -> UInt64 = { MemoryReport.availableBytes }
+        availableMemory: @escaping @MainActor () -> UInt64 = { MemoryReport.availableBytes },
+        transfers: SystemTransfers = SystemTransfers()
     ) {
+        self.transfers = transfers
         self.engines = engines ?? [
             .gigaam: GigaAMTranscriber(),
             .whisper: WhisperKitTranscriber(),
@@ -628,13 +674,27 @@ final class TranscriptionService: ObservableObject {
     /// сворачивает работу, и карточка не должна всё это время врать «расшифровывается».
     func state(for relativePath: String) -> TranscriptionRecordState {
         if interrupted.contains(relativePath) { return .interrupted }
-        if running.contains(relativePath) { return .running }
+        if running.contains(relativePath) { return runningState(for: relativePath) }
         if starting.contains(relativePath) { return .starting }
         if let position = queuePosition(for: relativePath) {
             return .queued(position: position, waitsForMemory: waitingForMemory.contains(relativePath))
         }
         if let message = failed[relativePath] { return .failed(message) }
         return .idle
+    }
+
+    /// Чем занята идущая запись. Фаза запроса видна только у записи одним запросом: у
+    /// записи по частям своя полоса «часть 3 из 9», и метаться между «Отправляю» и
+    /// «Расшифровываю» на каждой части она не должна. Оставленная ждать систему — всегда
+    /// «жду ответ сервиса»: другого с ней сейчас не происходит.
+    private func runningState(for path: String) -> TranscriptionRecordState {
+        if parked.contains(path) { return .awaitingService }
+        guard fraction[path] == nil else { return .running }
+        switch transfer[path] {
+        case let phase? where phase.isSending: return .sending(phase.sentShare)
+        case .awaiting?: return .awaitingService
+        default: return .running
+        }
     }
 
     /// Какая запись считается сейчас: самая давно начатая из идущих и запускающихся.
@@ -730,8 +790,15 @@ final class TranscriptionService: ObservableObject {
         waiting.append(Job(entry: entry, configuration: configuration, workspace: workspace))
         admit()
         // Просить фон только на переходе «ничего не шло → пошло»: задача одна на всю
-        // пачку, а записи, добавленные по ходу, входят в неё же.
-        if opensBatch { runway?.batchDidStart() }
+        // пачку, а записи, добавленные по ходу, входят в неё же. Исключение — задачу уже
+        // закрыли на истечении, а пачка не опустела (облачная запись ждёт ответ системы):
+        // тогда новой записи, поставленной по ходу, нужна новая заявка.
+        if opensBatch || runway?.wantsSubmission == true { runway?.batchDidStart() }
+        // Постановка из фона — «Расшифровать» в Dynamic Island, когда Lori не на экране.
+        // `admit` выше ещё не видел запасного окна: его открывает только что `batchDidStart`,
+        // и без второго захода запись простояла бы в очереди до возвращения в приложение,
+        // а на истечении окна стала бы «Прервано», так и не отправившись.
+        if !foreground, !waiting.isEmpty { admit() }
         return true
     }
 
@@ -751,6 +818,8 @@ final class TranscriptionService: ObservableObject {
         }
         connectionRetries.removeValue(forKey: relativePath)
         resumeOnReturn.remove(relativePath)
+        parked.remove(relativePath)
+        answersOnly.remove(relativePath)
         waiting.removeAll { $0.entry.relativePath == relativePath }
         waitingForMemory.remove(relativePath)
         // Снятая запись обратно в «запускается» не вернётся: задача до работы не дойдёт.
@@ -805,7 +874,29 @@ final class TranscriptionService: ObservableObject {
     /// Это не отмена человеком и не ошибка движка, и путать их нельзя — иначе
     /// карточка скажет «Ошибка» там, где никто не ошибся. Прерванные переживают
     /// перезапуск; готовые части восстанавливаются, незаконченная считается заново.
-    func interruptEverything() {
+    ///
+    /// **Кроме облачной записи, чей запрос уже у системной передачи.** Её HTTP-запрос
+    /// принадлежит фоновой `URLSession` и идёт в отдельном процессе системы, нашему
+    /// фоновому времени он не подчиняется («A session configured with this object hands
+    /// control of the transfers over to the system, which handles the transfers in a
+    /// separate process», `URLSessionConfiguration.background(withIdentifier:)`). Раньше
+    /// такая запись отменялась и становилась «Прервано»: ответ сервиса всё равно приходил
+    /// распиской, но доделывалась запись только тогда, когда человек вернётся в Lori, — на
+    /// телефоне это и выглядело как «вышел — и всё прекратилось». Теперь её Swift-задача
+    /// не отменяется и спит вместе с процессом; ответ будит приложение
+    /// (`sessionSendsLaunchEvents`), и запись доделывается в фоне
+    /// (`TranscriptionRunway.systemWokeForTransfers`). Убьют процесс — запись остаётся в
+    /// `interrupted.json` (задание сохранено на старте), и пробуждение доделает её по
+    /// расписке (`finishAfterSystemWake`).
+    ///
+    /// Запись, которая готовит аудио или разбирает уже пришедший ответ, у системы ничего
+    /// не держит — она прерывается как раньше: продолжение по расписке ничего не
+    /// отправит заново. Локальные движки — как раньше: прерывание и чекпоинты.
+    ///
+    /// Возвращает оставленные ждать записи — для журнала и для фоновой задачи, которой
+    /// при них нельзя ждать пустой очереди.
+    @discardableResult
+    func interruptEverything() -> [String] {
         for job in waiting {
             let path = job.entry.relativePath
             interrupted.insert(path)
@@ -815,7 +906,13 @@ final class TranscriptionService: ObservableObject {
         // Снятые человеком, но ещё сворачивающиеся записи не трогаем: обрыв системой не
         // должен воскресить то, что человек отменил, — иначе при ближайшем запуске она
         // поднялась бы сама.
-        for path in active.keys where !cancelling.contains(path) {
+        var kept: [String] = []
+        for path in active.keys.sorted() where !cancelling.contains(path) {
+            if lane[path]?.leavesDevice == true, let job = configurations[path], transfers.holds(job.id) {
+                parked.insert(path)
+                kept.append(path)
+                continue
+            }
             interrupted.insert(path)
             interrupting.insert(path)
             if inFlight[path] == nil { inFlight[path] = lane[path] }
@@ -824,10 +921,29 @@ final class TranscriptionService: ObservableObject {
         waiting.removeAll()
         waitingForMemory.removeAll()
         _ = persistJobs()
-        for task in active.values { task.cancel() }
+        for (path, task) in active where !parked.contains(path) { task.cancel() }
         queued = []
         waitingForMemory = []
         signalDrainIfIdle()
+        return kept
+    }
+
+    /// Что идёт и что ждёт — одной строкой для журнала: запись, движок, фаза. Без текста
+    /// расшифровки и без ключей — журнал забирают с телефона целиком.
+    func workSummary() -> String {
+        let going = active.keys.sorted().map { path -> String in
+            var words = ["«\(path)»", lane[path]?.rawValue ?? "?"]
+            if parked.contains(path) { words.append("ждёт ответ системы") }
+            if let phase = transfer[path] {
+                words.append(phase.journalWord)
+            } else if let piece = parts[path], piece.total > 1 {
+                words.append("часть \(min(piece.done + 1, piece.total)) из \(piece.total)")
+            } else if starting.contains(path) {
+                words.append("запускается")
+            }
+            return words.joined(separator: " ")
+        }
+        return "шло: \(going.isEmpty ? "ничего" : going.joined(separator: "; ")); в очереди: \(waiting.count)"
     }
 
     /// Продолжаем исходное задание с зафиксированными настройками. Новые облачные
@@ -924,7 +1040,13 @@ final class TranscriptionService: ObservableObject {
     func applicationDidEnterBackground() { foreground = false }
     func applicationDidBecomeActive(in workspace: WorkspaceStore) {
         foreground = true
+        // Оставленная ждать систему запись снова обычная: процесс на экране, и что с её
+        // запросом, видно по живой фазе передачи.
+        parked.removeAll()
         resumeOnReturn.formUnion(interrupted)
+        // Поднятая пробуждением запись идёт без права на новую отправку; если ей понадобится
+        // отправка, она станет «Прервано» — и тогда должна пойти заново, раз человек здесь.
+        resumeOnReturn.formUnion(answersOnly.intersection(active.keys))
         recoveryWorkspace = workspace
         resumeInterrupted(in: workspace)
         admit()
@@ -1030,6 +1152,10 @@ final class TranscriptionService: ObservableObject {
         startedAt[path] = nil
         starting.remove(path)
         cancelling.remove(path)
+        if parked.remove(path) != nil {
+            Journal.append("фон: оставленная ждать запись «\(path)» \(saved ? "доделана" : "не доделана")")
+        }
+        answersOnly.remove(path)
         // Прерванная запись остаётся в файле: её судьба решится при следующем запуске.
         if !interrupted.contains(path), inFlight.removeValue(forKey: path) != nil {
             connectionRetries.removeValue(forKey: path)
@@ -1153,6 +1279,191 @@ final class TranscriptionService: ObservableObject {
         return min(ceiling, seconds / (30 * 60))
     }
 
+    // MARK: - Доля для полосы фоновой задачи
+
+    /// Доля записи для системной полосы и откуда она взята.
+    struct BackgroundShare: Equatable, Sendable {
+        enum Source: String, Sendable {
+            /// Куски движка: «3 из 9 готовы».
+            case parts = "по частям движка"
+            /// Тело запроса уходит — доля по байтам, которые отправила система.
+            case upload = "по загрузке"
+            /// Тело ушло, ответа ещё нет: сколько ждём — оценка по времени.
+            case answer = "по оценке времени: ждём ответ сервиса"
+            /// Измерять нечего (запись готовит аудио, движок одним куском).
+            case estimate = "по оценке времени: доли нет"
+        }
+
+        let value: Double
+        let source: Source
+    }
+
+    /// Какую часть куска занимает загрузка его тела. Сколько займёт ответ сервиса, не
+    /// знает никто — ни мы, ни сервис заранее, — поэтому деление пополам: загрузка
+    /// меряется честно, а вторая половина заполняется оценкой и до конца не доходит.
+    nonisolated static let uploadWeight = 0.5
+    /// Потолок идущей записи. Сотню ставит только настоящее завершение: запись входит в
+    /// счёт «готово», когда сервис её сохранил.
+    nonisolated static let inFlightCeiling = 0.95
+    /// Через сколько секунд ожидания ответа закрыта половина остатка. Кривая
+    /// `t / (t + T)` нарочно не упирается в потолок: она замедляется, но движется и через
+    /// час — стоящую полосу планировщик снимает, а ответ на трёхчасовую запись идёт минуты.
+    nonisolated static let answerHalfTime: TimeInterval = 120
+
+    /// Доля одной идущей записи для полосы фоновой задачи — чистая функция.
+    ///
+    /// Контракт (`AGENTS.md`): записи без доли отдают оценку по времени, заведомо
+    /// приблизительную и с потолком ниже единицы. Раньше `pump` брал только измеренное, и
+    /// у ElevenLabs — вся запись одним запросом — доля была ноль всю загрузку и всё
+    /// ожидание ответа: ровно то, что планировщик принимает за подвисшую задачу.
+    ///
+    /// - `parts`: куски движка как он их назвал (`progress(done, total)`); nil — не звал.
+    /// - `transfer`: где запрос текущего куска (`TransferPhase`); nil — запроса нет.
+    /// - `waited`: сколько длится нынешняя фаза запроса (для ожидания ответа).
+    /// - `elapsed`: сколько идёт запись — для оценки, когда мерить нечего.
+    nonisolated static func backgroundShare(
+        parts: Parts?,
+        transfer: TransferPhase?,
+        waited: TimeInterval,
+        elapsed: TimeInterval
+    ) -> BackgroundShare {
+        let total = max(parts?.total ?? 1, 1)
+        let done = Double(min(max(parts?.done ?? 0, 0), total))
+        let value: Double
+        let source: BackgroundShare.Source
+        switch transfer {
+        case let phase? where phase.isSending:
+            // Объём неизвестен — отправка считается начатой, а не сделанной.
+            value = (done + uploadWeight * (phase.sentShare ?? 0)) / Double(total)
+            source = .upload
+        case .awaiting?:
+            let wait = max(0, waited)
+            value = (done + uploadWeight + (1 - uploadWeight) * wait / (wait + answerHalfTime)) / Double(total)
+            source = .answer
+        default:
+            if let parts, parts.total > 1 || parts.done >= max(parts.total, 1) {
+                // Движок режет на части — или сказал «1 из 1»: ответ уже в руках.
+                value = done / Double(total)
+                source = .parts
+            } else {
+                value = elapsedShare(seconds: elapsed)
+                source = .estimate
+            }
+        }
+        return BackgroundShare(value: min(inFlightCeiling, max(0, value)), source: source)
+    }
+
+    /// Доля идущей записи сейчас — то, что фоновая задача складывает в свою полосу.
+    func backgroundShare(for path: String, now: Date = Date()) -> BackgroundShare {
+        Self.backgroundShare(
+            parts: parts[path],
+            transfer: transfer[path],
+            waited: transferSince[path].map { now.timeIntervalSince($0) } ?? 0,
+            elapsed: startedAt[path].map { now.timeIntervalSince($0) } ?? 0
+        )
+    }
+
+    /// Фаза запроса записи сменилась (доклад транспорта, см. `transcribe`).
+    ///
+    /// Строку состояния меняет только у записи одним запросом: у записи по частям своя
+    /// строка «часть 3 из 9, жду ответ», и сбивать её процентами текущей части незачем.
+    /// В журнал — только смена фазы, а не каждый процент.
+    func transferChanged(_ path: String, _ phase: TransferPhase) {
+        guard running.contains(path) else { return }
+        let previous = transfer[path]
+        let now = Date()
+        switch phase {
+        case .answered:
+            if previous == .awaiting, let since = transferSince[path] {
+                Journal.append("передача «\(path)»: ответ сервиса через \(Int(now.timeIntervalSince(since))) с ожидания")
+            }
+            transfer[path] = nil
+            transferSince[path] = nil
+            return
+        case .awaiting:
+            if previous != .awaiting {
+                let sent = previous?.isSending == true ? transferSince[path].map { " за \(Int(now.timeIntervalSince($0))) с" } ?? "" : ""
+                Journal.append("передача «\(path)»: тело ушло целиком\(sent), жду ответ сервиса — полоса дальше по оценке времени")
+                transferSince[path] = now
+            }
+        case let .sending(_, expected):
+            if previous?.isSending != true {
+                let size = expected > 0 ? ", \(max(1, expected / 1024 / 1024)) МБ" : ""
+                Journal.append("передача «\(path)»: система отправляет запись\(size) — полоса по загрузке")
+                transferSince[path] = now
+            }
+        }
+        transfer[path] = phase
+        guard fraction[path] == nil else { return }
+        switch phase {
+        case .sending: progress[path] = phase.sentShare.map { "отправляю запись · \(Int(($0 * 100).rounded(.down)))%" } ?? "отправляю запись"
+        case .awaiting: progress[path] = "жду ответ сервиса"
+        case .answered: break
+        }
+    }
+
+    // MARK: - Пробуждение системой
+
+    /// Что сделано по пробуждению системой — для журнала, человек этого не видит.
+    struct SystemWakeReport: Equatable, Sendable {
+        /// Записи, поднятые по готовому ответу (процесс убивали, ответ лежал распиской).
+        var resumed: [String] = []
+        /// Записи, которые к пробуждению ещё шли (процесс спал, их задача ждала ответ).
+        var alive: [String] = []
+        var outcome: TranscriptionBatchOutcome?
+    }
+
+    /// Система разбудила приложение событиями фоновой передачи: ответ сервиса пришёл.
+    /// Возвращается, когда очередь опустела; окно пробуждения кончится раньше — фоновая
+    /// задача ответит системе сама (`TranscriptionRunway.systemWokeForTransfers`).
+    ///
+    /// Два случая. Процесс спал — Swift-задача записи, оставленная ждать
+    /// (`interruptEverything`), уже получила ответ от делегата сессии; здесь остаётся
+    /// дождаться, пока она разберёт и сохранит. Она идёт своим обычным ходом: задание по
+    /// частям может отправить следующую часть — это то же задание, начатое нажатием, и
+    /// система будит приложение снова, когда придёт и её ответ. Процесс убивали — в памяти пусто, запись
+    /// лежит в `interrupted.json` со снимком задания, а ответ — распиской: такая запись
+    /// ставится заново тем же заданием и в режиме `answersOnly` — расписка подставит ответ,
+    /// а запрос, на который ответа нет, в фоне не уйдёт (запись останется «Прервано» и
+    /// продолжится при возвращении). Правила контракта те же, что у `resumeInterrupted`:
+    /// облако — только со снимком задания; локальные движки здесь не поднимаются вовсе —
+    /// окна пробуждения им не хватит, а с телефона они ничего не ждут.
+    func finishAfterSystemWake(in workspace: WorkspaceStore?) async -> SystemWakeReport {
+        var report = SystemWakeReport(alive: active.keys.sorted())
+        if let workspace = workspace ?? recoveryWorkspace {
+            for path in resumeOrder() {
+                guard let kind = inFlight[path], kind.leavesDevice, let job = configurations[path],
+                      active[path] == nil, !waiting.contains(where: { $0.entry.relativePath == path }),
+                      transfers.hasAnswer(job.id) else { continue }
+                guard let entry = try? workspace.entry(at: path) else { continue }
+                answersOnly.insert(path)
+                Journal.append("фон: «\(path)» — ответ сервиса уже лежит распиской, доделываю без новой отправки")
+                if enqueue(entry, in: workspace, using: kind) {
+                    report.resumed.append(path)
+                } else {
+                    answersOnly.remove(path)
+                }
+            }
+        }
+        guard !isIdle else {
+            report.outcome = lastBatch
+            return report
+        }
+        report.outcome = await waitForDrain()
+        return report
+    }
+
+    /// Запись, поднятая пробуждением, упёрлась в запрос без ответа: в фоне его не шлём.
+    /// Это не ошибка и не отмена человеком — запись «Прервано» и продолжится сама, как
+    /// только Lori откроют (`resumeOnReturn`, если человек уже здесь).
+    private func deferToReturn(_ path: String) -> String? {
+        interrupted.insert(path)
+        if foreground { resumeOnReturn.insert(path) }
+        _ = persistJobs()
+        Journal.append("фон: «\(path)» нужна новая отправка — в фоне её не начинаю, продолжу при возвращении в Lori")
+        return nil
+    }
+
     /// Оценка остатка: прошедшее время, поделённое на готовую долю. Пока сделано
     /// меньше пяти процентов, оценка врёт слишком сильно, чтобы её показывать.
     /// Длительность записи читается один раз за прогон: на фоне самой расшифровки
@@ -1256,6 +1567,21 @@ final class TranscriptionService: ObservableObject {
             fraction[entry.relativePath] = nil
             partial[entry.relativePath] = nil
             remaining[entry.relativePath] = nil
+            transfer[entry.relativePath] = nil
+            transferSince[entry.relativePath] = nil
+            parts[entry.relativePath] = nil
+        }
+
+        // Пробуждение после убитого процесса: только готовые ответы, без новой отправки.
+        let answersOnly = self.answersOnly.contains(entry.relativePath)
+        let jobID = TranscriptionJob.current?.id
+        // Транспорт отказал в новой отправке — значит, всё, что движок собрал без этого
+        // ответа, сохранять нельзя (Gemini умеет продолжить после неудачного переспроса и
+        // отдал бы неполный текст). Отметка ставится на очереди транспорта до того, как
+        // движок получил отказ, поэтому проверка здесь детерминирована.
+        func deferred() -> Bool {
+            guard answersOnly, let jobID else { return false }
+            return transfers.takeDeferral(jobID)
         }
 
         do {
@@ -1263,32 +1589,47 @@ final class TranscriptionService: ObservableObject {
             let path = entry.relativePath
             let cloud = chosenKind.leavesDevice
             let started = Date()
-            let transcript = try await chosen.transcribe(
-                audioURL: url,
-                progress: { done, total in
-                    Task { @MainActor [weak self] in
-                        self?.progress[path] = Self.note(done: done, total: total, cloud: cloud)
-                        let share = Self.fraction(done: done, total: total)
-                        self?.fraction[path] = share
-                        self?.remaining[path] = share.flatMap {
-                            Self.estimate(elapsed: Date().timeIntervalSince(started), fraction: $0)
-                        }
-                    }
-                },
-                partial: { ready in
-                    Task { @MainActor [weak self] in
-                        self?.partial[path] = ready
-                    }
-                },
-                note: { text in
-                    Task { @MainActor [weak self] in
-                        // Пока движок готовится, процентов ещё нет — и полосе тут
-                        // взяться неоткуда, а строка состояния обязана жить.
-                        guard self?.fraction[path] == nil else { return }
-                        self?.progress[path] = text
-                    }
+            // Фазы запроса докладывает транспорт со своей очереди. `DispatchQueue.main`, а
+            // не `Task { @MainActor }`: главная очередь отдаёт по порядку, и последняя
+            // «отправка 99%» не обгонит «тело ушло» — иначе карточка так и стояла бы на
+            // «Отправляю · 99%» всё ожидание ответа.
+            let reporter: @Sendable (TransferPhase) -> Void = { [weak self] phase in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated { self?.transferChanged(path, phase) }
                 }
-            )
+            }
+            let transcript = try await BackgroundTranscriptionTransport.$answersOnly.withValue(answersOnly) {
+                try await BackgroundTranscriptionTransport.$report.withValue(reporter) {
+                    try await chosen.transcribe(
+                        audioURL: url,
+                        progress: { done, total in
+                            Task { @MainActor [weak self] in
+                                self?.parts[path] = Parts(done: done, total: total)
+                                self?.progress[path] = Self.note(done: done, total: total, cloud: cloud)
+                                let share = Self.fraction(done: done, total: total)
+                                self?.fraction[path] = share
+                                self?.remaining[path] = share.flatMap {
+                                    Self.estimate(elapsed: Date().timeIntervalSince(started), fraction: $0)
+                                }
+                            }
+                        },
+                        partial: { ready in
+                            Task { @MainActor [weak self] in
+                                self?.partial[path] = ready
+                            }
+                        },
+                        note: { text in
+                            Task { @MainActor [weak self] in
+                                // Пока движок готовится, процентов ещё нет — и полосе тут
+                                // взяться неоткуда, а строка состояния обязана жить.
+                                guard self?.fraction[path] == nil else { return }
+                                self?.progress[path] = text
+                            }
+                        }
+                    )
+                }
+            }
+            if deferred() { return deferToReturn(entry.relativePath) }
             failed[entry.relativePath] = nil
             await measure(url: url, kind: chosenKind, started: started)
             try Task.checkCancellation()
@@ -1297,6 +1638,7 @@ final class TranscriptionService: ObservableObject {
             didSaveTranscript?(entry.relativePath, TranscriptDocument.parse(transcript.markdown(title: "")).plainText)
             return saved
         } catch is CancellationError {
+            if deferred() { return deferToReturn(entry.relativePath) }
             // Отмену человек сделал сам: показывать её как ошибку незачем. А вот
             // обрыв системой — не отмена: там никто ничего не решал, и запись обязана
             // об этом сказать, иначе после возвращения в приложение её судьба неизвестна.
@@ -1305,6 +1647,7 @@ final class TranscriptionService: ObservableObject {
             }
             return nil
         } catch {
+            if deferred() { return deferToReturn(entry.relativePath) }
             if Task.isCancelled || interrupting.remove(entry.relativePath) != nil {
                 return nil
             }

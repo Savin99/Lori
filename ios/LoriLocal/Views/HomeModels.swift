@@ -137,6 +137,16 @@ struct RecordStatus: Equatable, Sendable {
                 showsBar: true,
                 fraction: fraction
             )
+        case let .sending(share):
+            // Доля отправленного тела, а не расшифровки — поэтому и слово другое: «100%»
+            // при «Расшифровываю» в конце загрузки читалось бы как готовая запись.
+            var text = "Отправляю"
+            if let share { text += " · \(percent(share))" }
+            return RecordStatus(text: text, tone: .working, symbol: nil, action: nil, showsBar: true, fraction: share)
+        case .awaitingService:
+            // Тело у сервиса, ответа ещё нет: сколько ждать, не знает никто, поэтому
+            // полоса — бегущий отрезок, а не выдуманная доля.
+            return RecordStatus(text: "Жду ответ сервиса", tone: .working, symbol: nil, action: nil, showsBar: true, fraction: nil)
         case .interrupted:
             return RecordStatus(text: "Прервано", tone: .waiting, symbol: "pause.circle", action: .resume, showsBar: false, fraction: nil)
         case let .failed(message):
@@ -370,7 +380,7 @@ extension TranscriptionRecordState {
     var allowsRename: Bool {
         switch self {
         case .idle, .failed: true
-        case .queued, .starting, .running, .interrupted: false
+        case .queued, .starting, .running, .sending, .awaitingService, .interrupted: false
         }
     }
 }
