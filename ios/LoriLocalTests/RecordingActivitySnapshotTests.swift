@@ -41,6 +41,7 @@ final class RecordingActivitySnapshotTests: XCTestCase {
             ("paused-call", state(.paused, reason: "звонок"), false),
             ("restored", state(.paused, reason: "приложение перезапускалось", canDiscard: true), false),
             ("stale", state(.recording), true),
+            ("saving", state(.saving), false),
             ("sent", state(.finished, note: "Отправлено на расшифровку"), false),
         ]
         for scheme in [ColorScheme.light, .dark] {
@@ -61,6 +62,7 @@ final class RecordingActivitySnapshotTests: XCTestCase {
             ("paused-call", state(.paused, reason: "звонок")),
             ("restored", state(.paused, reason: "приложение перезапускалось", canDiscard: true)),
             ("hour", state(.recording, recorded: 3_754)),
+            ("saving", state(.saving)),
         ]
         for (name, state) in cases {
             try attach(IslandMock(state: state, finishURL: url), scheme: .dark, named: "activity-island-\(name)")

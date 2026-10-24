@@ -17,6 +17,9 @@ struct RecordingActivityAttributes: ActivityAttributes {
             case recording
             /// Кусок закрыт, ждём «Продолжить» или «Расшифровать».
             case paused
+            /// Куски склеиваются в одну запись: таймер стоит, кнопок нет — нажимать
+            /// пока нечего.
+            case saving
             /// Запись собрана и ушла в список — короткое прощание перед уходом.
             case finished
         }
@@ -54,6 +57,9 @@ struct RecordingActivityAttributes: ActivityAttributes {
 
         /// Таймер перевалил за час — в строке появляется третья группа цифр.
         var showsHours: Bool { recorded >= 3600 }
+
+        /// Кнопки есть, пока запись можно поставить на паузу, продолжить или закончить.
+        var showsButtons: Bool { phase == .recording || phase == .paused }
     }
 
     /// Ссылка, по которой Lori открывается и заканчивает запись. Схема — bundle ID
@@ -71,6 +77,7 @@ enum RecordingActivityCopy {
         switch state.phase {
         case .recording: "Lori"
         case .paused: state.reason.map { "Пауза · \($0)" } ?? "Пауза"
+        case .saving: "Сохраняю…"
         case .finished: state.note ?? "Lori"
         }
     }
@@ -81,6 +88,7 @@ enum RecordingActivityCopy {
         switch state.phase {
         case .recording: return "Lori пишет звук"
         case .paused: return state.reason.map { "Lori на паузе: \($0)" } ?? "Lori на паузе"
+        case .saving: return "Lori сохраняет запись"
         case .finished: return state.note ?? "Lori"
         }
     }

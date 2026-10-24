@@ -6,9 +6,10 @@ import Foundation
 /// сказать, что продолжать уже можно, или ничего.
 enum RecordingAudioEvent: Equatable, Sendable {
     case interrupted(RecordingPauseReason)
-    /// Прерывание кончилось. Запись при этом **не** продолжается сама — владелец
-    /// решил ждать «Продолжить» (24 октября 2026), — меняются только слова в островке.
-    case interruptionEnded
+    /// Прерывание кончилось; `shouldResume` — система советует продолжить. Сама запись
+    /// продолжается только после звонка, который так и не соединился (отклонён,
+    /// пропущен); после разговора и всего прочего ждём «Продолжить» — меняются слова.
+    case interruptionEnded(shouldResume: Bool)
     case ignore
 }
 
@@ -47,7 +48,9 @@ enum RecordingInterruptions {
                 .flatMap(AVAudioSession.InterruptionReason.init(rawValue:))
             return .interrupted(reason(for: cause, inCall: inCall))
         case .ended:
-            return .interruptionEnded
+            let options = (userInfo?[AVAudioSessionInterruptionOptionKey] as? UInt)
+                .map(AVAudioSession.InterruptionOptions.init(rawValue:)) ?? []
+            return .interruptionEnded(shouldResume: options.contains(.shouldResume))
         @unknown default:
             return .ignore
         }
@@ -55,12 +58,31 @@ enum RecordingInterruptions {
 
     /// iOS 27: сессию выключили. Свою деактивацию (`source == .app`) пропускаем — это
     /// наша же пауза. Системная без `interruptionContext` («only present when the
-    /// session was interrupted by another application») — не чужое приложение, а сама
+    /// session was interrupted by another application») — не чужое приложение. Если по
+    /// маршруту видно, что входа больше нет, это «микрофон отключён»; иначе — сама
     /// звуковая система: «сбой звука».
-    static func deactivation(bySystem: Bool, interruption: AVAudioSession.InterruptionReason?, hasInterruptionContext: Bool, inCall: Bool) -> RecordingAudioEvent {
+    static func deactivation(
+        bySystem: Bool,
+        interruption: AVAudioSession.InterruptionReason?,
+        hasInterruptionContext: Bool,
+        inCall: Bool,
+        inputLost: Bool = false
+    ) -> RecordingAudioEvent {
         guard bySystem else { return .ignore }
-        guard hasInterruptionContext else { return .interrupted(.audioFailure) }
+        guard hasInterruptionContext else { return .interrupted(inputLost ? .microphoneLost : .audioFailure) }
         return .interrupted(reason(for: interruption, inCall: inCall))
+    }
+
+    /// iOS 27: рекомендация продолжить (`ResumptionContext.recommendation`). Сам
+    /// контекст создаёт только система (`init` недоступен), поэтому разбор — по уже
+    /// вынутому значению: эту функцию проверяют тесты, а вынимание — только iOS 27.
+    static func resumption(shouldResume: Bool) -> RecordingAudioEvent {
+        .interruptionEnded(shouldResume: shouldResume)
+    }
+
+    /// Пропал ли вход: на маршруте нет входов или путь звука на вход недоступен.
+    static func inputLost(currentInputs: [String], inputAvailable: Bool) -> Bool {
+        currentInputs.isEmpty || !inputAvailable
     }
 
     /// Смена маршрута. Пауза — только когда пропал **вход**: наушники без микрофона,
@@ -90,11 +112,57 @@ enum RecordingInterruptions {
     }
 }
 
-/// Идёт ли сейчас звонок — любой: сотовый, FaceTime, мессенджер через CallKit.
-/// `CXCallObserver` не требует ни прав, ни ключей в `Info.plist`.
+/// Перемена в звонках, как её видит запись.
+struct CallChange: Equatable, Sendable {
+    /// Хоть один звонок этого «эпизода» (от первого звонка до конца последнего)
+    /// соединился — с человеком говорили.
+    var connected: Bool
+    /// Звонков больше нет.
+    var allEnded: Bool
+}
+
+/// Звонки — для причины паузы и для решения, продолжать ли запись самой.
 @MainActor
-final class CallDetector {
+protocol CallMonitoring: AnyObject {
+    /// Идёт ли сейчас звонок — любой: сотовый, FaceTime, мессенджер через CallKit.
+    var isInCall: Bool { get }
+    /// Соединялся ли звонок в текущем эпизоде, а если звонков нет — в последнем.
+    var lastCallConnected: Bool { get }
+    var onChange: ((CallChange) -> Void)? { get set }
+}
+
+/// `CXCallObserver` не требует ни прав, ни ключей в `Info.plist`.
+///
+/// Соединялся ли звонок, видно по `CXCall.hasConnected`; закончившийся звонок
+/// система вскоре убирает из `calls`, поэтому ответ запоминается на весь эпизод.
+@MainActor
+final class CallDetector: NSObject, CallMonitoring, CXCallObserverDelegate {
     private let observer = CXCallObserver()
+    private var episodeConnected = false
+    private(set) var lastCallConnected = false
+    var onChange: ((CallChange) -> Void)?
+
+    override init() {
+        super.init()
+        // Запуск посреди разговора: эпизод уже идёт.
+        episodeConnected = observer.calls.contains { $0.hasConnected && !$0.hasEnded }
+        lastCallConnected = episodeConnected
+        observer.setDelegate(self, queue: .main)
+    }
 
     var isInCall: Bool { observer.calls.contains { !$0.hasEnded } }
+
+    nonisolated func callObserver(_ callObserver: CXCallObserver, callChanged call: CXCall) {
+        let connected = call.hasConnected
+        // `queue: .main` — делегата зовут на главном потоке.
+        MainActor.assumeIsolated { self.changed(callConnected: connected) }
+    }
+
+    private func changed(callConnected: Bool) {
+        if callConnected { episodeConnected = true }
+        lastCallConnected = episodeConnected
+        let allEnded = !isInCall
+        onChange?(CallChange(connected: episodeConnected, allEnded: allEnded))
+        if allEnded { episodeConnected = false }
+    }
 }

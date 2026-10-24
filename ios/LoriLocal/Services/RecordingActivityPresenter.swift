@@ -21,8 +21,9 @@ protocol RecordingActivityPresenting: AnyObject {
     /// Начать активность. Только на переднем плане — так требует ActivityKit.
     func start(_ state: RecordingActivityAttributes.ContentState, staleDate: Date?) throws
     func update(_ state: RecordingActivityAttributes.ContentState, staleDate: Date?) async
-    /// Закончить активность с этим знаком (`nil` — текущую) и сразу убрать её.
-    func end(token: String?, final state: RecordingActivityAttributes.ContentState?) async
+    /// Закончить активность с этим знаком и сразу убрать её. Знак обязателен: «текущая»
+    /// через пару секунд прощания могла стать активностью уже новой записи.
+    func end(token: String, final state: RecordingActivityAttributes.ContentState?) async
     /// Закончить все активности записи, в том числе висящие от прошлого запуска.
     func endAll() async
 }
@@ -69,9 +70,7 @@ final class LiveRecordingActivity: RecordingActivityPresenting {
         await activity.update(ActivityContent(state: state, staleDate: staleDate))
     }
 
-    func end(token: String?, final state: RecordingActivityAttributes.ContentState?) async {
-        let id = token ?? activity?.id
-        guard let id else { return }
+    func end(token id: String, final state: RecordingActivityAttributes.ContentState?) async {
         let content = state.map { ActivityContent(state: $0, staleDate: nil) }
         for candidate in Activity<RecordingActivityAttributes>.activities where candidate.id == id {
             await candidate.end(content, dismissalPolicy: .immediate)

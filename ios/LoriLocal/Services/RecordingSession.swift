@@ -66,6 +66,24 @@ struct RecordingSession: Codable, Equatable, Sendable {
         var file: String
         /// Длительность закрытого куска по самому файлу.
         var duration: TimeInterval
+        /// Сколько начала куска повторяет конец предыдущего: кусок начат сменой без
+        /// выключения микрофона (`RecordingDevice.rotate`), и новый рекордер пошёл
+        /// раньше, чем встал старый. При склейке это отрезается — если предыдущий кусок
+        /// в запись вошёл; пропал он — повтор и есть единственная копия этого звука.
+        var trimStart: TimeInterval
+
+        init(file: String, duration: TimeInterval, trimStart: TimeInterval = 0) {
+            self.file = file
+            self.duration = duration
+            self.trimStart = trimStart
+        }
+
+        init(from decoder: Decoder) throws {
+            let container = try decoder.container(keyedBy: CodingKeys.self)
+            file = try container.decode(String.self, forKey: .file)
+            duration = try container.decode(TimeInterval.self, forKey: .duration)
+            trimStart = try container.decodeIfPresent(TimeInterval.self, forKey: .trimStart) ?? 0
+        }
     }
 
     var id: UUID
@@ -80,11 +98,24 @@ struct RecordingSession: Codable, Equatable, Sendable {
     /// Кусок, который пишется сейчас. Записывается в файл **до** начала записи: убитый
     /// процесс оставит след, и при запуске будет ясно, какой файл был открыт.
     var active: String?
+    /// Повтор в начале идущего куска (см. `Chunk.trimStart`): переходит в кусок, когда
+    /// тот закроется.
+    var activeTrim: TimeInterval
+    /// Кусок, который начинается сменой, пока `active` ещё пишется. Тоже след до начала:
+    /// убитый посреди смены процесс оставит два открытых файла, и оба надо разобрать.
+    var incoming: String?
+    /// Номер следующего куска. Счётчик, а не «число кусков плюс один»: во время смены
+    /// открыты два куска, а отложенный в корзину номер не должен повториться.
+    var nextPart: Int
     /// Запись поднята с диска после перезапуска Lori.
     var restored: Bool
     /// Сколько кусков пришлось отложить в корзину нечитаемыми (процесс умер посреди
     /// куска). Нужен, чтобы сказать об этом словами, а не молча.
     var lostChunks: Int
+    /// Куда склеивается запись (`Recordings/…`), пока идёт «Расшифровать». Пишется до
+    /// переноса готового файла: убитый между переносом и уборкой процесс иначе оставил
+    /// бы и запись в списке, и её куски — и при запуске поднял бы её второй раз.
+    var destination: String?
 
     init(id: UUID = UUID(), startedAt: Date) {
         self.id = id
@@ -94,16 +125,42 @@ struct RecordingSession: Codable, Equatable, Sendable {
         interruptionEnded = false
         chunks = []
         active = nil
+        activeTrim = 0
+        incoming = nil
+        nextPart = 1
         restored = false
         lostChunks = 0
+        destination = nil
     }
 
-    /// Длительность закрытых кусков. Идущий кусок прибавляет рекордер.
-    var recorded: TimeInterval { chunks.reduce(0) { $0 + $1.duration } }
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        startedAt = try container.decode(Date.self, forKey: .startedAt)
+        state = try container.decode(State.self, forKey: .state)
+        reason = try container.decodeIfPresent(RecordingPauseReason.self, forKey: .reason)
+        interruptionEnded = try container.decodeIfPresent(Bool.self, forKey: .interruptionEnded) ?? false
+        chunks = try container.decodeIfPresent([Chunk].self, forKey: .chunks) ?? []
+        active = try container.decodeIfPresent(String.self, forKey: .active)
+        activeTrim = try container.decodeIfPresent(TimeInterval.self, forKey: .activeTrim) ?? 0
+        incoming = try container.decodeIfPresent(String.self, forKey: .incoming)
+        restored = try container.decodeIfPresent(Bool.self, forKey: .restored) ?? false
+        lostChunks = try container.decodeIfPresent(Int.self, forKey: .lostChunks) ?? 0
+        destination = try container.decodeIfPresent(String.self, forKey: .destination)
+        // Файл первой сборки, где счётчика не было: номер — после всех известных кусков.
+        nextPart = try container.decodeIfPresent(Int.self, forKey: .nextPart)
+            ?? (chunks.count + lostChunks + (active == nil ? 0 : 1) + (incoming == nil ? 0 : 1) + 1)
+    }
 
-    /// Имя следующего куска: номера не повторяются, даже если кусок отложен в корзину.
-    var nextChunkName: String {
-        "part-\(chunks.count + lostChunks + 1).m4a"
+    /// Длительность закрытых кусков без повторов на стыках. Идущий кусок прибавляет рекордер.
+    var recorded: TimeInterval {
+        chunks.reduce(0) { $0 + max(0, $1.duration - $1.trimStart) }
+    }
+
+    /// Имя следующего куска; номер больше не повторится, даже если кусок уйдёт в корзину.
+    mutating func takeChunkName() -> String {
+        defer { nextPart += 1 }
+        return "part-\(nextPart).m4a"
     }
 
     /// Слова причины для островка и приложения.
@@ -131,9 +188,23 @@ struct RecordingSessionStore: Sendable {
 
     func url(for chunk: String) -> URL { directory.appending(path: chunk) }
 
-    func load() -> RecordingSession? {
-        guard let data = try? Data(contentsOf: sessionURL) else { return nil }
-        return try? JSONDecoder.recording.decode(RecordingSession.self, from: data)
+    /// Сессия с диска. `nil` — файла нет; файл есть, но не читается — ошибка, а не
+    /// `nil`: молча считать незаконченную запись отсутствующей значило бы стереть её
+    /// куски следующим «Записать».
+    func load() throws -> RecordingSession? {
+        guard FileManager.default.fileExists(atPath: sessionURL.path) else { return nil }
+        let data = try Data(contentsOf: sessionURL)
+        return try JSONDecoder.recording.decode(RecordingSession.self, from: data)
+    }
+
+    /// Звуковые файлы в папке сессии — всё, кроме самого `session.json` и недоделанной
+    /// склейки. По ним видно, есть ли что спасать, прежде чем убрать папку.
+    func audioFiles() -> [URL] {
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: directory.path) else { return [] }
+        return names
+            .filter { $0.hasSuffix(".m4a") && !$0.hasPrefix(RecordingAssembler.temporaryPrefix) }
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+            .map { directory.appending(path: $0) }
     }
 
     /// Пишется атомарно и с защитой «до первой разблокировки»: запись идёт и на

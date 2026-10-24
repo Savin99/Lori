@@ -6,6 +6,8 @@ enum AudioCaptureError: LocalizedError, Equatable {
     case noRecording
     /// Сессию записи не дали включить: микрофон держит звонок или другое приложение.
     case microphoneBusy
+    /// Смена куска: старый рекордер уже встал и закрыл файл, а новый не пошёл.
+    case handoverFailed
 
     var errorDescription: String? {
         switch self {
@@ -15,8 +17,19 @@ enum AudioCaptureError: LocalizedError, Equatable {
             "Запись не началась: микрофон сейчас недоступен. Если звук пишет другое приложение, закрой его и попробуй снова."
         case .microphoneBusy:
             "Микрофон сейчас занят — например, идёт звонок. Попробуй, когда он закончится."
+        case .handoverFailed:
+            "Запись встала при смене куска: новый кусок не начался. Записанное сохранено."
         }
     }
+}
+
+/// Как прошла смена куска без выключения микрофона (`RecordingDevice.rotate`).
+struct ChunkHandover: Equatable, Sendable {
+    /// Сколько начала нового куска повторяет конец старого: новый рекордер пошёл раньше,
+    /// чем встал старый. При склейке это отрезается.
+    var overlap: TimeInterval
+    /// Перекрыть не вышло, и между кусками дыра — её оценка сверху. `nil` — дыры нет.
+    var gap: TimeInterval?
 }
 
 /// То, чем запись трогает звуковое железо. Отдельным протоколом, чтобы модульные
@@ -38,11 +51,21 @@ protocol RecordingDevice: AnyObject {
     /// Начинает кусок в файл. Файл появляется сразу, но читаемым становится после `end()`.
     func begin(at url: URL) throws
     /// Закрывает кусок: дописывает оглавление m4a. Без этого файл не прочитать.
+    /// Посреди смены (`rotate`) закрывает старый кусок, а начатый новый выбрасывает:
+    /// весь его звук — повтор хвоста старого.
     func end()
+    /// Закрывает идущий кусок и продолжает в `url`, не выключая сессию.
+    ///
+    /// Возвращает `nil`, если смену оборвал `end()`. Бросает до того, как тронул старый
+    /// кусок, — старый пишется дальше; бросает `handoverFailed` — старый уже закрыт, а
+    /// новый не пошёл.
+    func rotate(to url: URL) async throws -> ChunkHandover?
     /// Громкость 0…1 для живой волны, пока кусок пишется.
     func level() -> Double?
     /// Входы текущего маршрута: по ним видно, пропал ли микрофон при смене маршрута.
     func currentInputs() -> [String]
+    /// Есть ли вообще путь звука на вход (`AVAudioSession.isInputAvailable`).
+    var isInputAvailable: Bool { get }
 }
 
 /// Настоящий микрофон: `AVAudioRecorder`, AAC 44,1 кГц моно — как и раньше.
@@ -50,6 +73,16 @@ protocol RecordingDevice: AnyObject {
 final class MicrophoneDevice: NSObject, RecordingDevice, AVAudioRecorderDelegate {
     var onFailure: (() -> Void)?
     private var recorder: AVAudioRecorder?
+    /// Новый рекордер во время смены куска: уже пишет, пока старый ещё не встал.
+    private var incoming: AVAudioRecorder?
+
+    /// Через сколько после `deviceCurrentTime` стартует новый рекордер. Пример Apple у
+    /// `record(atTime:)` берёт 0,01 с; здесь запас больше — сначала рекордер создаёт
+    /// файл и готовит очередь (`prepareToRecord`), и это не должно съесть отсрочку.
+    static let handoverLead: TimeInterval = 0.1
+    /// Сколько оба пишут вместе, прежде чем старый встанет. Перекрытие — это отсрочка
+    /// плюс эти доли секунды; при склейке оно отрезается.
+    static let handoverWait: Duration = .milliseconds(350)
 
     /// Формат кусков. Вычисляемое свойство, а не хранимое: словарь `[String: Any]` не
     /// `Sendable`, а нужен он и вне главного актора (заглушка, тесты склейки).
@@ -64,12 +97,11 @@ final class MicrophoneDevice: NSObject, RecordingDevice, AVAudioRecorderDelegate
 
     var currentTime: TimeInterval { recorder?.currentTime ?? 0 }
 
+    /// Асинхронный вариант, а не блок: заголовок `AVAudioApplication.h` предупреждает,
+    /// что блок «may be called in a different thread context», а блок, написанный внутри
+    /// класса на главном акторе, Swift 6 считает главным — и проверяет это в рантайме.
     func requestPermission() async -> Bool {
-        await withCheckedContinuation { continuation in
-            AVAudioApplication.requestRecordPermission { granted in
-                continuation.resume(returning: granted)
-            }
-        }
+        await AVAudioApplication.requestRecordPermission()
     }
 
     func activate() throws {
@@ -107,11 +139,72 @@ final class MicrophoneDevice: NSObject, RecordingDevice, AVAudioRecorderDelegate
     }
 
     func end() {
+        if let incoming {
+            // Новый кусок посреди смены — сплошь повтор хвоста старого: оба встают сейчас.
+            self.incoming = nil
+            incoming.delegate = nil
+            incoming.stop()
+            try? FileManager.default.removeItem(at: incoming.url)
+        }
         guard let recorder else { return }
         self.recorder = nil
         // Делегат снимается до `stop()`: своя остановка — не сбой.
         recorder.delegate = nil
         recorder.stop()
+    }
+
+    /// Смена куска без выключения сессии.
+    ///
+    /// Сначала с перекрытием: новый рекордер стартует `record(atTime:)` по часам старого
+    /// (`deviceCurrentTime` — время звукового устройства, общее для рекордеров; так
+    /// синхронизирует два рекордера пример Apple у `record(atTime:)`), оба пишут
+    /// `handoverWait`, и только потом старый встаёт. Перекрытие — сколько успел записать
+    /// новый к остановке старого; оно отрезается при склейке. Не пошёл новый рекордер —
+    /// смена с дырой: новый готовится заранее, и дыра — это только `stop()` старого и
+    /// `record()` нового.
+    func rotate(to url: URL) async throws -> ChunkHandover? {
+        guard let old = recorder, incoming == nil else { throw AudioCaptureError.noRecording }
+        let next = try AVAudioRecorder(url: url, settings: Self.settings)
+        next.isMeteringEnabled = true
+        if next.record(atTime: old.deviceCurrentTime + Self.handoverLead) {
+            incoming = next
+            try? await Task.sleep(for: Self.handoverWait)
+            // `end()` во время смены уже всё закрыл и убрал новый кусок.
+            guard incoming === next, recorder === old else { return nil }
+            incoming = nil
+            let overlap = next.currentTime
+            if next.isRecording, overlap > 0.01 {
+                old.delegate = nil
+                old.stop()
+                next.delegate = self
+                recorder = next
+                return ChunkHandover(overlap: overlap, gap: nil)
+            }
+            next.stop()
+        }
+        try? FileManager.default.removeItem(at: url)
+        return try handOverWithGap(from: old, to: url)
+    }
+
+    private func handOverWithGap(from old: AVAudioRecorder, to url: URL) throws -> ChunkHandover {
+        let next = try AVAudioRecorder(url: url, settings: Self.settings)
+        next.isMeteringEnabled = true
+        guard next.prepareToRecord() else {
+            try? FileManager.default.removeItem(at: url)
+            throw AudioCaptureError.noRecording
+        }
+        let before = old.deviceCurrentTime
+        old.delegate = nil
+        old.stop()
+        guard next.record() else {
+            recorder = nil
+            try? FileManager.default.removeItem(at: url)
+            throw AudioCaptureError.handoverFailed
+        }
+        next.delegate = self
+        recorder = next
+        // Сверху: сюда входит и время, пока старый дописывает оглавление.
+        return ChunkHandover(overlap: 0, gap: max(0, next.deviceCurrentTime - before))
     }
 
     func level() -> Double? {
@@ -123,6 +216,8 @@ final class MicrophoneDevice: NSObject, RecordingDevice, AVAudioRecorderDelegate
     func currentInputs() -> [String] {
         AVAudioSession.sharedInstance().currentRoute.inputs.map(\.uid)
     }
+
+    var isInputAvailable: Bool { AVAudioSession.sharedInstance().isInputAvailable }
 
     /// Средняя мощность приходит в децибелах от -160 до 0; для индикатора хватает верхних 50 дБ.
     static func normalizedLevel(_ decibels: Float) -> Double {
@@ -145,7 +240,8 @@ final class MicrophoneDevice: NSObject, RecordingDevice, AVAudioRecorderDelegate
     }
 
     private func stoppedOnItsOwn(_ id: ObjectIdentifier) {
-        guard let recorder, ObjectIdentifier(recorder) == id else { return }
+        let mine = [recorder, incoming].compactMap { $0 }.contains { ObjectIdentifier($0) == id }
+        guard mine else { return }
         onFailure?()
     }
 }
@@ -189,6 +285,16 @@ final class StubRecordingDevice: RecordingDevice {
         self.startedAt = nil
         try? Self.writeTone(seconds: max(0.2, Date.now.timeIntervalSince(startedAt)), to: url)
     }
+
+    /// Заглушка меняет кусок мгновенно и без перекрытия: звук у неё — тон по часам.
+    func rotate(to url: URL) async throws -> ChunkHandover? {
+        guard self.url != nil else { throw AudioCaptureError.noRecording }
+        end()
+        try begin(at: url)
+        return ChunkHandover(overlap: 0, gap: nil)
+    }
+
+    var isInputAvailable: Bool { true }
 
     func level() -> Double? {
         guard startedAt != nil else { return nil }
