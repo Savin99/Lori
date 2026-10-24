@@ -797,8 +797,11 @@ final class TranscriptionService: ObservableObject {
         // Постановка из фона — «Расшифровать» в Dynamic Island, когда Lori не на экране.
         // `admit` выше ещё не видел запасного окна: его открывает только что `batchDidStart`,
         // и без второго захода запись простояла бы в очереди до возвращения в приложение,
-        // а на истечении окна стала бы «Прервано», так и не отправившись.
-        if !foreground, !waiting.isEmpty { admit() }
+        // а на истечении окна стала бы «Прервано», так и не отправившись. Второй заход —
+        // только облачным: им окна хватает отдать запрос системе, а локальной записи
+        // 30 секунд не хватит — она начала бы считать, чтобы тут же стать «Прервано»
+        // (контракт: «для них приложение открывается»).
+        if !foreground, !waiting.isEmpty { admit(cloudOnly: true) }
         return true
     }
 
@@ -1075,10 +1078,14 @@ final class TranscriptionService: ObservableObject {
 
     /// Берёт из очереди всё, чему хватает места, и запускает. Зовётся после каждого
     /// добавления и после каждого завершения — другого способа освободить полосу нет.
-    private func admit() {
+    private func admit(cloudOnly: Bool = false) {
         var held: [Job] = []
         var heldForMemory: Set<String> = []
         for job in waiting {
+            guard !cloudOnly || job.kind.leavesDevice else {
+                held.append(job)
+                continue
+            }
             switch admission(for: job) {
             case .go:
                 start(job)
