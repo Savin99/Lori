@@ -85,13 +85,110 @@ final class TranscriptionRunway: ObservableObject {
     var displayTitle: (String) -> String? = { _ in nil }
 
     /// То, чем Runway трогает систему. Отдельной структурой, чтобы тест подменял это и не
-    /// включал настоящему телефону вечный экран.
+    /// включал настоящему телефону вечный экран, не подавал заявок настоящему планировщику
+    /// и мог позвать обработчики так, как зовёт их система, — с чужой очереди.
     struct SystemHooks {
-        /// Приложение на виду прямо сейчас — начальное состояние до первого уведомления.
+        /// Приложение на виду прямо сейчас: начальное состояние до первого уведомления и
+        /// вопрос «можно ли подать заявку» (`batchDidStart`).
         var isActive: @MainActor () -> Bool = { UIApplication.shared.applicationState == .active }
         /// `UIApplication.isIdleTimerDisabled`: пока `true`, экран не гаснет по таймеру автоблокировки.
         var setScreenAwake: @MainActor (Bool) -> Void = { UIApplication.shared.isIdleTimerDisabled = $0 }
         var notifications: NotificationCenter = .default
+
+        // MARK: Планировщик
+
+        /// Принята ли регистрация обработчика (`register`).
+        var isRegistered: @MainActor () -> Bool = { TranscriptionRunway.isRegistered }
+        /// Подавать ли заявку асинхронно, вне главного потока (iOS 27, `submitTaskRequest`).
+        var submitsAsynchronously = TranscriptionRunway.submitsAsynchronouslyByDefault
+        /// Синхронная подача (`submit`, iOS 26).
+        var submit: @MainActor (BGTaskRequest) throws -> Void = { try BGTaskScheduler.shared.submit($0) }
+        /// Асинхронная подача — зовётся вне главного актора.
+        var submitAsync: @Sendable (BGTaskRequest) async throws -> Void = TranscriptionRunway.systemSubmit
+        /// Ждущие заявки по идентификаторам. Ответ приходит с чужой очереди.
+        var pendingRequests: @Sendable (@escaping @Sendable ([String]) -> Void) -> Void = TranscriptionRunway.systemPendingRequests
+        var cancelRequest: @MainActor (String) -> Void = { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: $0) }
+
+        // MARK: UIKit и фоновая передача
+
+        /// `beginBackgroundTask(withName:expirationHandler:)`: UIKit зовёт обработчик на
+        /// главном потоке (`NS_SWIFT_UI_ACTOR` в заголовке).
+        var beginBackgroundTask: @MainActor (String, @escaping @MainActor () -> Void) -> UIBackgroundTaskIdentifier = {
+            UIApplication.shared.beginBackgroundTask(withName: $0, expirationHandler: $1)
+        }
+        var endBackgroundTask: @MainActor (UIBackgroundTaskIdentifier) -> Void = { UIApplication.shared.endBackgroundTask($0) }
+        /// Пересоздать фоновую сессию и узнать, когда её события доставлены.
+        var reconnectTransfers: @MainActor (@escaping @Sendable () -> Void) -> Void = {
+            BackgroundTranscriptionTransport.shared.reconnect(completion: $0)
+        }
+    }
+
+    /// iOS 27 — асинхронно: синхронный `submit(_:)` там объявлен устаревшим.
+    nonisolated static var submitsAsynchronouslyByDefault: Bool {
+        if #available(iOS 27.0, *) { return true }
+        return false
+    }
+
+    /// Асинхронная подача заявки системе. `nonisolated`: «Do not call this method from the
+    /// main thread» (`BGTaskScheduler.h`, `submitTaskRequest`).
+    nonisolated static func systemSubmit(_ request: BGTaskRequest) async throws {
+        if #available(iOS 27.0, *) {
+            try await BGTaskScheduler.shared.submitTaskRequest(request)
+        } else {
+            try BGTaskScheduler.shared.submit(request)
+        }
+    }
+
+    /// Ждущие заявки планировщика. «The handler may execute on a background thread»
+    /// (`BGTaskScheduler.h`) — замерено: в симуляторе ответ приходит с
+    /// `com.apple.root.utility-qos`.
+    ///
+    /// Ловушки `register` здесь **нет**, и это проверено, а не предположено (ревью 24 октября
+    /// 2026 сочло иначе). У этого метода есть асинхронный вариант, и Swift импортирует его
+    /// обработчик как `@Sendable` — так выглядит интерфейс, который видит компилятор
+    /// (`swift-synthesize-interface`, модуль `BackgroundTasks.BGTaskScheduler`):
+    /// `getPendingTaskRequests(completionHandler: @escaping @Sendable ([BGTaskRequest]) -> Void)`.
+    /// `@Sendable`-замыкание изоляцию главного актора не наследует, и проверки очереди в нём
+    /// нет — опыт с прежним кодом в модуле приложения (Swift 6) ответ с чужой очереди
+    /// пережил. У `register` обработчик импортирован без `@Sendable`
+    /// (`launchHandler: @escaping (BGTask) -> Void`) — оттуда и прежний крэш. `nonisolated` и
+    /// явный `@Sendable` оставлены страховкой: на случай, если импорт изменится, и чтобы
+    /// это место не служило образцом для обработчиков вроде `register`.
+    nonisolated static func systemPendingRequests(_ reply: @escaping @Sendable ([String]) -> Void) {
+        BGTaskScheduler.shared.getPendingTaskRequests { @Sendable requests in
+            reply(requests.map(\.identifier))
+        }
+    }
+
+    /// Системная задача так, как её видит Runway. Протоколом, а не `BGContinuedProcessingTask`:
+    /// ту в тесте не создать (`init` у `BGTask` — `NS_UNAVAILABLE`), а без этого истечение,
+    /// закрытие и полоса оставались бы непроверенными.
+    @MainActor
+    protocol RunwayTask: AnyObject {
+        var totalUnitCount: Int64 { get set }
+        var completedUnitCount: Int64 { get set }
+        /// Обработчик истечения. Система зовёт его со своей очереди — поэтому `@Sendable`.
+        func setExpirationHandler(_ handler: (@Sendable () -> Void)?)
+        func setTaskCompleted(success: Bool)
+        func updateSubtitle(_ subtitle: String)
+    }
+
+    @available(iOS 26.0, *)
+    private final class SystemTask: RunwayTask {
+        private let task: BGContinuedProcessingTask
+        init(_ task: BGContinuedProcessingTask) { self.task = task }
+
+        var totalUnitCount: Int64 {
+            get { task.progress.totalUnitCount }
+            set { task.progress.totalUnitCount = newValue }
+        }
+        var completedUnitCount: Int64 {
+            get { task.progress.completedUnitCount }
+            set { task.progress.completedUnitCount = newValue }
+        }
+        func setExpirationHandler(_ handler: (@Sendable () -> Void)?) { task.expirationHandler = handler }
+        func setTaskCompleted(success: Bool) { task.setTaskCompleted(success: success) }
+        func updateSubtitle(_ subtitle: String) { task.updateTitle("Расшифровка", subtitle: subtitle) }
     }
 
     private let hooks: SystemHooks
@@ -237,7 +334,7 @@ final class TranscriptionRunway: ObservableObject {
                     box.task.setTaskCompleted(success: false)
                     return
                 }
-                await runway.drive(box.task)
+                await runway.drive(SystemTask(box.task))
             }
         }
         registration.settle(accepted)
@@ -257,6 +354,10 @@ final class TranscriptionRunway: ObservableObject {
 
     /// Ждёт ли заявка того, чтобы приложение стало активным.
     private var deferred = false
+    /// Номер последней поданной заявки. На iOS 27 ответ планировщика приходит когда
+    /// угодно, и ответ на прежнюю заявку не должен решать за новую: ни снимать её отказом,
+    /// ни оставлять в планировщике заявку, которую уже никто не ждёт.
+    private var submission = 0
     /// Задача, которую ведём сейчас. Планировщик может запустить задачу повторно, и два
     /// `drive` разом мешали бы друг другу: оба пишут прогресс и оба зовут `batchDidFinish`,
     /// а тот сбрасывает `submitted` — и приложение подаёт заявку по кругу.
@@ -272,31 +373,35 @@ final class TranscriptionRunway: ObservableObject {
     /// Обработчики системы из `handleEventsForBackgroundURLSession`: звать их можно только
     /// тогда, когда записи сохранены, — после них система вправе снова усыпить процесс.
     private var wakeCompletions: [() -> Void] = []
+    /// События пробуждения уже доставлены (`urlSessionDidFinishEvents`).
+    private var wakeDelivered = false
 
     var canExecuteInBackground: Bool { ongoing != nil || grace != .invalid || wake != .invalid }
     var wantsSubmission: Bool { lostTask && !submitted && ongoing == nil }
+    /// Заявка подана и ещё нужна, и сколько ответов планировщика уже разобрано — для
+    /// тестов гонок асинхронной подачи: «ничего не изменилось» иначе не дождаться.
+    var hasLiveSubmission: Bool { submitted }
+    private(set) var answeredSubmissions = 0
 
     /// Одна запущенная системой задача и всё, что к ней относится.
     ///
     /// Своим объектом, потому что истечение теперь может закрыть задачу раньше, чем
     /// опустеет очередь (облачная запись ждёт ответ системы), — и `drive`, проснувшийся
-    /// потом, должен знать, что задача уже отдана. Хранится `BGTask`: свойство с типом
-    /// iOS 26 нельзя пометить `@available`, а приводить тип можно на месте. Живёт на
-    /// главном акторе, как и всё, что её трогает, — истечение перевозится сюда задачей.
+    /// потом, должен знать, что задача уже отдана. Живёт на главном акторе, как и всё, что
+    /// её трогает, — истечение перевозится сюда задачей.
     @MainActor
     private final class Drive {
-        let task: BGTask
+        let task: any RunwayTask
         let started = Date()
         var closed = false
         var ticker: Task<Void, Never>?
-        /// Последнее, что отдано полосе. Полоса не идёт назад: доля записи может на миг
-        /// упасть (ответ получен — фаза запроса сброшена, а движок ещё не сказал «1 из 1»),
-        /// и системе это выглядело бы откатом работы.
+        /// Последнее, что отдано полосе, и знаменатель, при котором отдано (`barUnits`).
         var completed: Int64 = 0
+        var total = 0
         /// Откуда последняя доля каждой записи — в журнал идёт только смена источника.
         var sources: [String: TranscriptionService.BackgroundShare.Source] = [:]
 
-        init(task: BGTask) { self.task = task }
+        init(task: any RunwayTask) { self.task = task }
     }
 
     /// Единиц полосы на запись. Миллион, а не тысяча: оценка ожидания ответа нарочно
@@ -330,7 +435,7 @@ final class TranscriptionRunway: ObservableObject {
         // foreground … as a result of a person’s action» (`BGContinuedProcessingTaskRequest`),
         // а из фона её не подать — облачной записи хватает запасного окна, чтобы запрос
         // ушёл системе, дальше её ведёт фоновая передача.
-        guard UIApplication.shared.applicationState == .active else {
+        guard hooks.isActive() else {
             deferred = true
             Journal.append("фон: приложение ещё не активно, заявку откладываю")
             beginGrace()
@@ -343,7 +448,7 @@ final class TranscriptionRunway: ObservableObject {
             return
         }
         // Без принятой регистрации `submit` не отказывает, а убивает приложение.
-        guard Self.isRegistered else {
+        guard hooks.isRegistered() else {
             submitted = false
             state = .foregroundOnly("Система не приняла регистрацию фоновой задачи — работа идёт, пока приложение открыто.")
             Journal.append("фон: регистрация \(Self.taskIdentifier) не принята, заявку не подаём")
@@ -369,51 +474,68 @@ final class TranscriptionRunway: ObservableObject {
         // «on an arbitrary queue after an arbitrary amount of delay» (`BGTaskScheduler.h`).
         state = .foregroundOnly("Система ещё готовит фоновое выполнение. Если времени не хватит, работа продолжится при возвращении.")
         beginGrace()
+        submission += 1
+        let generation = submission
         let records = service.batchTotal
-        if #available(iOS 27.0, *) {
+        if hooks.submitsAsynchronously {
             // iOS 27: синхронный `submit(_:)` объявлен устаревшим «to capture all error
             // conditions», замена — `submitTaskRequest(_:)`, и её «Do not call … from the
             // main thread». Отсюда отдельная задача вне главного актора. Идентификатор не
             // меняем: форма с `.*` из заголовка на iOS 26.5 ломала регистрацию (таблица
             // выше), а проверить iOS 27 можно только на телефоне — по этим строкам журнала.
             let box = RequestBox(request: request)
+            let submit = hooks.submitAsync
             Journal.append("фон: подаю заявку \(request.identifier) через submitTaskRequest (iOS \(Self.systemVersion)), записей \(records)")
             Task.detached(priority: .userInitiated) { [weak self] in
                 do {
-                    try await BGTaskScheduler.shared.submitTaskRequest(box.request)
-                    await self?.submissionAccepted(api: "submitTaskRequest", records: records)
+                    try await submit(box.request)
+                    await self?.submissionAccepted(generation, api: "submitTaskRequest", records: records)
                 } catch {
-                    await self?.submissionRefused(error)
+                    await self?.submissionRefused(generation, error)
                 }
             }
         } else {
             do {
-                try BGTaskScheduler.shared.submit(request)
-                submissionAccepted(api: "submit", records: records)
+                try hooks.submit(request)
+                submissionAccepted(generation, api: "submit", records: records)
             } catch {
-                submissionRefused(error)
+                submissionRefused(generation, error)
             }
         }
     }
 
     /// Коробка для перевозки заявки в задачу вне главного актора: `BGTaskRequest` —
     /// класс Objective-C без `Sendable`, а трогает его после передачи только планировщик.
-    @available(iOS 26.0, *)
     private struct RequestBox: @unchecked Sendable {
-        let request: BGContinuedProcessingTaskRequest
+        let request: BGTaskRequest
     }
 
-    private func submissionAccepted(api: String, records: Int) {
+    private func submissionAccepted(_ generation: Int, api: String, records: Int) {
+        answeredSubmissions += 1
         Journal.append("фон: заявка \(Self.taskIdentifier) подана (\(api), iOS \(Self.systemVersion)), записей \(records)")
+        guard generation == submission, submitted else {
+            // Ответ на iOS 27 пришёл позже, чем кончилась пачка: `cancel` в `batchDidFinish`
+            // тогда снимать было нечего, и задача запустилась бы впустую. Снимаем сейчас —
+            // но только если новой заявки нет: идентификатор у всех один, и `cancel` снял
+            // бы и её. Новая сама заменит прежнюю у планировщика.
+            if submitted {
+                Journal.append("фон: это ответ на прежнюю заявку — действует новая, её не трогаю")
+            } else {
+                hooks.cancelRequest(Self.taskIdentifier)
+                Journal.append("фон: заявка принята, когда пачка уже кончилась, — снимаю её")
+            }
+            return
+        }
         // Подана — ещё не значит «в очереди планировщика»: на iOS 27 отказ мог бы прийти
-        // и иначе. Список ждущих заявок система отдаёт сама — пишем его рядом.
-        BGTaskScheduler.shared.getPendingTaskRequests { requests in
-            Journal.append("фон: у планировщика ждут: \(requests.isEmpty ? "ничего (задача уже идёт или снята)" : requests.map(\.identifier).joined(separator: ", "))")
+        // и иначе. Список ждущих заявок система отдаёт сама — пишем его рядом. Ответ
+        // приходит с чужой очереди, поэтому замыкание `@Sendable` — см. `systemPendingRequests`.
+        hooks.pendingRequests { @Sendable identifiers in
+            Journal.append("фон: у планировщика ждут: \(identifiers.isEmpty ? "ничего (задача уже идёт или снята)" : identifiers.joined(separator: ", "))")
         }
     }
 
-    private func submissionRefused(_ error: Error) {
-        submitted = false
+    private func submissionRefused(_ generation: Int, _ error: Error) {
+        answeredSubmissions += 1
         // Не гадаем, почему отказ: спрашиваем систему и пишем ответ рядом.
         // «Проверь настройки» без указания какой именно — это переспрос,
         // а не диагноз, и прошлый раз он стоил лишнего круга.
@@ -423,6 +545,12 @@ final class TranscriptionRunway: ObservableObject {
             "фон: заявка отклонена — \(reason) "
             + "[\(raw.domain) \(raw.code), состояние \(Self.stateName), iOS \(Self.systemVersion), userInfo \(raw.userInfo)]"
         )
+        // Запоздалый отказ прежней заявки не трогает новую: ни её отметку, ни строку.
+        guard generation == submission else {
+            Journal.append("фон: отказ пришёл на прежнюю заявку — новую не трогаю")
+            return
+        }
+        submitted = false
         // Пачка успела кончиться, пока ответ планировщика шёл (iOS 27, асинхронно):
         // строка про фон относилась бы уже ни к чему.
         guard !service.isIdle else { return }
@@ -433,6 +561,16 @@ final class TranscriptionRunway: ObservableObject {
     func applicationDidBecomeActive() {
         appIsActive = true
         syncScreen()
+        // Пробуждение событиями передачи больше не нужно держать своим окном: процесс на
+        // переднем плане. Иначе окно, кончившись, прервало бы работу, которую человек
+        // видит на экране.
+        if wake != .invalid || !wakeCompletions.isEmpty {
+            if wakeDelivered {
+                finishWake("Lori открыли — дальше работа идёт на переднем плане")
+            } else {
+                endWakeWindow()
+            }
+        }
         guard deferred, !service.isIdle else {
             deferred = false
             return
@@ -445,7 +583,7 @@ final class TranscriptionRunway: ObservableObject {
     func batchDidFinish() {
         syncScreen()
         guard ongoing == nil else { endGrace(); return }
-        if submitted { BGTaskScheduler.shared.cancel(taskRequestWithIdentifier: Self.taskIdentifier) }
+        if submitted { hooks.cancelRequest(Self.taskIdentifier) }
         submitted = false
         deferred = false
         lostTask = false
@@ -454,8 +592,8 @@ final class TranscriptionRunway: ObservableObject {
     }
 
     /// Тело фоновой задачи: сама она не считает, а ведёт полосу и держит процесс.
-    @available(iOS 26.0, *)
-    private func drive(_ task: BGContinuedProcessingTask) async {
+    /// Не `private`: тест ведёт полосу подставной задачей (`RunwayTask`).
+    func drive(_ task: any RunwayTask) async {
         guard ongoing == nil else {
             Journal.append("фон: полосу уже ведёт другая задача, эту завершаю")
             task.setTaskCompleted(success: true)
@@ -477,14 +615,15 @@ final class TranscriptionRunway: ObservableObject {
         // Задача могла прийти не с начала пачки — часть записей к этому времени уже
         // сделана, и полоса начинает с них, а не с нуля.
         let total = max(service.batchTotal, 1)
-        task.progress.totalUnitCount = Int64(total) * Self.unitsPerRecord
+        session.total = total
+        task.totalUnitCount = Int64(total) * Self.unitsPerRecord
         session.completed = Int64(min(service.batchDone, total)) * Self.unitsPerRecord
-        task.progress.completedUnitCount = session.completed
+        task.completedUnitCount = session.completed
 
         // `@Sendable` обязателен по той же причине, что и у обработчика запуска:
         // истечение приходит с чужой очереди, а замыкание из `@MainActor`-метода
         // унаследовало бы изоляцию и уронило процесс проверкой очереди.
-        task.expirationHandler = { @Sendable [weak self] in
+        task.setExpirationHandler { @Sendable [weak self] in
             Task { @MainActor in self?.expire(session) }
         }
 
@@ -506,7 +645,7 @@ final class TranscriptionRunway: ObservableObject {
         }
 
         let success = Self.completionSuccess(expired: expired, outcome: outcome)
-        if success { task.progress.completedUnitCount = task.progress.totalUnitCount }
+        if success { task.completedUnitCount = task.totalUnitCount }
         close(session, success: success)
         batchDidFinish()
         // Пачка кончилась — 618 МБ весов держать больше незачем.
@@ -518,7 +657,7 @@ final class TranscriptionRunway: ObservableObject {
         guard !session.closed else { return }
         session.closed = true
         session.ticker?.cancel()
-        session.task.expirationHandler = nil
+        session.task.setExpirationHandler(nil)
         session.task.setTaskCompleted(success: success)
         if ongoing === session { ongoing = nil }
     }
@@ -562,13 +701,27 @@ final class TranscriptionRunway: ObservableObject {
         !expired && (outcome?.isClean ?? true)
     }
 
+    /// Сколько единиц отдать полосе — чистая функция.
+    ///
+    /// Полоса не идёт назад: доля записи может на миг упасть (ответ получен — фаза запроса
+    /// сброшена, а движок ещё не сказал «1 из 1»; запись вышла из счёта идущих, а в
+    /// «готово» ещё не вошла), и системе это выглядело бы откатом работы. **Кроме одного
+    /// случая: знаменатель уменьшился** — запись сняли или оборвали, и она ушла из счёта
+    /// вместе со своей долей. Раньше максимум держался и тогда: запись на 0,95 снята,
+    /// следующая растёт от нуля и выше 0,95 не поднимается — полоса стояла весь её прогон,
+    /// а стоящую задачу планировщик снимает.
+    nonisolated static func barUnits(previous: Int64, previousTotal: Int, total: Int, done: Int, partial: Double) -> Int64 {
+        let units = Int64(max(total, 1)) * unitsPerRecord
+        let measured = min(units, max(0, Int64(((Double(done) + partial) * Double(unitsPerRecord)).rounded(.down))))
+        guard total >= previousTotal else { return measured }
+        return min(units, max(previous, measured))
+    }
+
     private func pump(_ session: Drive) {
-        guard #available(iOS 26.0, *), let task = session.task as? BGContinuedProcessingTask else { return }
         // Счёт ведёт сервис, а не задача: он знает и про добавленные по ходу записи, и про
         // снятые, и про упавшие — всё, что раньше приходилось выводить из `seen`.
         let total = max(service.batchTotal, 1)
         let done = min(service.batchDone, total)
-        task.progress.totalUnitCount = Int64(total) * Self.unitsPerRecord
         // Доля недоделанных записей идёт в общий счёт. Это не косметика: по `progress`
         // планировщик отличает живую задачу от подвисшей и **принудительно завершает**
         // ту, что стоит на месте («tasks that appear stalled may be forcibly expired»,
@@ -580,7 +733,7 @@ final class TranscriptionRunway: ObservableObject {
         // отправки, а пока ждём ответ или мерить нечего — оценка по времени с потолком
         // ниже единицы. «Готово» ставит только настоящее завершение.
         var partial = 0.0
-        for path in service.running.sorted() {
+        for path in service.batchRunning {
             let share = service.backgroundShare(for: path)
             partial += share.value
             if session.sources[path] != share.source {
@@ -588,10 +741,21 @@ final class TranscriptionRunway: ObservableObject {
                 Journal.append("фон: полоса по «\(path)» — \(share.source.rawValue)")
             }
         }
-        let measured = Int64(((Double(done) + partial) * Double(Self.unitsPerRecord)).rounded(.down))
-        session.completed = min(task.progress.totalUnitCount, max(session.completed, measured))
-        task.progress.completedUnitCount = session.completed
-        task.updateTitle("Расшифровка", subtitle: currentSubtitle())
+        let completed = Self.barUnits(previous: session.completed, previousTotal: session.total, total: total, done: done, partial: partial)
+        if total < session.total {
+            Journal.append("фон: из пачки ушла запись — полоса считается заново: \(done) готово из \(total)")
+        }
+        // Порядок — чтобы доля ни на миг не вышла за единицу: растёт знаменатель — сначала он.
+        if total >= session.total {
+            session.task.totalUnitCount = Int64(total) * Self.unitsPerRecord
+            session.task.completedUnitCount = completed
+        } else {
+            session.task.completedUnitCount = completed
+            session.task.totalUnitCount = Int64(total) * Self.unitsPerRecord
+        }
+        session.completed = completed
+        session.total = total
+        session.task.updateSubtitle(currentSubtitle())
     }
 
     // MARK: - Пробуждение событиями фоновой передачи
@@ -607,35 +771,40 @@ final class TranscriptionRunway: ObservableObject {
     /// просто полученные байты: после обработчика система вправе снова усыпить процесс.
     /// Поэтому работа идёт под своим окном `beginBackgroundTask`, и системе отвечаем,
     /// когда записи доделаны (`finishAfterSystemWake`) или окно кончилось.
+    ///
+    /// Lori на экране — окно не нужно, и режим «только готовые ответы» тоже: прерванное
+    /// поднимет обычный ход переднего плана (`resumeInterrupted`).
     func systemWokeForTransfers(completion: @escaping () -> Void) {
+        if wakeCompletions.isEmpty { wakeStarted = Date() }
         wakeCompletions.append(completion)
-        if wake == .invalid {
-            wakeStarted = Date()
-            wake = UIApplication.shared.beginBackgroundTask(withName: "Lori: ответ сервиса") { [weak self] in
-                // Окно кончилось раньше, чем запись доделана (например, задание по частям
-                // отправило следующую): что у системы — снова ждёт, остальное прерывается.
-                guard let self else { return }
-                // На экране прерывать нечего: человек открыл Lori, пока шло пробуждение.
-                let parked = UIApplication.shared.applicationState == .active ? [] : self.service.interruptEverything()
-                self.finishWake("окно пробуждения кончилось, ждут ответ системы: \(parked.count)")
+        wakeDelivered = false
+        let onScreen = hooks.isActive()
+        if !onScreen {
+            if wake == .invalid {
+                wake = hooks.beginBackgroundTask("Lori: ответ сервиса") { [weak self] in self?.wakeWindowExpired() }
             }
+            // Приложение поднято в фоне — сервис обязан это знать: иначе появление сети или
+            // таймер повтора подняли бы прерванные записи — и локальные, и облачные без
+            // готового ответа — прямо из фона (у только что запущенного сервиса
+            // «на экране» по умолчанию).
+            service.applicationDidEnterBackground()
         }
-        // Приложение поднято в фоне — сервис обязан это знать: иначе появление сети или
-        // таймер повтора подняли бы прерванные записи — и локальные, и облачные без
-        // готового ответа — прямо из фона (у только что запущенного сервиса
-        // «на экране» по умолчанию).
-        if UIApplication.shared.applicationState != .active { service.applicationDidEnterBackground() }
         Journal.append(
             "фон: система разбудила приложение событиями передачи (\(Self.stateName), iOS \(Self.systemVersion)) — "
             + (service.isIdle ? "в памяти ничего не идёт: процесс подняли заново" : "процесс спал; \(service.workSummary())")
         )
-        BackgroundTranscriptionTransport.shared.reconnect { [weak self] in
+        hooks.reconnectTransfers { @Sendable [weak self] in
             // Все события сессии доставлены: ответы уже у ждущего Swift-кода или распиской.
-            Task { @MainActor in await self?.settleWake() }
+            Task { @MainActor in await self?.wakeEventsDelivered() }
         }
     }
 
-    private func settleWake() async {
+    private func wakeEventsDelivered() async {
+        wakeDelivered = true
+        guard !hooks.isActive() else {
+            finishWake("события доставлены, Lori на экране — дальше обычным ходом")
+            return
+        }
         let report = await service.finishAfterSystemWake(in: WorkspaceStore.current)
         let outcome = report.outcome
         finishWake(
@@ -644,17 +813,35 @@ final class TranscriptionRunway: ObservableObject {
         )
     }
 
+    /// Окно пробуждения кончилось раньше, чем запись доделана (например, задание по частям
+    /// отправило следующую): что у системы — снова ждёт, остальное прерывается. Но только
+    /// если работу больше ничто не держит: живая задача планировщика или запасное окно
+    /// ведут её дальше, а на экране прерывать нечего.
+    private func wakeWindowExpired() {
+        if ongoing == nil, grace == .invalid, !hooks.isActive() {
+            let parked = service.interruptEverything()
+            finishWake("окно пробуждения кончилось, ждут ответ системы: \(parked.count)")
+        } else {
+            let keeper = ongoing != nil ? "задача планировщика" : grace != .invalid ? "запасное окно" : "передний план"
+            finishWake("окно пробуждения кончилось, работу дальше ведёт \(keeper)")
+        }
+    }
+
     /// Отвечает системе — один раз на пробуждение — и отпускает окно.
     private func finishWake(_ summary: String) {
         guard !wakeCompletions.isEmpty || wake != .invalid else { return }
         let completions = wakeCompletions
         wakeCompletions = []
+        wakeDelivered = false
         Journal.append("фон: пробуждение закончено за \(Int(Date().timeIntervalSince(wakeStarted))) с — \(summary); отдаю системе")
         completions.forEach { $0() }
-        if wake != .invalid {
-            UIApplication.shared.endBackgroundTask(wake)
-            wake = .invalid
-        }
+        endWakeWindow()
+    }
+
+    private func endWakeWindow() {
+        guard wake != .invalid else { return }
+        hooks.endBackgroundTask(wake)
+        wake = .invalid
     }
 
     /// Строка под полосой прогресса сейчас: «2 из 5 · Совещание 27.08».
@@ -753,25 +940,29 @@ final class TranscriptionRunway: ObservableObject {
 
     private func beginGrace() {
         guard grace == .invalid else { return }
-        grace = UIApplication.shared.beginBackgroundTask(withName: "Lori transcription") { [weak self] in
-            guard let self else { return }
-            if self.ongoing == nil, UIApplication.shared.applicationState != .active {
-                Journal.append("фон: запасное окно iOS кончилось — \(self.service.workSummary())")
-                let parked = self.service.interruptEverything()
-                if parked.isEmpty {
-                    self.state = .foregroundOnly("iOS приостановила обработку. Прогресс сохранён; продолжу после возвращения в Lori.")
-                } else {
-                    Journal.append("фон: оставил облачную запись ждать ответ системы — \(parked.map { "«\($0)»" }.joined(separator: ", "))")
-                    self.state = .foregroundOnly("iOS забрала фоновое время. Запись уже у сервиса — Lori доделает её, когда придёт ответ.")
-                }
+        grace = hooks.beginBackgroundTask("Lori transcription") { [weak self] in self?.graceExpired() }
+    }
+
+    /// Запасное окно кончилось. Прерывать — только если работу больше ничто не держит:
+    /// ни задача планировщика, ни окно пробуждения (оно кончится своим ходом и решит само),
+    /// ни передний план.
+    private func graceExpired() {
+        if ongoing == nil, wake == .invalid, !hooks.isActive() {
+            Journal.append("фон: запасное окно iOS кончилось — \(service.workSummary())")
+            let parked = service.interruptEverything()
+            if parked.isEmpty {
+                state = .foregroundOnly("iOS приостановила обработку. Прогресс сохранён; продолжу после возвращения в Lori.")
+            } else {
+                Journal.append("фон: оставил облачную запись ждать ответ системы — \(parked.map { "«\($0)»" }.joined(separator: ", "))")
+                state = .foregroundOnly("iOS забрала фоновое время. Запись уже у сервиса — Lori доделает её, когда придёт ответ.")
             }
-            self.endGrace()
         }
+        endGrace()
     }
 
     private func endGrace() {
         guard grace != .invalid else { return }
-        UIApplication.shared.endBackgroundTask(grace)
+        hooks.endBackgroundTask(grace)
         grace = .invalid
     }
 }

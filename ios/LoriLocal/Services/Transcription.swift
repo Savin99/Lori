@@ -1411,6 +1411,14 @@ final class TranscriptionService: ObservableObject {
 
     private var clocks: [String: RequestClock] = [:]
 
+    /// Идущие записи, которые ещё числятся в пачке, — их доли и складывает полоса.
+    ///
+    /// Снятая человеком или оборванная системой запись может ещё сворачиваться (движок не
+    /// вернулся, она в `running`), но из счёта пачки она уже вышла вместе со знаменателем.
+    /// Посчитай полоса её долю и дальше — и после сброса максимума (`barUnits`) та же доля
+    /// снова держала бы полосу, пока идёт следующая запись.
+    var batchRunning: [String] { running.filter { batchLive.contains($0) }.sorted() }
+
     /// Доля идущей записи сейчас — то, что фоновая задача складывает в свою полосу.
     func backgroundShare(for path: String, now: Date = Date()) -> BackgroundShare {
         let part = parts[path]?.done ?? 0
