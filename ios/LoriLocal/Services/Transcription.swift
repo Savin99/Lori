@@ -913,6 +913,11 @@ final class TranscriptionService: ObservableObject {
                 kept.append(path)
                 continue
             }
+            // Оставленная ждать раньше запись могла с тех пор проснуться и пойти дальше —
+            // готовить следующую часть, у системы ничего не держа. Тогда её прерываем, и
+            // отметка «ждёт систему» снимается: иначе отмена ниже её бы пропустила, и
+            // запись числилась бы «Прервано», продолжая работать.
+            parked.remove(path)
             interrupted.insert(path)
             interrupting.insert(path)
             if inFlight[path] == nil { inFlight[path] = lane[path] }

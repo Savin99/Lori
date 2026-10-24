@@ -362,6 +362,38 @@ final class BackgroundTransferTests: XCTestCase {
         XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Облако.md"))
     }
 
+    /// Оставленная ждать запись проснулась и пошла дальше — готовит следующую часть, у
+    /// системы ничего не держа, — и окно кончилось снова. Её обязаны прервать по-настоящему:
+    /// раньше отметка «ждёт систему» оставалась, отмена её пропускала, и запись числилась
+    /// «Прервано», продолжая работать и сохраняя текст.
+    func testParkedRecordThatMovedOnIsInterruptedOnTheNextExpiry() async throws {
+        fixture = try QueueFixture(files: ["Облако.m4a"])
+        let gate = QueueGate()
+        let holds = Toggle(true)
+        let service = TranscriptionService(
+            engines: [.elevenLabs: QueueEngine(gate: gate)],
+            interruptedStore: fixture.store,
+            availableMemory: { 0 },
+            transfers: .init(holds: { _ in holds.value })
+        )
+        let path = "Облако.m4a"
+        service.enqueue(try fixture.entry(path), in: fixture.workspace, using: .elevenLabs)
+        await gate.waitForArrivals(1)
+        XCTAssertEqual(service.interruptEverything(), [path])
+
+        holds.value = false
+        XCTAssertEqual(service.interruptEverything(), [], "у системы больше ничего нет — ждать нечего")
+        XCTAssertEqual(service.state(for: path), .interrupted)
+
+        await gate.openAll()
+        let outcome = await service.waitForDrain()
+        XCTAssertEqual(outcome?.interrupted, [path])
+        XCTAssertThrowsError(
+            try fixture.workspace.readText(at: "Transcripts/Облако.md"),
+            "прерванная запись отменена и текст не сохранила — продолжит при возвращении"
+        )
+    }
+
     // MARK: Постановка из фона
 
     /// «Расшифровать» из Dynamic Island, когда Lori не на экране: запись обязана пойти
@@ -506,6 +538,13 @@ final class BackgroundTransferTests: XCTestCase {
 @MainActor
 private final class WakeBox {
     var report: TranscriptionService.SystemWakeReport?
+}
+
+/// Переключатель, который тест меняет по ходу, а сервис читает в своём замыкании.
+@MainActor
+private final class Toggle {
+    var value: Bool
+    init(_ value: Bool) { self.value = value }
 }
 
 /// Кого сервис спрашивал о системной передаче.
