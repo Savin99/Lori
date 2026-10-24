@@ -468,19 +468,22 @@ final class BackgroundTransferTests: XCTestCase {
     /// «Расшифровать» из Dynamic Island, когда Lori не на экране: запись обязана пойти
     /// сразу под запасным окном, а не ждать в очереди возвращения в приложение. Раньше
     /// `admit` шёл до `batchDidStart`, окна ещё не было, и запись оставалась в очереди.
+    ///
+    /// Состояние приложения — из хука: первая версия теста ставила `isActive = false`, а
+    /// `batchDidStart` спрашивал `UIApplication` (в тестовом хосте он активен) и шёл веткой
+    /// подачи заявки, а не фоновой.
     func testRecordQueuedFromTheBackgroundStartsUnderTheGraceWindow() async throws {
         fixture = try QueueFixture(files: ["Из фона.m4a"])
         let gate = QueueGate()
         let service = fixture.service(gate: gate, kind: .elevenLabs)
-        var hooks = TranscriptionRunway.SystemHooks()
-        hooks.isActive = { false }
-        hooks.setScreenAwake = { _ in }
-        hooks.notifications = NotificationCenter()
-        let runway = TranscriptionRunway(service: service, hooks: hooks)
+        let system = FakeSystem(active: false)
+        let runway = TranscriptionRunway(service: service, hooks: system.hooks())
         service.runway = runway
         service.applicationDidEnterBackground()
 
         service.enqueue(try fixture.entry("Из фона.m4a"), in: fixture.workspace, using: .elevenLabs)
+        XCTAssertEqual(system.submitted, [], "из фона заявку не подать — и не подаём")
+        XCTAssertTrue(system.isOpen("Lori transcription"), "открыто запасное окно")
         XCTAssertNil(service.queuePosition(for: "Из фона.m4a"), "запись не осталась ждать в очереди")
         XCTAssertTrue(service.isActive("Из фона.m4a"))
         XCTAssertTrue(runway.canExecuteInBackground, "её держит запасное окно")
@@ -489,6 +492,32 @@ final class BackgroundTransferTests: XCTestCase {
         await gate.openAll()
         await service.waitForDrain()
         XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Из фона.md"))
+        XCTAssertFalse(system.isOpen("Lori transcription"), "пачка кончилась — окно отпущено")
+    }
+
+    /// Локальной записи, поставленной из фона, 30 секунд запасного окна не хватит: она
+    /// ждёт в очереди и идёт, когда Lori откроют, а не начинает считать, чтобы тут же стать
+    /// «Прервано».
+    func testLocalRecordQueuedFromTheBackgroundWaitsForTheApp() async throws {
+        fixture = try QueueFixture(files: ["Телефон.m4a"])
+        let gate = QueueGate()
+        let service = fixture.service(gate: gate, kind: .gigaam)
+        let system = FakeSystem(active: false)
+        let runway = TranscriptionRunway(service: service, hooks: system.hooks())
+        service.runway = runway
+        service.applicationDidEnterBackground()
+
+        service.enqueue(try fixture.entry("Телефон.m4a"), in: fixture.workspace, using: .gigaam)
+        XCTAssertEqual(service.queuePosition(for: "Телефон.m4a"), 1, "ждёт в очереди")
+        XCTAssertEqual(service.state(for: "Телефон.m4a"), .queued(position: 1, waitsForMemory: false))
+
+        system.active = true
+        service.applicationDidBecomeActive(in: fixture.workspace)
+        await gate.waitForArrivals(1)
+        XCTAssertTrue(service.isActive("Телефон.m4a"), "Lori открыли — пошла")
+        await gate.openAll()
+        await service.waitForDrain()
+        XCTAssertNoThrow(try fixture.workspace.readText(at: "Transcripts/Телефон.md"))
     }
 
     // MARK: Пробуждение системой после убитого процесса

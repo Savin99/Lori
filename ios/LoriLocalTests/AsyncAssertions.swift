@@ -19,3 +19,24 @@ func XCTAssertThrowsErrorAsync<T>(
         handler(error)
     }
 }
+
+/// Ждёт условия с пределом времени. Для того, что приложение делает своим ходом —
+/// задачей на главном акторе, тиком полосы раз в секунду, ответом с чужой очереди, — и
+/// дождаться иначе, чем проверкой, нечем. Не дождался — тест падает, а не висит.
+@MainActor
+func eventually(
+    _ what: String,
+    timeout: TimeInterval = 10,
+    file: StaticString = #filePath,
+    line: UInt = #line,
+    _ condition: () -> Bool
+) async {
+    let deadline = Date().addingTimeInterval(timeout)
+    while !condition() {
+        guard Date() < deadline else {
+            XCTFail("не дождался: \(what)", file: file, line: line)
+            return
+        }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+}
