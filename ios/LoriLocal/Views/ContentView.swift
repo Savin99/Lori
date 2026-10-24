@@ -95,7 +95,9 @@ struct ContentView: View {
     /// Превью живут на уровне приложения: расшифровку, сохранённую движком, надо
     /// перечитать и тогда, когда этот экран ещё не построен (`LoriLocalApp`).
     @EnvironmentObject private var previews: TranscriptPreviews
-    @StateObject private var recorder = AudioCaptureStore()
+    /// Диктофон живёт на уровне приложения: кнопки островка приходят интентами и без
+    /// этого экрана (`LoriLocalApp`, `RecordingController`).
+    @EnvironmentObject private var recorder: RecordingController
     @StateObject private var search = TranscriptSearchStore()
     @StateObject private var topics = TopicStore()
     @StateObject private var durations = RecordingDurations()
@@ -153,7 +155,7 @@ struct ContentView: View {
             )
             // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
             // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
-            .environmentObject(recorder)
+            // Сам диктофон приходит из `LoriLocalApp` — выше всех листов.
             .environmentObject(speakers)
             .environmentObject(speed)
     }
@@ -556,10 +558,9 @@ struct ContentView: View {
             actions: ComposerActions(
                 record: startRecording,
                 stop: stopRecording,
-                togglePause: { recorder.isPaused ? recorder.resume() : recorder.pause() },
+                togglePause: { _ = recorder.isPaused ? recorder.resume() : recorder.pause() },
                 cancelRecording: {
-                    recorder.discard(in: workspace)
-                    refresh()
+                    Task { await recorder.discard() }
                 },
                 pickFile: { showFileImporter = true },
                 paste: pasteAudio,
@@ -688,7 +689,7 @@ struct ContentView: View {
     /// Главное здесь делает `onChange(of: transcription.lastError)` — снимает такую
     /// ошибку из общей строки; проверка ниже закрывает кадр до того, как он сработал.
     private var activeError: String? {
-        if let error = workspace.lastError ?? startError { return error }
+        if let error = workspace.lastError ?? startError ?? recorder.lastError { return error }
         guard let error = transcription.lastError else { return nil }
         return transcription.failed.values.contains(error) ? nil : error
     }
@@ -696,6 +697,7 @@ struct ContentView: View {
     private func clearErrors() {
         workspace.lastError = nil
         transcription.lastError = nil
+        recorder.lastError = nil
         startError = nil
     }
 
@@ -713,18 +715,17 @@ struct ContentView: View {
     private func startRecording() {
         Task {
             do {
-                try await recorder.start(in: workspace)
+                try await recorder.start()
             } catch {
                 startError = error.localizedDescription
             }
         }
     }
 
+    /// Стоп: склейка кусков и постановка в очередь — в `RecordingController.finish`,
+    /// там же, где это делает кнопка «Расшифровать» в островке.
     private func stopRecording() {
-        guard let path = recorder.stop() else { return }
-        refresh()
-        guard autoTranscribe, let entry = try? workspace.entry(at: path) else { return }
-        transcription.enqueue(entry, in: workspace)
+        Task { await recorder.finish() }
     }
 
     /// Выбранные файлы прикрепляются к панели, а не уходят в работу сами.
@@ -753,6 +754,9 @@ struct ContentView: View {
     }
 
     private func receive(_ url: URL) {
+        // «Расшифровать» из островка при движке на телефоне открывает Lori ссылкой:
+        // это не файл, а просьба закончить запись.
+        guard !recorder.open(url) else { return }
         let report = ImportInbox.stageAll([url])
         composer.attach(report.staged)
         if let message = ImportNotice.rejected(report.rejected.map(\.message)) { notice = message }
@@ -966,10 +970,6 @@ struct ContentView: View {
         guard let path = workspace.existingTranscript(for: entry),
               let text = try? workspace.readText(at: path), !text.isEmpty else { return nil }
         return text
-    }
-
-    private func refresh() {
-        workspace.requestRefresh()
     }
 
     // MARK: - Листы и диалоги

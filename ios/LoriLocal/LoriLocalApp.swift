@@ -17,6 +17,10 @@ struct LoriLocalApp: App {
     /// зависеть от того, построен ли уже `ContentView`.
     @StateObject private var transcription: TranscriptionService
     @StateObject private var runway: TranscriptionRunway
+    /// Диктофон — тоже уровня приложения: кнопки островка и экрана блокировки
+    /// приходят интентами в процесс Lori, и ради них её могут запустить в фоне без
+    /// единого окна. Тогда `ContentView` не строится вовсе, а запись обязана ответить.
+    @StateObject private var recording: RecordingController
 
     init() {
         let workspace = WorkspaceStore(rootURL: RecoveryProbe.enabled ? RecoveryProbe.root : nil)
@@ -64,6 +68,19 @@ struct LoriLocalApp: App {
         transcription.didDrain = { [weak runner] in runner?.applicationDidBecomeActive() }
         _transcription = StateObject(wrappedValue: transcription)
         _runway = StateObject(wrappedValue: runway)
+
+        // Один диктофон на процесс. SwiftUI вправе построить `App` повторно, а второй
+        // контроллер слушал бы те же прерывания и поднимал бы ту же запись с диска.
+        let recording = (RecordingIntentBridge.handler as? RecordingController)
+            ?? RecordingController(workspace: workspace, transcription: transcription, device: Self.recordingDevice())
+        _recording = StateObject(wrappedValue: recording)
+        if !Self.isUnitTestProcess, RecordingIntentBridge.handler == nil {
+            // Незаконченная запись поднимается здесь, синхронно: интент из островка,
+            // ради которого Lori запустили, должен застать её на месте.
+            recording.restoreSession()
+            RecordingIntentBridge.handler = recording
+            Task { await recording.reconcileActivity() }
+        }
         // Обработчик регистрируется до конца запуска и ровно один раз: на второй
         // регистрации того же идентификатора система убивает приложение.
         TranscriptionRunway.register()
@@ -79,7 +96,17 @@ struct LoriLocalApp: App {
     }
 
     /// Unit-host не запускает задания пользовательского архива параллельно тестам.
-    private var isUnitTestHost: Bool { NSClassFromString("XCTestCase") != nil }
+    private var isUnitTestHost: Bool { Self.isUnitTestProcess }
+    private static var isUnitTestProcess: Bool { NSClassFromString("XCTestCase") != nil }
+
+    /// Микрофон. В DEBUG-сборке Lori QA с `--ui-stub-recorder` — заглушка: у симулятора
+    /// нет звукового входа, а запись, островок и склейку посмотреть надо.
+    private static func recordingDevice() -> any RecordingDevice {
+        #if DEBUG
+        if StubRecordingDevice.enabled { return StubRecordingDevice() }
+        #endif
+        return MicrophoneDevice()
+    }
 
     /// Движки расшифровки. nil — настоящие. Проверочный движок QA подставляется
     /// только в DEBUG-сборке Lori QA и только по аргументу запуска (`QAStubEngine`);
@@ -103,6 +130,7 @@ struct LoriLocalApp: App {
                 .environmentObject(previews)
                 .environmentObject(transcription)
                 .environmentObject(runway)
+                .environmentObject(recording)
                 // Акцент задаётся на уровне окна, а не экрана: у листа выбора
                 // файлов и у шита «Поделиться» свой UIKit-мир, и `.tint`,
                 // поставленный внутри `ContentView`, туда не доходил — кнопки

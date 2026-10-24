@@ -252,6 +252,17 @@ final class WorkspaceStore: ObservableObject {
         try refresh()
     }
 
+    /// Файл снаружи рабочей папки — в ту же корзину Lori. Так уходят куски записи,
+    /// которую человек удалил, не закончив: они лежат в `Application Support`, а удаление
+    /// в Lori всегда обратимо — значит, в корзину, а не в никуда.
+    func moveToTrash(external source: URL, named name: String) throws {
+        guard fileManager.fileExists(atPath: source.path) else { throw WorkspaceError.notFound }
+        try ensureRoot()
+        let trash = root.appending(path: ".LoriTrash", directoryHint: .isDirectory)
+        try fileManager.createDirectory(at: trash, withIntermediateDirectories: true)
+        try fileManager.moveItem(at: source, to: trash.appending(path: "\(UUID().uuidString)-\(name)"))
+    }
+
     func rename(_ relativePath: String, to destinationPath: String) throws {
         let source = try safeURL(for: relativePath)
         let destination = try safeURL(for: destinationPath)
@@ -537,13 +548,22 @@ final class WorkspaceStore: ObservableObject {
         }
     }
 
-    func makeRecordingURL() throws -> URL {
+    /// Имя записи с диктофона — по моменту её начала, как и раньше. Запись теперь
+    /// собирается из кусков в конце, и имя «по моменту конца» сдвинуло бы его на всю
+    /// длину записи. Занято (две записи в одну секунду) — номер через дефис.
+    func makeRecordingURL(startedAt: Date = .now) throws -> URL {
         try ensureRoot()
         let recordings = root.appending(path: "Recordings", directoryHint: .isDirectory)
         try fileManager.createDirectory(at: recordings, withIntermediateDirectories: true)
         let formatter = ISO8601DateFormatter()
-        let stamp = formatter.string(from: .now).replacingOccurrences(of: ":", with: "-")
-        return recordings.appending(path: "Recording-\(stamp).m4a")
+        let stamp = formatter.string(from: startedAt).replacingOccurrences(of: ":", with: "-")
+        var candidate = recordings.appending(path: "Recording-\(stamp).m4a")
+        var number = 2
+        while fileManager.fileExists(atPath: candidate.path) {
+            candidate = recordings.appending(path: "Recording-\(stamp)-\(number).m4a")
+            number += 1
+        }
+        return candidate
     }
 
     /// Расшифровка на запись одна: перерасшифровка другим движком заменяет текст,

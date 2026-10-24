@@ -145,7 +145,7 @@ struct ComposerActions {
 /// панель, поэтому переход читается как перетекание, а не как подмена вью.
 struct ComposerBar: View {
     @ObservedObject var model: ComposerModel
-    @ObservedObject var recorder: AudioCaptureStore
+    @ObservedObject var recorder: RecordingController
     @ObservedObject var engines: EngineDirectory
     @ObservedObject var speed: TranscriptionSpeed
 
@@ -167,9 +167,16 @@ struct ComposerBar: View {
 
     private var state: ComposerState { model.state(recording: recorder.isCapturing) }
 
+    /// Строка над панелью во время записи: причина паузы важнее подсказки про островок.
+    private var recordingNote: String? {
+        guard recorder.isCapturing else { return nil }
+        if recorder.isPaused, let words = recorder.pauseWords { return "Пауза · \(words)" }
+        return recorder.activityHint
+    }
+
     var body: some View {
         VStack(spacing: 8) {
-            if let status {
+            if let status = status ?? (recorder.phase == .finishing ? "Сохраняю запись…" : nil) {
                 HStack(spacing: 8) {
                     ProgressView().controlSize(.mini)
                     Text(status)
@@ -180,6 +187,15 @@ struct ComposerBar: View {
                 .composerAccessory(leading: 14, trailing: 14, minHeight: 36)
                 .accessibilityElement(children: .combine)
                 .accessibilityIdentifier("composerStatus")
+            } else if let note = recordingNote {
+                // Одна строка, и только когда есть что сказать: почему запись встала
+                // («Пауза · звонок») или что кнопок в островке не будет.
+                Text(note)
+                    .font(LoriFont.small)
+                    .foregroundStyle(LoriPalette.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .composerAccessory(leading: 14, trailing: 14, minHeight: 36)
+                    .accessibilityIdentifier("recordingNote")
             }
 
             if model.showsClipboardHint, state != .recording {
@@ -464,6 +480,8 @@ struct ComposerBar: View {
         }
         .buttonStyle(.plain)
         .fixedSize()
+        // Пока куски склеиваются, второй «стоп» нажимать нечего.
+        .disabled(recorder.phase == .finishing)
         .contentTransition(.symbolEffect(.replace))
         // Значок в круге на 36 точек: при самом крупном шрифте он вылезал за круг.
         // Крупно его показывает просмотр по долгому нажатию, как у системных панелей.
@@ -601,7 +619,7 @@ private extension View {
 
 /// Строка записи: пауза, таймер, живая волна, отмена.
 struct RecordingRow: View {
-    @ObservedObject var recorder: AudioCaptureStore
+    @ObservedObject var recorder: RecordingController
     let togglePause: () -> Void
     let cancel: () -> Void
 
@@ -626,14 +644,17 @@ struct RecordingRow: View {
                 .foregroundStyle(LoriPalette.ink)
                 .fixedSize()
 
-            LiveWave(levels: recorder.levels, paused: recorder.isPaused)
+            LiveWave(levels: recorder.levels, paused: !recorder.isRecording)
 
-            Button("Отмена", action: cancel)
+            // У записи, поднятой после перезапуска Lori, это уже не «отмена» начатого,
+            // а решение о целой записи — и слово то же, что в островке.
+            Button(recorder.isRestored ? "Удалить" : "Отмена", action: cancel)
                 .font(LoriFont.meta)
                 .foregroundStyle(LoriPalette.muted)
                 .fixedSize()
                 .accessibilityIdentifier("cancelRecordingButton")
         }
+        .disabled(recorder.phase == .finishing)
         .accessibilityElement(children: .contain)
     }
 }
