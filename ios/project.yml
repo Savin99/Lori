@@ -44,7 +44,7 @@ settings:
     LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local
     LORI_DISPLAY_NAME: Lori
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "9"
+    CURRENT_PROJECT_VERSION: "10"
   configs:
     QA:
       LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local.qa
