@@ -16,7 +16,7 @@ const TOKEN = 'lori-test-token-012345678901234567890123456789'
 const FOREIGN = '11111111-1111-4111-8111-111111111111'
 const LATE_FOREIGN = '22222222-2222-4222-8222-222222222222'
 const fakeSource = String.raw`
-import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { spawn, execFileSync } from 'node:child_process'
@@ -52,7 +52,9 @@ function traces (conversationId, workspace) {
   writeFileSync(join(root, 'presence', conversationId + '.lock'), 'presence')
   cache[workspace] = conversationId
   execFileSync('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'),
-    "INSERT INTO conversation_summaries VALUES ('" + conversationId + "', 'private'); INSERT INTO conversations_fts VALUES ('" + conversationId + "', 'private');"])
+    "INSERT INTO conversation_summaries VALUES ('" + conversationId + "', 'private'); INSERT INTO conversations_fts VALUES ('" + conversationId + "', 'private'); PRAGMA wal_checkpoint(TRUNCATE);"])
+  // Настоящий agy закрывает базу без -wal и -shm, а системный sqlite3 их оставляет.
+  for (const suffix of ['-wal', '-shm']) rmSync(join(root, 'conversation_summaries.db' + suffix), { force: true })
 }
 traces(id, process.cwd())
 if (content?.includes('[foreign]')) traces('22222222-2222-4222-8222-222222222222', '/another-workspace')
@@ -117,7 +119,9 @@ async function fixture (t, settings = {}, prepare) {
   await writeFile(tokenFile, TOKEN, { mode: 0o600 })
   const root = join(home, '.gemini/antigravity-cli')
   await mkdir(root, { recursive: true })
-  await executeFile('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'), 'CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, body);'])
+  // Как у настоящего agy — режим WAL. После выхода процесса -wal и -shm удаляются,
+  // и открыть такую базу только на чтение нельзя: на Mac mini чистка падала именно так.
+  await executeFile('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'), 'PRAGMA journal_mode=WAL; CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, body);'])
   const config = gatewayConfig({ ...process.env,
     LORI_AGY_BIN: bin, LORI_AGY_HOME: home, LORI_GATEWAY_TOKEN_FILE: tokenFile,
     LORI_GATEWAY_PORT: '0', LORI_AGY_CLEANUP: '1',
@@ -395,7 +399,7 @@ test('чистка удаляет ровно свою историю, SQLite/FTS
   const cache = JSON.parse(await readFile(join(f.root, 'cache/last_conversations.json'), 'utf8'))
   assert.deepEqual(cache, { '/foreign': FOREIGN, '/another-workspace': LATE_FOREIGN })
   for (const table of ['conversation_summaries', 'conversations_fts']) {
-    const { stdout } = await executeFile('/usr/bin/sqlite3', ['-readonly', join(f.root, 'conversation_summaries.db'), `SELECT conversation_id FROM ${table} ORDER BY conversation_id;`])
+    const { stdout } = await executeFile('/usr/bin/sqlite3', [join(f.root, 'conversation_summaries.db'), `SELECT conversation_id FROM ${table} ORDER BY conversation_id;`])
     assert.deepEqual(stdout.trim().split('\n'), [FOREIGN, LATE_FOREIGN])
   }
 })

@@ -359,7 +359,9 @@ async function cleanupConversation (config, directory, observed, before) {
         }
       }
     }
-    const { stdout } = await sqlite(['-readonly', database, "SELECT name FROM sqlite_master WHERE name IN ('conversation_summaries','conversations_fts');"])
+    // Не -readonly: agy закрывает базу в режиме WAL без -wal и -shm, и открыть её
+    // только на чтение нельзя («unable to open database file», Mac mini, 9.11.2026).
+    const { stdout } = await sqlite([database, "SELECT name FROM sqlite_master WHERE name IN ('conversation_summaries','conversations_fts');"])
     const tables = stdout.trim().split('\n').filter((name) => ['conversation_summaries', 'conversations_fts'].includes(name))
     const sql = tables.flatMap((table) => [...ids].map((id) => `DELETE FROM ${table} WHERE conversation_id = '${id}';`)).join('\n')
     if (sql) await sqlite([database, `PRAGMA busy_timeout=3000; PRAGMA secure_delete=ON; BEGIN IMMEDIATE; ${sql} COMMIT; PRAGMA wal_checkpoint(TRUNCATE);`])
