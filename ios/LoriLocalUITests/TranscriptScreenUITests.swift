@@ -63,7 +63,7 @@ final class TranscriptScreenUITests: XCTestCase {
             app.descendants(matching: .any).matching(identifier: "topicChip").count, 1,
             "тема назначается прямо с экрана записи"
         )
-        XCTAssertEqual(meta.frame.midY, chip.frame.midY, accuracy: 2, "дата и тема — одной строкой")
+        XCTAssertLessThanOrEqual(chip.frame.maxX, app.frame.maxX, "чипы переносятся без обрезки")
         XCTAssertFalse(
             app.descendants(matching: .any)["transcriptionStatus"].exists,
             "у расшифрованной записи блока состояния нет"

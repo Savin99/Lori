@@ -17,17 +17,17 @@ enum LoriPalette {
         })
     }
 
-    static let canvas = pair(light: (0.961, 0.957, 0.914, 1), dark: (0.071, 0.071, 0.067, 1))
-    static let card = pair(light: (1, 1, 1, 0.86), dark: (1, 1, 1, 0.06))
-    static let ink = pair(light: (0.12, 0.12, 0.11, 1), dark: (0.957, 0.953, 0.925, 1))
+    static let canvas = pair(light: (0.961, 0.957, 0.914, 1), dark: (31/255, 31/255, 30/255, 1))
+    static let card = pair(light: (1, 1, 1, 0.86), dark: (42/255, 42/255, 40/255, 1))
+    static let ink = pair(light: (0.12, 0.12, 0.11, 1), dark: (244/255, 243/255, 239/255, 1))
     /// Цвет текста на заливке `ink` и `lime`: в тёмной теме сама заливка светлая,
     /// и белые надписи на ней исчезали.
-    static let onInk = pair(light: (1, 1, 1, 1), dark: (0.071, 0.071, 0.067, 1))
-    static let muted = pair(light: (0.44, 0.44, 0.41, 1), dark: (0.64, 0.64, 0.61, 1))
-    static let line = pair(light: (0, 0, 0, 0.12), dark: (1, 1, 1, 0.14))
+    static let onInk = pair(light: (1, 1, 1, 1), dark: (31/255, 31/255, 30/255, 1))
+    static let muted = pair(light: (0.44, 0.44, 0.41, 1), dark: (165/255, 165/255, 160/255, 1))
+    static let line = pair(light: (0, 0, 0, 0.12), dark: (1, 1, 1, 0.06))
     static let bubble = pair(light: (0.917, 0.914, 0.878, 1), dark: (1, 1, 1, 0.10))
-    static let lime = pair(light: (0.36, 0.47, 0.0, 1), dark: (0.66, 0.78, 0.29, 1))
-    static let limeSoft = pair(light: (0.89, 0.92, 0.73, 1), dark: (0.24, 0.29, 0.11, 1))
+    static let lime = pair(light: (0.36, 0.47, 0.0, 1), dark: (195/255, 216/255, 106/255, 1))
+    static let limeSoft = pair(light: (0.89, 0.92, 0.73, 1), dark: (81/255, 90/255, 29/255, 1))
     /// Состояния в карточке: идёт работа, ждёт очереди, сорвалось.
     /// Работа идёт: тот же оливковый, только приглушённый. Синий рядом с
     /// оливковым читался как второй акцент — и получалось два «главных» цвета
@@ -35,12 +35,24 @@ enum LoriPalette {
     static let info = pair(light: (0.42, 0.52, 0.16, 1), dark: (0.60, 0.72, 0.30, 1))
     /// Второй говорящий и прочее, что надо просто отличить от первого.
     /// Не акцент: приглушённый тёплый, а не спорящий с оливковым синий.
-    static let accentAlt = pair(light: (0.45, 0.36, 0.24, 1), dark: (0.78, 0.66, 0.48, 1))
+    static let accentAlt = pair(light: (0.45, 0.36, 0.24, 1), dark: (216/255, 185/255, 138/255, 1))
     /// Цвет чужого бренда — единственное место, где он оправдан. Пара нужна и
     /// ему: в тёмной теме глухой фиолетовый сливался с фоном.
     static let obsidian = pair(light: (0.42, 0.29, 0.62, 1), dark: (0.66, 0.55, 0.86, 1))
-    static let warn = pair(light: (0.62, 0.44, 0.05, 1), dark: (0.91, 0.73, 0.35, 1))
+    static let warn = pair(light: (0.62, 0.44, 0.05, 1), dark: (233/255, 196/255, 106/255, 1))
     static let danger = pair(light: (0.66, 0.16, 0.13, 1), dark: (0.94, 0.48, 0.44, 1))
+
+    // Утверждённая палитра Granola, 9 ноября. Светлая сторона — прежняя кремовая.
+    static let raised = pair(light: (1, 1, 1, 1), dark: (59/255, 59/255, 56/255, 1))
+    static let tertiary = pair(light: (0.48, 0.48, 0.44, 1), dark: (142/255, 142/255, 137/255, 1))
+    static let chip = pair(light: (0.917, 0.914, 0.878, 1), dark: (44/255, 44/255, 42/255, 1))
+    static let chipText = pair(light: (0.36, 0.36, 0.32, 1), dark: (201/255, 201/255, 196/255, 1))
+    static let prose = pair(light: (0.16, 0.16, 0.14, 1), dark: (226/255, 225/255, 220/255, 1))
+    static let pale = pair(light: (241/255, 240/255, 233/255, 1), dark: (241/255, 240/255, 233/255, 1))
+    static let paleInk = Color(red: 31/255, green: 31/255, blue: 30/255)
+    static let oliveText = pair(light: (0.31, 0.37, 0.08, 1), dark: (228/255, 237/255, 179/255, 1))
+    static let warmFill = pair(light: (0.94, 0.88, 0.77, 1), dark: (90/255, 74/255, 51/255, 1))
+    static let warmText = pair(light: (0.43, 0.32, 0.18, 1), dark: (238/255, 217/255, 183/255, 1))
 
     /// Заливка чипов и кнопок на стеклянной нижней панели (iOS 26). Нейтральная
     /// и полупрозрачная, а не сплошная `bubble`: сплошной кружок лежал бы на стекле
@@ -67,7 +79,9 @@ enum LoriPalette {
 /// иначе интерфейс не реагирует на системный размер текста.
 enum LoriFont {
     static let display = Font.custom("Georgia", size: 30, relativeTo: .largeTitle)
-    static let noteBrief = Font.system(.title3)
+    static let recordingTitle = Font.custom("Georgia", size: 32, relativeTo: .title)
+    static let reportTitle = Font.custom("Georgia", size: 24, relativeTo: .title2)
+    static let reportSection = Font.custom("Georgia", size: 20, relativeTo: .title3)
     static let noteSection = Font.custom("Georgia", size: 21, relativeTo: .title3)
     static let displaySmall = Font.custom("Georgia", size: 27, relativeTo: .title2)
     static let section = Font.system(.subheadline, weight: .medium)

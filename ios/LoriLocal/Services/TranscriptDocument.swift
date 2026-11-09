@@ -89,6 +89,32 @@ struct TranscriptDocument: Equatable, Sendable {
         lines.map(\.text).joined(separator: "\n")
     }
 
+    /// Время для отчёта приходит только от движка. Границы куска не являются
+    /// временем реплики, поэтому приблизительные метки шлюзу не передаются.
+    func reportText(names: [String: String] = [:]) -> String {
+        lines.map { line in
+            let text = line.speaker.map { "\(names[$0] ?? $0): \(line.text)" } ?? line.text
+            guard !line.isApproximate, let start = line.start, start.isFinite, start >= 0 else { return text }
+            let seconds = Int(start)
+            return String(format: "[%02d:%02d] ", seconds / 60, seconds % 60) + text
+        }.joined(separator: "\n")
+    }
+
+    /// Доля речи, а не число реплик. Без настоящего конца каждой реплики долю
+    /// не показываем: соседнее начало и длина аудио не измеряют время речи.
+    var speechShares: [String: Double] {
+        let spoken = lines.filter { $0.speaker != nil }
+        guard !spoken.isEmpty else { return [:] }
+        var durations: [String: TimeInterval] = [:]
+        for line in spoken {
+            guard !line.isApproximate, let start = line.start, let end = line.end,
+                  start.isFinite, end.isFinite, start >= 0, end > start, let speaker = line.speaker else { return [:] }
+            durations[speaker, default: 0] += end - start
+        }
+        let total = durations.values.reduce(0, +)
+        return total > 0 ? durations.mapValues { $0 / total } : [:]
+    }
+
     /// Метка говорящего в начале реплики: «S1: …», в старых файлах — «Г1: …».
     /// Возвращает метку (всегда в латинском виде) и текст без неё.
     static func speakerMark(in text: String) -> (label: String, rest: String)? {

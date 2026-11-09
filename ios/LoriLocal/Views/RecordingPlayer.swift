@@ -6,9 +6,14 @@ import SwiftUI
 /// в главном акторе, а сам `AVAudioPlayer` не `Sendable`. Окончание ловит тикер.
 @MainActor
 final class AudioPlaybackStore: ObservableObject {
-    @Published private(set) var isPlaying = false
+    let cursor = TranscriptPlaybackCursor()
+    @Published private(set) var isPlaying = false {
+        didSet { cursor.update(position: position, playing: isPlaying) }
+    }
     @Published private(set) var duration: TimeInterval = 0
-    @Published private(set) var position: TimeInterval = 0
+    @Published private(set) var position: TimeInterval = 0 {
+        didSet { cursor.update(position: position, playing: isPlaying) }
+    }
     @Published private(set) var loadError: String?
     /// Скорость: расшифровку часто слушают быстрее, чем говорили.
     @Published var rate: Float = 1 {
@@ -134,5 +139,25 @@ final class AudioPlaybackStore: ObservableObject {
     private func stopTicker() {
         ticker?.cancel()
         ticker = nil
+    }
+}
+
+/// Изолирует смену реплики от частых тиков позиции. Подсветка появляется
+/// только внутри настоящего диапазона, не в тишине и не у приблизительных кусков.
+@MainActor
+final class TranscriptPlaybackCursor: ObservableObject {
+    @Published private(set) var activeLineID: Int?
+    private var lines: [TranscriptDocument.Line] = []
+    private var position: TimeInterval = 0
+    private var playing = false
+
+    func configure(_ lines: [TranscriptDocument.Line]) {
+        self.lines = lines.filter { !$0.isApproximate && $0.start != nil && $0.end != nil }
+        update(position: position, playing: playing)
+    }
+    func update(position: TimeInterval, playing: Bool) {
+        self.position = position; self.playing = playing
+        let id = playing ? lines.first(where: { position >= $0.start! && position < $0.end! })?.id : nil
+        if activeLineID != id { activeLineID = id }
     }
 }

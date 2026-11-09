@@ -63,7 +63,7 @@ struct TranscriptScreen: View {
     @State private var selectedTab: RecordingTab?
     @State private var reportMarkdown: String?
     @State private var reportReadFailed = false
-    @State private var exportingReport = false
+    @State private var reportDate: Date?
     @State private var sheet: Sheet?
     @State private var editing = false
     @State private var exporting = false
@@ -95,11 +95,8 @@ struct TranscriptScreen: View {
     @State private var titleRequested = false
     /// Колонка таймкодов растёт вместе с размером текста, иначе «1:05:20» на
     /// крупном шрифте обрезался бы. 46 + 12 — это и отступ `Skeleton`.
-    @ScaledMetric(relativeTo: .footnote) private var timeColumn: CGFloat = 46
+    @ScaledMetric(relativeTo: .footnote) private var timeColumn: CGFloat = 40
     @ScaledMetric(relativeTo: .footnote) private var hourTimeColumn: CGFloat = 62
-    /// Предел колонки говорящих: «Марина Кузнецова» не должна съедать полстроки,
-    /// длинное имя обрезается многоточием.
-    @ScaledMetric(relativeTo: .caption2) private var speakerCap: CGFloat = 96
 
     private var path: String { entry.relativePath }
     private var recordTitle: RecordTitle { RecordTitle.resolve(entry, summaries: summaries, previews: previews) }
@@ -119,20 +116,20 @@ struct TranscriptScreen: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
                     RecordingTabs(selection: tabSelection)
-                        .padding(.top, 10)
+                        .padding(.top, 20)
                     tabContent
-                        .padding(.top, 24)
+                        .padding(.top, activeTab == .transcript ? 0 : 16)
                 }
-                .padding(.horizontal, 20)
-                .padding(.top, 4)
+                .padding(.horizontal, 18)
+                .padding(.top, 22)
                 .padding(.bottom, 32)
             }
             .accessibilityIdentifier("recordingScroll")
             .recordingPlayerBar {
                 PlayerCard(playback: playback, isRecording: isRecording)
-                    .padding(.horizontal, 16)
+                    .padding(.horizontal, 14)
                     .padding(.top, 8)
-                    .padding(.bottom, 8)
+                    .padding(.bottom, 0)
             }
             .background(LoriPalette.canvas)
             .navigationBarTitleDisplayMode(.inline)
@@ -194,6 +191,8 @@ struct TranscriptScreen: View {
         .onChange(of: reports.completed[path]) { _, value in
             if value != nil { loadReport() }
         }
+        .onChange(of: document) { _, _ in updatePlaybackCursor() }
+        .onChange(of: transcription.partialTranscript(for: path)) { _, _ in updatePlaybackCursor() }
         .onChange(of: transcriptFile) { _, _ in reload() }
         // Переименование меняет путь: экран переезжает за записью, а не играет
         // файл, которого уже нет.
@@ -239,7 +238,8 @@ struct TranscriptScreen: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let status { statusBlock(status).padding(.bottom, 16) }
                 notices
-                transcriptText.padding(.top, 12)
+                speakerChips
+                transcriptText.padding(.top, 6)
             }
         }
     }
@@ -320,12 +320,22 @@ struct TranscriptScreen: View {
     private var reportBlock: some View {
         VStack(alignment: .leading, spacing: 18) {
             if let markdown = reportMarkdown {
-                ViewThatFits(in: .horizontal) {
-                    HStack(spacing: 12) { reportShareMenu; refreshReportButton }
-                    VStack(alignment: .leading, spacing: 8) { reportShareMenu; refreshReportButton }
+                VStack(alignment: .leading, spacing: 0) {
+                    Text(ReportContent(markdown: markdown).documentTitle)
+                        .font(LoriFont.reportTitle).foregroundStyle(LoriPalette.ink)
+                        .accessibilityAddTraits(.isHeader)
+                    if let reportDate {
+                        TimelineView(.periodic(from: .now, by: 60)) { context in
+                            Text("Gemini · " + LoriFormat.ago(reportDate, now: context.date))
+                                .recordingFont(13, relativeTo: .footnote).foregroundStyle(LoriPalette.tertiary)
+                        }.padding(.top, 6)
+                    }
+                    reportProgress.padding(.top, reports.running.contains(path) ? 16 : 0)
+                    ReportContent(markdown: markdown, seek: seek, canSeek: !isRecording && audioDuration > 0)
+                    HStack { Spacer(minLength: 0); refreshReportButton; Spacer(minLength: 0) }.padding(.top, 22)
                 }
-                reportProgress
-                ReportContent(markdown: markdown)
+                .padding(.horizontal, 20).padding(.top, 20).padding(.bottom, 24)
+                .recordingCard()
             } else {
                 if !reports.running.contains(path) {
                     Text(reportReadFailed ? "Не удалось прочитать файл отчёта." : "Отчёт соберёт запись в связный документ.")
@@ -354,24 +364,13 @@ struct TranscriptScreen: View {
     }
 
     private var refreshReportButton: some View {
-        Button("Обновить отчёт", action: generateReport)
-            .recordingGlassButton()
-            .disabled(document.isEmpty || reports.running.contains(path))
-            .accessibilityIdentifier("refreshReport")
-    }
-
-    private var reportShareMenu: some View {
-        Menu {
-            ForEach(TranscriptExportFormat.allCases) { format in
-                Button(format.title, systemImage: format.icon) { exportReport(format) }
-            }
-        } label: {
-            if exportingReport { ProgressView() }
-            else { Label("Поделиться", systemImage: "square.and.arrow.up") }
+        Button(action: generateReport) {
+            Label("Обновить отчёт", systemImage: "arrow.clockwise")
+                .recordingFont(14, weight: .semibold, relativeTo: .subheadline).frame(minHeight: 44)
         }
-        .recordingGlassButton()
-        .disabled(exportingReport)
-        .accessibilityIdentifier("reportShare")
+        .buttonStyle(.plain).foregroundStyle(LoriPalette.lime)
+        .disabled(document.isEmpty || reports.running.contains(path))
+        .accessibilityIdentifier("refreshReport")
     }
 
     @ViewBuilder private var reportProgress: some View {
@@ -385,30 +384,21 @@ struct TranscriptScreen: View {
     }
 
     private func generateReport() {
-        reports.generate(path: path, transcript: document.plainText, title: exportTitle, workspace: workspace)
+        reports.generate(path: path, transcript: document.reportText(names: speakers.names[path] ?? [:]), title: exportTitle, workspace: workspace)
     }
 
     private func loadReport() {
         reportMarkdown = nil
         reportReadFailed = false
+        reportDate = nil
         guard (try? workspace.fileURL(for: ReportRunner.path(for: path))) != nil else { return }
-        do { reportMarkdown = try ReportRunner.read(for: path, in: workspace) }
-        catch { reportReadFailed = true }
-    }
-
-    private func exportReport(_ format: TranscriptExportFormat) {
-        guard let markdown = reportMarkdown else { return }
-        exportingReport = true
-        Task {
-            defer { exportingReport = false }
-            do {
-                let title = "Отчёт — " + exportTitle
-                let payload = TranscriptExport.report(markdown: markdown, title: title)
-                sheet = .share(SharePayload(url: try await payload.file(as: format), subject: title))
-            } catch {
-                notice = Notice(title: "Не удалось собрать файл отчёта", message: error.localizedDescription)
+        do {
+            reportMarkdown = try ReportRunner.read(for: path, in: workspace)
+            if let url = try? workspace.fileURL(for: ReportRunner.path(for: path)) {
+                reportDate = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
             }
         }
+        catch { reportReadFailed = true }
     }
 
     // MARK: - Шапка
@@ -416,35 +406,17 @@ struct TranscriptScreen: View {
     private var header: some View {
         let resolved = recordTitle
         return VStack(alignment: .leading, spacing: 0) {
-            titleView(resolved.title)
+            titleView(resolved.title).padding(.horizontal, 2)
 
-            // Только описание модели. Начало расшифровки сюда не подставляется:
-            // текст стоит прямо ниже, и повторять его первые строки незачем.
-            if recordingSummaries.entry(for: path) == nil, let detail = resolved.generatedDetail {
-                Text(detail)
-                    .font(LoriFont.meta)
-                    .foregroundStyle(LoriPalette.muted)
-                    .lineLimit(4)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.top, 8)
-                    .accessibilityIdentifier("recordDescription")
-            }
-
-            // Дата и тема — одной строкой: тема справа, а не влезли вместе — тема
-            // уходит под дату (`SplitRow`). В одной строке её высоту держит
-            // 44-точечный чип темы, и дата стоит по его середине. Поля у даты —
-            // для второго случая, крупного шрифта: без них она вставала вплотную
-            // под описание и читалась его последней строкой. Поля поровну сверху
-            // и снизу, иначе в одной строке дата съехала бы с середины чипа.
-            SplitRow {
-                Text(titleActivity ?? meta)
-                    .font(LoriFont.small.monospacedDigit())
-                    .foregroundStyle(LoriPalette.muted)
-                    .padding(.vertical, 8)
-                    .accessibilityLabel(titleActivity ?? spokenMeta)
+            RecordingFlow(spacing: 6) {
+                RecordingChip(text: titleActivity ?? RecordClock.chipDate(entry.modifiedAt), icon: "calendar")
+                    .accessibilityLabel(titleActivity ?? "Записано \(RecordClock.date(entry.modifiedAt))")
                     .accessibilityIdentifier("recordingMeta")
+                if audioDuration > 0 { RecordingChip(text: RecordClock.time(audioDuration), icon: "clock") }
+                if !speakerLabels.isEmpty { RecordingChip(text: participantTitle, icon: "person.2") }
                 topicChip
-            }
+            }.padding(.top, 14)
+
         }
     }
 
@@ -453,9 +425,9 @@ struct TranscriptScreen: View {
     @ViewBuilder
     private func titleView(_ title: String) -> some View {
         let text = Text(title)
-            .font(LoriFont.displaySmall)
+            .font(LoriFont.recordingTitle)
+            .tracking(-0.32)
             .foregroundStyle(LoriPalette.ink)
-            .lineLimit(3)
             .multilineTextAlignment(.leading)
             .frame(maxWidth: .infinity, alignment: .leading)
         if canRename {
@@ -470,20 +442,6 @@ struct TranscriptScreen: View {
                 .accessibilityAddTraits(.isHeader)
                 .accessibilityIdentifier("recordTitle")
         }
-    }
-
-    /// «5 октября 2026, 14:20 · 24:10». Дата абсолютная, а не «сегодня, 14:20»:
-    /// здесь человек смотрит на одну запись, и день недели назад ему ничего не скажет.
-    private var meta: String {
-        let stamp = RecordClock.date(entry.modifiedAt)
-        guard audioDuration > 0 else { return stamp }
-        return "\(stamp) · \(RecordClock.time(audioDuration))"
-    }
-
-    private var spokenMeta: String {
-        let stamp = "Записано \(RecordClock.date(entry.modifiedAt))"
-        guard audioDuration > 0 else { return stamp }
-        return "\(stamp), длительность \(RecordClock.time(audioDuration))"
     }
 
     /// Что модель заголовков делает с этой записью прямо сейчас — тогда это
@@ -517,23 +475,8 @@ struct TranscriptScreen: View {
     private var topicChip: some View {
         let topic = topics.topic(for: path)
         return Button { sheet = .topics } label: {
-            HStack(spacing: 4) {
-                if topic == nil {
-                    Image(systemName: "plus")
-                        .font(LoriFont.tiny.weight(.bold))
-                }
-                Text(topic ?? "Тема")
-                    .font(LoriFont.small)
-                    .lineLimit(1)
-            }
-            .foregroundStyle(topic == nil ? LoriPalette.muted : LoriPalette.lime)
-            .padding(.horizontal, 10)
-            .frame(minHeight: 28)
-            .background(topic == nil ? LoriPalette.card : LoriPalette.limeSoft.opacity(0.6), in: Capsule())
-            .overlay(Capsule().stroke(LoriPalette.line, lineWidth: topic == nil ? 1 : 0))
-            // Рисуется на 28 pt, нажимается на 44 — как чипы нижней панели.
-            .frame(minHeight: 44)
-            .contentShape(Rectangle())
+            RecordingChip(text: topic ?? "+ Тема", icon: "folder")
+                .frame(minHeight: 44).contentShape(Rectangle()).padding(.vertical, -7)
         }
         .buttonStyle(.plain)
         .accessibilityLabel(topic.map { "Тема: \($0)" } ?? "Тема не выбрана")
@@ -541,16 +484,53 @@ struct TranscriptScreen: View {
         .accessibilityIdentifier("topicChip")
     }
 
+    private var speakerLabels: [String] {
+        Array(Set(document.lines.compactMap(\.speaker))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+    private var participantTitle: String {
+        if speakerLabels.allSatisfy({ speakers.isNamed($0, in: path) }) {
+            return speakerLabels.map { speakers.name(of: $0, in: path) }.joined(separator: ", ")
+        }
+        let count = speakerLabels.count
+        let word = count % 10 == 1 && count % 100 != 11 ? "говорящий" : "говорящих"
+        return "\(count) \(word)"
+    }
+
+    @ViewBuilder private var speakerChips: some View {
+        if !speakerLabels.isEmpty {
+            RecordingFlow(spacing: 6) {
+                ForEach(speakerLabels, id: \.self) { label in
+                    let name = speakers.name(of: label, in: path)
+                    HStack(spacing: 6) {
+                        Circle().fill((Int(label.filter(\.isNumber)) ?? 1).isMultiple(of: 2) ? LoriPalette.accentAlt : LoriPalette.lime)
+                            .frame(width: 8, height: 8).accessibilityHidden(true)
+                        Text(name + (document.speechShares[label].map { " · \(Int(($0 * 100).rounded()))%" } ?? ""))
+                            .recordingFont(13, relativeTo: .footnote).foregroundStyle(LoriPalette.chipText)
+                    }
+                    .padding(.horizontal, 11).frame(minHeight: 28)
+                    .background(LoriPalette.chip, in: Capsule())
+                    .onLongPressGesture { beginNaming(label) }
+                    .accessibilityAction(named: "Назвать говорящего") { beginNaming(label) }
+                    .accessibilityElement(children: .combine)
+                    .accessibilityIdentifier("speakerShare.\(label)")
+                }
+            }.padding(.horizontal, 2).padding(.top, 14)
+        }
+    }
+
     // MARK: - Поделиться и скопировать
 
-    /// Без расшифровки этих кнопок нет вовсе: из панели уходит весь пункт, а не
-    /// вид внутри него — иначе на стекле осталась бы пустая подложка (Apple,
-    /// «Adopting Liquid Glass» → «Check how you hide toolbar items»). Выключенные
-    /// серые кнопки спорили бы с единственной живой — «Расшифровать». Пока файл
-    /// расшифровки дочитывается, кнопки видны (и выключены): исчезни они на этот
-    /// миг — панель мигала бы при каждом открытии записи.
+    /// Оба действия относятся к открытой вкладке. Пока её текст ещё читается,
+    /// сохраняем выключенную группу; пустая вкладка убирает всю группу стекла.
+    private var currentContent: RecordingContent? {
+        switch activeTab {
+        case .summary: recordingSummaries.entry(for: path).map { .summary($0) }
+        case .report: reportMarkdown.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : .report($0) }
+        case .transcript: document.isEmpty ? nil : .transcript(document)
+        }
+    }
     private var showsActions: Bool {
-        !document.isEmpty || (transcriptFile != nil && !isUntranscribed)
+        currentContent != nil || (activeTab == .transcript && transcriptFile != nil && !isUntranscribed)
     }
 
     /// Формат выбирается тут же, а не в настройках: PDF нужен, когда расшифровку
@@ -579,7 +559,7 @@ struct TranscriptScreen: View {
         } label: {
             Label("Поделиться", systemImage: "square.and.arrow.up")
         }
-        .disabled(document.isEmpty)
+        .disabled(currentContent == nil)
         .tint(LoriPalette.lime)
         .accessibilityLabel("Поделиться")
         .accessibilityHint("Выбор формата: PDF или Markdown")
@@ -600,10 +580,10 @@ struct TranscriptScreen: View {
         Button(action: copy) {
             Label(copied ? "Скопировано" : "Скопировать", systemImage: copied ? "checkmark" : "doc.on.doc")
         }
-        .disabled(document.isEmpty)
+        .disabled(currentContent == nil)
         .tint(LoriPalette.ink)
         .accessibilityLabel(copied ? "Скопировано" : "Скопировать")
-        .accessibilityHint("Текст расшифровки с именами говорящих")
+        .accessibilityHint("Скопировать: " + activeTab.title)
         .accessibilityIdentifier("copyTranscript")
     }
 
@@ -930,18 +910,17 @@ struct TranscriptScreen: View {
     private var transcriptText: some View {
         if !document.isEmpty {
             let column = timeColumnWidth(upTo: document.lastStamp)
-            let pills = speakerPills(document.lines.compactMap(\.speaker))
             // Часовая запись даёт сотни реплик. Обычный VStack создавал их все до
             // первого кадра; ленивый строит только видимую часть.
-            LazyVStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(document.lines) { line in
                     row(
+                        id: line.id,
                         start: line.start,
                         approximate: line.isApproximate,
                         speaker: line.speaker,
                         text: line.text,
-                        column: document.hasTimecodes ? column : nil,
-                        pills: pills
+                        column: document.hasTimecodes ? column : nil
                     )
                 }
             }
@@ -950,17 +929,16 @@ struct TranscriptScreen: View {
             // Файла ещё нет, а части уже готовы — показываем их сразу.
             let column = timeColumnWidth(upTo: ready.segments.last?.start)
             let marks = ready.segments.map { TranscriptDocument.speakerMark(in: $0.text) }
-            let pills = speakerPills(marks.compactMap { $0?.label })
-            LazyVStack(alignment: .leading, spacing: 14) {
+            LazyVStack(alignment: .leading, spacing: 0) {
                 ForEach(Array(ready.segments.enumerated()), id: \.offset) { index, segment in
                     let mark = marks[index]
                     row(
+                        id: index,
                         start: segment.start,
                         approximate: segment.isApproximate,
                         speaker: mark?.label,
                         text: mark?.rest ?? segment.text,
-                        column: column,
-                        pills: pills
+                        column: column
                     )
                 }
                 Skeleton()
@@ -992,135 +970,28 @@ struct TranscriptScreen: View {
         (last ?? 0) >= 3600 ? hourTimeColumn : timeColumn
     }
 
-    /// Ширина кружка каждого говорящего и общая колонка под них.
-    ///
-    /// Колонка одна на весь документ — по самому широкому кружку, но не шире
-    /// `speakerCap`. Раньше у каждой реплики была своя ширина: «Марина» рядом с «S2»
-    /// сдвигала текст своих реплик правее соседних, и столбец текста шёл лесенкой.
-    /// Меряется заранее, по шрифту, а не раскладкой: ленивый список строит только
-    /// видимые строки, и колонка, собранная из них, прыгала бы при прокрутке.
-    private func speakerPills(_ labels: [String]) -> SpeakerPills? {
-        let unique = Set(labels)
-        guard !unique.isEmpty else { return nil }
-        let category = UIContentSizeCategory(typeSize)
-        let base = UIFont.preferredFont(forTextStyle: .caption2, compatibleWith: UITraitCollection(preferredContentSizeCategory: category))
-        let font = UIFont.systemFont(ofSize: base.pointSize, weight: .semibold)
-        var widths: [String: CGFloat] = [:]
-        for label in unique {
-            let named = speakers.isNamed(label, in: path)
-            let text = named ? speakers.name(of: label, in: path) : label
-            let textWidth = (text as NSString).size(withAttributes: [.font: font]).width
-            // Поля — как у `SpeakerDot`: у имени шире, у метки «S1» уже.
-            let ideal = ceil(textWidth) + (named ? 16 : 8)
-            widths[label] = min(speakerCap, max(26, ideal))
-        }
-        return SpeakerPills(widths: widths, column: widths.values.max() ?? 26)
+    private func row(id: Int, start: TimeInterval?, approximate: Bool, speaker: String?, text: String, column: CGFloat?) -> some View {
+        RecordingTranscriptLine(cursor: playback.cursor, id: id, start: start, approximate: approximate,
+                                label: speaker, name: speaker.map { speakers.name(of: $0, in: path) }, text: text,
+                                timeColumn: column, canSeek: !isRecording && audioDuration > 0, seek: seek,
+                                rename: { if let speaker { beginNaming(speaker) } })
     }
 
-    /// Реплика: таймкод — кнопка, текст — нет.
-    ///
-    /// Раньше кнопкой была вся строка, и текст нельзя было выделить: долгое
-    /// нажатие уходило в кнопку. Теперь перематывает таймкод, а реплику можно
-    /// выделить и скопировать — часто нужна одна реплика, а не вся запись.
-    /// `column` — ширина колонки времени; nil — таймкодов в расшифровке нет вовсе.
-    @ViewBuilder
-    private func row(
-        start: TimeInterval?,
-        approximate: Bool,
-        speaker: String?,
-        text: String,
-        column: CGFloat?,
-        pills: SpeakerPills?
-    ) -> some View {
-        if typeSize.isAccessibilitySize {
-            // На самых крупных размерах три колонки в строку оставляли тексту
-            // одно слово на строку. Время и говорящий встают над репликой, а
-            // текст получает всю ширину.
-            VStack(alignment: .leading, spacing: 4) {
-                if start != nil || speaker != nil {
-                    HStack(alignment: .firstTextBaseline, spacing: 10) {
-                        if let start { timeButton(start, approximate: approximate, width: nil) }
-                        if let speaker { speakerDot(speaker) }
-                    }
-                }
-                replica(text)
-            }
-        } else {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                if let column {
-                    if let start {
-                        timeButton(start, approximate: approximate, width: column)
-                    } else {
-                        // Продолжение реплики: колонка времени пустая, но она есть.
-                        // Без неё абзацы одной реплики разъезжаются по левому краю,
-                        // и читается это как разные реплики.
-                        Color.clear.frame(width: column, height: 1)
-                    }
-                }
-                if let pills {
-                    // Колонка говорящих есть у каждой строки документа с говорящими:
-                    // без метки она пустая, но держит текст на одной вертикали.
-                    if let speaker {
-                        speakerDot(speaker, width: pills.widths[speaker])
-                            .frame(width: pills.column, alignment: .leading)
-                    } else {
-                        Color.clear.frame(width: pills.column, height: 1)
-                    }
-                }
-                replica(text)
-            }
-        }
+    private func updatePlaybackCursor() {
+        if !document.isEmpty { playback.cursor.configure(document.lines); return }
+        let lines: [TranscriptDocument.Line] = transcription.partialTranscript(for: path)?.segments.enumerated().map { index, segment in
+            let mark = TranscriptDocument.speakerMark(in: segment.text)
+            return TranscriptDocument.Line(id: index, start: segment.start, end: segment.end,
+                                           text: mark?.rest ?? segment.text, isApproximate: segment.isApproximate,
+                                           speaker: mark?.label)
+        } ?? []
+        playback.cursor.configure(lines)
     }
 
-    private func replica(_ text: String) -> some View {
-        Text(text)
-            .font(LoriFont.body)
-            .foregroundStyle(LoriPalette.ink)
-            .multilineTextAlignment(.leading)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .textSelection(.enabled)
-    }
-
-    /// «≈» — время это границы отправленного куска, а не реплики: выдать его за
-    /// таймкод речи значило бы соврать.
-    /// `width` — ширина колонки; nil — по самому времени (время над репликой).
-    private func timeButton(_ start: TimeInterval, approximate: Bool, width: CGFloat?) -> some View {
-        let stamp = RecordClock.time(start)
-        return Button {
-            guard !isRecording else { return }
-            playback.seek(to: start)
-            if !playback.isPlaying { playback.play() }
-        } label: {
-            Text((approximate ? "≈" : "") + stamp)
-                .font(LoriFont.small.monospacedDigit())
-                .foregroundStyle(LoriPalette.muted)
-                .lineLimit(1)
-                .minimumScaleFactor(0.8)
-                .frame(width: width, alignment: .leading)
-                // Точка нажатия 44 pt, а строка не раздувается: мелкий таймкод
-                // рядом с одной строкой текста иначе сделал бы ленту вдвое реже.
-                .padding(.vertical, 13)
-                .contentShape(Rectangle())
-                .padding(.vertical, -13)
-        }
-        .buttonStyle(.plain)
-        .disabled(isRecording)
-        .accessibilityLabel(approximate ? "Примерно \(stamp)" : stamp)
-        .accessibilityHint("Слушать с \(stamp)")
-        .accessibilityIdentifier("lineTime")
-    }
-
-    /// Кружок называет говорящего долгим нажатием — сразу по всей записи.
-    /// `width` — ширина кружка, посчитанная для колонки; nil — по содержимому.
-    private func speakerDot(_ label: String, width: CGFloat? = nil) -> some View {
-        SpeakerDot(
-            label: label,
-            name: speakers.isNamed(label, in: path) ? speakers.name(of: label, in: path) : nil,
-            width: width
-        )
-        .onLongPressGesture(minimumDuration: 0.5) { beginNaming(label) }
-        .accessibilityAction(named: "Назвать говорящего") { beginNaming(label) }
-        .accessibilityIdentifier("speakerDot")
+    private func seek(_ start: TimeInterval) {
+        guard !isRecording else { return }
+        playback.seek(to: start)
+        if !playback.isPlaying { playback.play() }
     }
 
     // MARK: - Панель навигации
@@ -1458,10 +1329,9 @@ struct TranscriptScreen: View {
         return "Запись \(RecordClock.date(entry.modifiedAt))"
     }
 
-    /// Текст для «Скопировать» и Obsidian: с именами вместо меток — снаружи
-    /// приложения кружков нет, и «S1» ничего не значит.
+    /// Текст открытой вкладки для «Скопировать»; в расшифровке — с назначенными именами.
     private var outgoingText: String {
-        speakers.applied(to: document.plain, in: path)
+        currentContent?.copiedText(names: speakers.names[path] ?? [:]) ?? ""
     }
 
     private func copy() {
@@ -1476,19 +1346,11 @@ struct TranscriptScreen: View {
         }
     }
 
-    /// Расшифровка уходит наружу файлом: в нём шапка, описание, таймкоды и имена
-    /// говорящих — всё, что видно на экране.
+    /// Открытая вкладка уходит файлом, выбранным в единственном меню панели.
     private func export(_ format: TranscriptExportFormat) {
-        let draft = TranscriptExport.make(
-            document: document,
-            title: exportTitle,
-            recordedAt: entry.modifiedAt,
-            duration: audioDuration,
-            detail: recordTitle.generatedDetail,
-            topic: topics.topic(for: path),
-            names: speakers.names[path] ?? [:],
-            summary: recordingSummaries.entry(for: path)
-        )
+        guard let currentContent else { return }
+        let draft = currentContent.export(title: exportTitle, recordedAt: entry.modifiedAt, duration: audioDuration,
+                                          topic: topics.topic(for: path), names: speakers.names[path] ?? [:])
         let audio = try? workspace.fileURL(for: path)
         exporting = true
         Task {
@@ -1505,7 +1367,7 @@ struct TranscriptScreen: View {
     }
 
     private func sendToObsidian() {
-        guard let url = ObsidianExport.url(title: exportTitle, text: outgoingText) else {
+        guard let url = ObsidianExport.url(title: exportTitle, text: speakers.applied(to: document.plain, in: path)) else {
             notice = Notice(
                 title: "Obsidian не настроен",
                 message: "Укажи название хранилища: Настройки → Хранилище."
@@ -1527,12 +1389,6 @@ private struct CheckedWarnings {
         let path: String
         let warnings: [String]
     }
-}
-
-/// Ширины кружков говорящих в документе и колонка под самый широкий.
-private struct SpeakerPills {
-    let widths: [String: CGFloat]
-    let column: CGFloat
 }
 
 /// Сообщение экрана: что случилось и что делать.
@@ -1557,6 +1413,14 @@ private enum RecordClock {
         dateFormatter.string(from: date)
     }
 
+    static func chipDate(_ date: Date) -> String { chipFormatter.string(from: date).prefix(1).uppercased() + chipFormatter.string(from: date).dropFirst() }
+    private static let chipFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = LoriFormat.locale
+        formatter.dateFormat = "EEE, d MMMM · HH:mm"
+        return formatter
+    }()
+
     private static let dateFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.locale = LoriFormat.locale
@@ -1579,35 +1443,20 @@ private struct PlayerCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Group {
-                // На самых крупных размерах текста ползунку в одной строке с тремя
-                // кнопками не остаётся места — он встаёт отдельной строкой.
                 if typeSize.isAccessibilitySize {
-                    VStack(alignment: .leading, spacing: 2) {
-                        slider.padding(.horizontal, 8)
-                        HStack(spacing: 8) {
-                            playButton
-                            remaining
-                            Spacer(minLength: 8)
-                            rateButton
-                        }
+                    VStack(spacing: 12) {
+                        progress
+                        HStack(spacing: 12) { playButton; Spacer(minLength: 0); rateButton }
                     }
                 } else {
-                    HStack(spacing: 8) {
-                        playButton
-                        slider
-                        remaining
-                        rateButton
-                    }
+                    HStack(spacing: 12) { playButton; progress; rateButton }
                 }
             }
-            .padding(.horizontal, 12)
-            .padding(.vertical, 6)
+            .padding(.leading, 10).padding(.trailing, 12).padding(.vertical, 10)
             .recordingPlayerSurface(expanded: typeSize.isAccessibilitySize)
-
             if let problem = playback.loadError {
                 Label(problem, systemImage: "exclamationmark.triangle")
-                    .font(LoriFont.small)
-                    .foregroundStyle(LoriPalette.danger)
+                    .font(LoriFont.small).foregroundStyle(LoriPalette.danger)
             }
         }
         .accessibilityElement(children: .contain)
@@ -1617,29 +1466,26 @@ private struct PlayerCard: View {
     private var playButton: some View {
         Button(action: playback.toggle) {
             Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
-                .font(LoriFont.meta.weight(.bold))
-                .foregroundStyle(LoriPalette.ink)
+                .font(.system(size: 16, weight: .semibold))
+                .foregroundStyle(LoriPalette.paleInk)
                 .frame(width: 44, height: 44)
-                .contentShape(Rectangle())
+                .background(LoriPalette.pale, in: Circle()).contentShape(Circle())
         }
-        .buttonStyle(.plain)
-        .disabled(!canPlay)
-        .opacity(canPlay ? 1 : 0.45)
+        .buttonStyle(.plain).disabled(!canPlay).opacity(canPlay ? 1 : 0.45)
         .accessibilityLabel(playback.isPlaying ? "Пауза" : "Слушать")
     }
-
-    private var slider: some View {
-        Slider(
-            value: Binding(get: { playback.position }, set: { playback.scrub(to: $0) }),
-            in: 0...max(playback.duration, 0.01),
-            onEditingChanged: { editing in
-                if editing { playback.beginScrub() } else { playback.endScrub() }
+    private var progress: some View {
+        VStack(spacing: 7) {
+            RecordingSeekTrack(playback: playback, enabled: canPlay)
+                .frame(height: 44).padding(.vertical, -20)
+            HStack {
+                Text(RecordClock.time(playback.position))
+                    .recordingFont(12, relativeTo: .caption, monospaced: true).foregroundStyle(LoriPalette.muted)
+                    .accessibilityLabel("Прошло " + RecordClock.time(playback.position))
+                Spacer(minLength: 4)
+                remaining
             }
-        )
-        .tint(LoriPalette.lime)
-        .disabled(playback.duration == 0)
-        .accessibilityLabel("Позиция в записи")
-        .accessibilityValue(RecordClock.time(playback.position))
+        }
     }
 
     /// Минус не украшение: рядом в шапке стоит полная длительность, набранная
@@ -1647,7 +1493,7 @@ private struct PlayerCard: View {
     /// расхождение длительностей. Это остаток.
     private var remaining: some View {
         Text("−" + RecordClock.time(playback.remaining))
-            .font(LoriFont.small.monospacedDigit())
+            .recordingFont(12, relativeTo: .caption, monospaced: true)
             .foregroundStyle(LoriPalette.muted)
             .lineLimit(1)
             .fixedSize()
@@ -1660,9 +1506,11 @@ private struct PlayerCard: View {
             playback.rate = playback.rate >= 2 ? 1 : (playback.rate == 1 ? 1.5 : 2)
         } label: {
             Text(rateLabel)
-                .font(LoriFont.small.monospacedDigit())
+                .recordingFont(13, weight: .semibold, relativeTo: .footnote, monospaced: true)
                 .foregroundStyle(LoriPalette.ink)
-                .padding(.horizontal, 9)
+                .padding(.horizontal, 10)
+                .frame(minHeight: 32)
+                .background(LoriPalette.bubble, in: Capsule())
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }
@@ -1781,47 +1629,5 @@ private struct SplitRow: Layout {
 
     private func fitsInline(_ sizes: [CGSize], width: CGFloat) -> Bool {
         sizes.map(\.width).reduce(0, +) + spacing * CGFloat(max(0, sizes.count - 1)) <= width
-    }
-}
-
-// MARK: - Говорящий
-
-/// Цветной кружок говорящего: реплики разных людей различаются с одного
-/// взгляда, а не чтением меток в тексте. Цвет стабилен для номера — «S1»
-/// всегда одного цвета в пределах приложения.
-struct SpeakerDot: View {
-    let label: String
-    /// Имя, если человек его дал. Цвет всё равно считается по метке: он должен
-    /// остаться прежним и после переименования.
-    var name: String?
-    /// Точная ширина — в колонке говорящих. Длинное имя в ней обрезается.
-    var width: CGFloat?
-
-    /// Палитра из токенов приложения: у каждой пары «светлый — тёмный» уже
-    /// подобрана плотность, случайные оттенки в тёмной теме бы выпадали.
-    private static let colors: [Color] = [
-        LoriPalette.lime, LoriPalette.accentAlt, LoriPalette.warn, LoriPalette.info,
-    ]
-
-    var body: some View {
-        Text(name ?? label)
-            .font(LoriFont.tiny.weight(.semibold))
-            .foregroundStyle(LoriPalette.onInk)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            // Поля и у метки: на крупном шрифте «S2» шире кружка в 26 pt и без
-            // них упиралась бы в его край.
-            .padding(.horizontal, name == nil ? 4 : 8)
-            .frame(width: width)
-            .frame(minWidth: 26, minHeight: 26)
-            .background(color, in: Capsule())
-            .accessibilityLabel("Говорящий \(name ?? label)")
-            .accessibilityHint("Долгое нажатие — назвать говорящего")
-    }
-
-    private var color: Color {
-        let number = Int(label.filter(\.isNumber)) ?? 1
-        let index = (number - 1) % Self.colors.count
-        return Self.colors[index < 0 ? index + Self.colors.count : index]
     }
 }

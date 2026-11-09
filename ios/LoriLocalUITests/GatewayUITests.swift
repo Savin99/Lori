@@ -71,28 +71,29 @@ final class GatewayUITests: XCTestCase {
         XCTAssertTrue(app.descendants(matching: .any)["reportMarkdown"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["Обсудили выпуск Лори."].exists)
         // Повторный прогон открывает прежний файл: просим новый отчёт у заглушки.
+        reveal(app.buttons["refreshReport"], in: app)
         app.buttons["refreshReport"].tap()
         let reportProgress = app.descendants(matching: .any)["reportProgress"]
         XCTAssertTrue(reportProgress.waitForExistence(timeout: 5))
         XCTAssertFalse(reportProgress.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "%")).firstMatch.exists)
         XCTAssertTrue(reportProgress.waitForNonExistence(timeout: 15), "обновление действительно завершилось")
-        XCTAssertTrue(app.staticTexts["1. Записать проверку."].waitForExistence(timeout: 5))
-        let task = app.staticTexts["• Анна проверит качество завтра."]
+        XCTAssertTrue(app.staticTexts["Записать проверку."].waitForExistence(timeout: 5))
+        let task = app.staticTexts["Анна проверит качество завтра."]
         let questions = app.descendants(matching: .any)["reportMarkdown"].staticTexts["Открытые вопросы"]
         XCTAssertTrue(task.exists, "Markdown-маркер списка превращается в типографскую точку")
         XCTAssertFalse(app.staticTexts["- Анна проверит качество завтра."].exists)
-        let ordered = app.staticTexts["1. Записать проверку."]
-        let nested = app.staticTexts["• Сохранить образец."]
+        let ordered = app.staticTexts["Записать проверку."]
+        let nested = app.staticTexts["Сохранить образец."]
         XCTAssertTrue(ordered.exists)
         XCTAssertTrue(nested.exists)
         XCTAssertGreaterThan(ordered.frame.minX, task.frame.minX, "нумерованный пункт вложен")
         XCTAssertGreaterThan(nested.frame.minX, ordered.frame.minX, "маркированный пункт вложен ещё глубже")
         XCTAssertLessThan(task.frame.maxY, questions.frame.minY, "разделы отчёта не перекрываются")
-        XCTAssertTrue(app.buttons["reportShare"].exists)
+        XCTAssertTrue(app.buttons["shareMenu"].exists)
         save("gateway-report-tab")
-        app.buttons["reportShare"].tap()
-        XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 5))
-        XCTAssertTrue(app.buttons["Markdown (.md)"].exists)
+        app.buttons["shareMenu"].tap()
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "PDF")).firstMatch.waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Markdown (.md)")).firstMatch.exists)
     }
 
     func testSubscriptionEngineRequiresConfiguredGatewayInQuickPicker() {

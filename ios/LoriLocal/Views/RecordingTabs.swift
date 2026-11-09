@@ -15,43 +15,34 @@ enum RecordingTab: String, CaseIterable {
 
 struct RecordingTabs: View {
     @Binding var selection: RecordingTab
-    @Namespace private var glass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
 
-    // Уже на XXL три естественные подписи тесны на узком iPhone. Переход
-    // раньше accessibility-размеров сохраняет целые слова без уменьшения шрифта.
-    private var stacksTabs: Bool { typeSize >= .xxLarge }
-
     var body: some View {
-        Group {
-            if #available(iOS 26, *) {
-                // Встроенный inline segmented не обещает стеклянную подложку.
-                // Один выбранный материал движется между тремя местами по общему ID
-                // (Apple, Applying Liquid Glass to custom views). Стекла на стекле нет.
-                GlassEffectContainer(spacing: 12) { tabs }
-            } else {
-                tabs
-            }
-        }
-        .accessibilityElement(children: .contain)
-        .accessibilityAddTraits(.isTabBar)
-        .accessibilityLabel("Содержание записи")
-        .accessibilityIdentifier("recordingTabs")
-    }
-
-    private var tabs: some View {
-        // Длинная «Расшифровка» получает свою естественную ширину, а не треть
-        // строки. На крупном шрифте все три пункта стоят друг под другом.
-        let layout = stacksTabs
+        let layout = typeSize >= .xxLarge
             ? AnyLayout(VStackLayout(spacing: 4))
-            : AnyLayout(HStackLayout(spacing: 12))
-        return layout {
+            : AnyLayout(HStackLayout(spacing: 4))
+        layout {
             ForEach(Array(RecordingTab.allCases.enumerated()), id: \.element) { index, tab in
                 Button {
-                    withAnimation(reduceMotion ? nil : .smooth(duration: 0.3)) { selection = tab }
+                    withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { selection = tab }
                 } label: {
-                    tabLabel(tab)
+                    Text(tab.title)
+                        .recordingFont(15, weight: selection == tab ? .semibold : .medium, relativeTo: .subheadline)
+                        .foregroundStyle(selection == tab ? LoriPalette.ink : LoriPalette.muted)
+                        .multilineTextAlignment(.center)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                        .padding(.vertical, typeSize >= .xxLarge ? 4 : 0)
+                        .background {
+                            if selection == tab {
+                                RoundedRectangle(cornerRadius: 12).fill(LoriPalette.raised)
+                                    .overlay(alignment: .top) {
+                                        Capsule().fill(.white.opacity(0.08)).frame(height: 1).padding(.horizontal, 12)
+                                    }
+                                    .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
+                            }
+                        }
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -61,36 +52,12 @@ struct RecordingTabs: View {
                 .accessibilityIdentifier("recordingTab.\(tab.rawValue)")
             }
         }
-        .frame(maxWidth: .infinity)
-    }
-
-    @ViewBuilder private func tabLabel(_ tab: RecordingTab) -> some View {
-        let label = Text(tab.title)
-            .font(LoriFont.meta.weight(selection == tab ? .semibold : .regular))
-            .foregroundStyle(selection == tab ? LoriPalette.ink : LoriPalette.muted)
-            .multilineTextAlignment(.center)
-            .fixedSize(horizontal: !stacksTabs, vertical: true)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .frame(maxWidth: stacksTabs ? .infinity : nil, minHeight: 44)
-        if selection == tab {
-            if #available(iOS 26, *) {
-                // Эффект на самой подписи оставляет её над стеклом. Отдельное
-                // стекло в background размывало буквы как лежащий под ним контент.
-                if stacksTabs {
-                    label.glassEffect(.regular.interactive(), in: RoundedRectangle(cornerRadius: 22))
-                        .glassEffectID("selection", in: glass)
-                } else {
-                    label.glassEffect(.regular.interactive(), in: Capsule())
-                        .glassEffectID("selection", in: glass)
-                }
-            } else {
-                label.background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 22))
-                    .overlay(RoundedRectangle(cornerRadius: 22).stroke(LoriPalette.line))
-            }
-        } else {
-            label
-        }
+        .padding(4)
+        .recordingCard(radius: 16)
+        .accessibilityElement(children: .contain)
+        .accessibilityAddTraits(.isTabBar)
+        .accessibilityLabel("Содержание записи")
+        .accessibilityIdentifier("recordingTabs")
     }
 }
 
