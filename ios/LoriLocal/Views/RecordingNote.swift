@@ -14,7 +14,7 @@ struct RecordingNote: View {
         VStack(alignment: .leading, spacing: 0) {
             if !entry.summary.brief.isEmpty {
                 Text(entry.summary.brief)
-                    .font(LoriFont.body).lineSpacing(leading)
+                    .font(LoriFont.noteBrief).lineSpacing(leading)
                     .foregroundStyle(LoriPalette.ink)
                     .textSelection(.enabled)
             }
@@ -68,7 +68,7 @@ struct RecordingNote: View {
     }
 
     private func provenance(now: Date) -> some View {
-        Text("Итог Gemini по подписке · " + (entry.stale ? "текст менялся" : LoriFormat.ago(entry.createdAt, now: now)) + " ·")
+        Text("Итог Gemini · " + (entry.stale ? "текст менялся" : LoriFormat.ago(entry.createdAt, now: now)) + " ·")
             .font(LoriFont.small).foregroundStyle(LoriPalette.muted)
     }
     private var refreshButton: some View {

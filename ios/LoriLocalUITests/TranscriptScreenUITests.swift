@@ -90,15 +90,15 @@ final class TranscriptScreenUITests: XCTestCase {
         XCTAssertTrue(share.isEnabled)
         share.tap()
 
-        let pdf = app.buttons["PDF"]
+        let pdf = app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "PDF")).firstMatch
         XCTAssertTrue(pdf.waitForExistence(timeout: 5), "формат выбирают в меню")
-        XCTAssertTrue(app.buttons["Markdown (.md)"].exists)
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Markdown (.md)")).firstMatch.exists)
         // Подписи «Удобно читать и отправлять» и «Текст для дальнейшей работы»
         // меню в дерево доступности отдельно не выставляет — они видны на снимке.
         save("record-share-menu")
 
         // Файл собирается и уходит в системный лист.
-        app.buttons["Markdown (.md)"].tap()
+        app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "Markdown (.md)")).firstMatch.tap()
         XCTAssertTrue(pdf.waitForNonExistence(timeout: 5), "меню закрылось")
         _ = app.otherElements.firstMatch.waitForExistence(timeout: 3)
         save("record-share-sheet")
@@ -122,16 +122,22 @@ final class TranscriptScreenUITests: XCTestCase {
         let app = launch()
         try open(sample, in: app)
 
-        // Та же фраза стоит сниппетом на карточке списка под листом — берём
-        // последнюю: лист в дереве идёт после списка.
-        let matches = app.staticTexts.matching(NSPredicate(format: "label == %@", "Раз, два, три, четыре, пять."))
-        XCTAssertTrue(matches.firstMatch.waitForExistence(timeout: 5))
-        matches.element(boundBy: matches.count - 1).press(forDuration: 1.2)
+        // Та же фраза есть на карточке под листом. Вкладка задаёт точную область,
+        // а порядок листа и списка в AX-дереве на iOS 27 не гарантирован.
+        let replica = app.scrollViews["recordingScroll"].staticTexts["Раз, два, три, четыре, пять."]
+        XCTAssertTrue(replica.waitForExistence(timeout: 5))
+        XCTAssertTrue(replica.isHittable)
+        // В iOS 27 выбирается слово: центр всей рамки может попасть в пробел.
+        let word = replica.coordinate(withNormalizedOffset: CGVector(dx: 0.06, dy: 0.5))
+        word.press(forDuration: 1.2)
         // «Скопировать» из меню текста, а не одноимённая кнопка панели.
         let copy = app.descendants(matching: .any)
             .matching(NSPredicate(format: "label == %@ AND identifier != %@", "Скопировать", "copyTranscript"))
             .firstMatch
-        XCTAssertTrue(copy.waitForExistence(timeout: 3), "долгое нажатие на реплику даёт меню текста")
+        // iOS 27 сначала показывает диапазон и маркеры; тап по выделенному
+        // слову открывает действия. На iOS 26 меню появляется сразу.
+        if !copy.waitForExistence(timeout: 1) { word.tap() }
+        XCTAssertTrue(copy.waitForExistence(timeout: 3), "выделенная реплика даёт меню текста")
         save("record-text-selection")
     }
 
@@ -338,9 +344,9 @@ final class TranscriptScreenUITests: XCTestCase {
         let away = app.coordinate(withNormalizedOffset: CGVector(dx: 0.15, dy: 0.88))
 
         outside(app.buttons["shareMenu"], dy: -3).tap()
-        XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 3), "«Поделиться» нажимается у верхнего края стекла")
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "PDF")).firstMatch.waitForExistence(timeout: 3), "«Поделиться» нажимается у верхнего края стекла")
         away.tap()
-        XCTAssertTrue(app.buttons["PDF"].waitForNonExistence(timeout: 5))
+        XCTAssertTrue(app.buttons.matching(NSPredicate(format: "label BEGINSWITH %@", "PDF")).firstMatch.waitForNonExistence(timeout: 5))
 
         let copy = app.buttons["copyTranscript"]
         outside(copy, dy: 2).tap()

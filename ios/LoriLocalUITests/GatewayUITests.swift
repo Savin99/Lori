@@ -48,6 +48,7 @@ final class GatewayUITests: XCTestCase {
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.buttons["Готово"].tap()
         openSummaryRecord(app)
+        app.buttons["recordingTab.summary"].tap()
         let summary = app.buttons["makeRecordingSummary"]
         reveal(summary, in: app)
         summary.tap()
@@ -63,15 +64,19 @@ final class GatewayUITests: XCTestCase {
         XCTAssertFalse(app.staticTexts["Решения"].exists, "пустой раздел скрыт")
         app.scrollViews.firstMatch.swipeDown()
         save("gateway-recording-summary")
-        let report = app.buttons["noteReport"]
-        reveal(report, in: app)
+        app.scrollViews.firstMatch.swipeDown()
+        let report = app.buttons["recordingTab.report"]
         report.tap()
+        if app.buttons["makeReport"].exists { app.buttons["makeReport"].tap() }
         XCTAssertTrue(app.descendants(matching: .any)["reportMarkdown"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["Обсудили выпуск Лори."].exists)
         // Повторный прогон открывает прежний файл: просим новый отчёт у заглушки.
-        app.buttons["reportShare"].tap()
-        app.buttons["Сделать заново"].tap()
-        XCTAssertTrue(app.staticTexts["1. Записать проверку."].waitForExistence(timeout: 15))
+        app.buttons["refreshReport"].tap()
+        let reportProgress = app.descendants(matching: .any)["reportProgress"]
+        XCTAssertTrue(reportProgress.waitForExistence(timeout: 5))
+        XCTAssertFalse(reportProgress.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "%")).firstMatch.exists)
+        XCTAssertTrue(reportProgress.waitForNonExistence(timeout: 15), "обновление действительно завершилось")
+        XCTAssertTrue(app.staticTexts["1. Записать проверку."].waitForExistence(timeout: 5))
         let task = app.staticTexts["• Анна проверит качество завтра."]
         let questions = app.descendants(matching: .any)["reportMarkdown"].staticTexts["Открытые вопросы"]
         XCTAssertTrue(task.exists, "Markdown-маркер списка превращается в типографскую точку")
@@ -84,7 +89,7 @@ final class GatewayUITests: XCTestCase {
         XCTAssertGreaterThan(nested.frame.minX, ordered.frame.minX, "маркированный пункт вложен ещё глубже")
         XCTAssertLessThan(task.frame.maxY, questions.frame.minY, "разделы отчёта не перекрываются")
         XCTAssertTrue(app.buttons["reportShare"].exists)
-        save("gateway-report-sheet")
+        save("gateway-report-tab")
         app.buttons["reportShare"].tap()
         XCTAssertTrue(app.buttons["PDF"].waitForExistence(timeout: 5))
         XCTAssertTrue(app.buttons["Markdown (.md)"].exists)
@@ -133,11 +138,7 @@ final class GatewayUITests: XCTestCase {
         engine.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "может пересказывать и пропускать")).firstMatch.waitForExistence(timeout: 5))
         app.buttons["Расшифровать заново"].tap()
-        let toggle = app.buttons["toggleTranscript"]
-        if toggle.waitForExistence(timeout: 3) {
-            reveal(toggle, in: app)
-            if toggle.value as? String == "Свёрнуто" { toggle.tap() }
-        }
+        app.buttons["recordingTab.transcript"].tap()
         // Вся запись короче одной части. Время 09:59 из fixture не становится перемоткой.
         app.scrollViews.firstMatch.swipeUp()
         let chunk = app.buttons.matching(identifier: "lineTime").matching(NSPredicate(format: "label == %@", "Примерно 0:00")).firstMatch
@@ -150,12 +151,13 @@ final class GatewayUITests: XCTestCase {
         save("gateway-subscription-transcript-menu")
     }
 
-    func testNoteTaskPersistsAndTranscriptExpandsInPlace() {
+    func testSummaryTaskPersistsAcrossTabs() {
         let app = launch()
         configure(app)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.buttons["Готово"].tap()
         openSummaryRecord(app)
+        app.buttons["recordingTab.summary"].tap()
         let refresh = app.buttons["makeRecordingSummary"]
         reveal(refresh, in: app)
         refresh.tap()
@@ -177,18 +179,18 @@ final class GatewayUITests: XCTestCase {
         let restored = reloaded.buttons["summaryTask.0"]
         reveal(restored, in: reloaded)
         XCTAssertEqual(restored.value as? String, "Выполнено")
-        let toggle = reloaded.buttons["toggleTranscript"]
-        reveal(toggle, in: reloaded)
-        XCTAssertEqual(toggle.value as? String, "Свёрнуто")
+        reloaded.swipeDown()
+        let transcript = reloaded.buttons["recordingTab.transcript"]
+        XCTAssertEqual(reloaded.buttons["recordingTab.summary"].value as? String, "Выбрана")
         XCTAssertFalse(reloaded.descendants(matching: .any)["transcriptLines"].exists)
-        toggle.tap()
-        XCTAssertEqual(toggle.value as? String, "Развёрнуто")
-        reloaded.swipeUp()
+        transcript.tap()
+        XCTAssertEqual(transcript.value as? String, "Выбрана")
         XCTAssertTrue(reloaded.descendants(matching: .any)["transcriptLines"].waitForExistence(timeout: 5))
-        save("note-transcript-expanded-light")
-        reveal(toggle, in: reloaded, down: true)
-        toggle.tap()
-        XCTAssertEqual(toggle.value as? String, "Свёрнуто")
+        XCTAssertFalse(reloaded.buttons["summaryTask.0"].exists)
+        save("note-transcript-tab-light")
+        reloaded.buttons["recordingTab.summary"].tap()
+        reveal(restored, in: reloaded)
+        XCTAssertEqual(restored.value as? String, "Выполнено")
         reloaded.swipeDown()
         saveBoth("note")
     }
@@ -200,12 +202,20 @@ final class GatewayUITests: XCTestCase {
         app.buttons["Готово"].tap()
         let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
             .matching(NSPredicate(format: "label CONTAINS '11:59' OR label CONTAINS '12:00'")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 8), "нужен seed-note-progress.py")
+        for _ in 0..<10 {
+            if card.exists && card.frame.maxY < app.buttons["recordButton"].frame.minY - 8 { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(card.exists, "нужен seed-note-progress.py")
         card.tap()
         app.buttons["transcriptMenu"].tap()
         app.buttons["Расшифровать заново"].tap()
         app.buttons["Gemini (подписка)"].tap()
         app.buttons["Расшифровать заново"].tap()
+        app.buttons["recordingTab.summary"].tap()
+        XCTAssertTrue(app.buttons["summaryTranscriptionStatus"].waitForExistence(timeout: 5))
+        XCTAssertFalse(app.scrollViews["recordingScroll"].descendants(matching: .any)["partsProgress"].exists)
+        app.buttons["summaryTranscriptionStatus"].tap()
         let slow = app.staticTexts["Слушает часть 2 из 3"]
         XCTAssertTrue(slow.waitForExistence(timeout: 40))
         XCTAssertTrue(app.descendants(matching: .any)["partsProgress"].exists)
@@ -214,7 +224,14 @@ final class GatewayUITests: XCTestCase {
         app.buttons["Записи"].tap()
         XCTAssertTrue(app.descendants(matching: .any)["composerPartsProgress"].waitForExistence(timeout: 5))
         save("progress-home-queue-light")
+        // Панель с прогрессом выше обычной: прежняя точка карточки теперь под ней.
+        for _ in 0..<10 {
+            if card.exists && card.frame.maxY < app.buttons["recordButton"].frame.minY - 8 { break }
+            app.swipeUp()
+        }
         card.tap()
+        XCTAssertTrue(app.buttons["recordingTab.transcript"].waitForExistence(timeout: 5))
+        app.buttons["recordingTab.transcript"].tap()
         let retry = app.buttons["retryPart.1"]
         XCTAssertTrue(retry.waitForExistence(timeout: 45))
         XCTAssertTrue(app.staticTexts["Готово, кроме части 2"].exists)
@@ -228,15 +245,14 @@ final class GatewayUITests: XCTestCase {
     }
 
     private func openSummaryRecord(_ app: XCUIApplication) {
-        let named = app.descendants(matching: .any).matching(identifier: "recordingCard")
-            .matching(NSPredicate(format: "label CONTAINS %@ AND NOT label CONTAINS '11:59' AND NOT label CONTAINS '12:00'", "Проверка подписки Gemini")).firstMatch
-        let durationReady = app.descendants(matching: .any).matching(identifier: "recordingCard")
-            .matching(NSPredicate(format: "label CONTAINS '11:59' OR label CONTAINS '12:00'")).firstMatch
-        _ = durationReady.waitForExistence(timeout: 5)
-        if named.waitForExistence(timeout: 3) { named.tap(); return }
         let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
-            .matching(NSPredicate(format: "(label CONTAINS %@ OR label CONTAINS %@) AND NOT label CONTAINS '12:00' AND NOT label CONTAINS '11:59'", "Сегодня обсуждали выпуск Лори", "Проверка подписки Gemini")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 8))
+            .matching(NSPredicate(format: "(label CONTAINS %@ OR label CONTAINS %@) AND NOT label CONTAINS '12:00' AND NOT label CONTAINS '11:59' AND NOT label CONTAINS '1:00' AND NOT label CONTAINS '0:59'", "Сегодня обсуждали выпуск Лори", "Проверка подписки Gemini")).firstMatch
+        // После добавления других QA-записей fixture может быть ниже первого экрана.
+        for _ in 0..<10 {
+            if card.exists && card.frame.maxY < app.buttons["recordButton"].frame.minY - 8 { break }
+            app.swipeUp()
+        }
+        XCTAssertTrue(card.exists)
         card.tap()
     }
 

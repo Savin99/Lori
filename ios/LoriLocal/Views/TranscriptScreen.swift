@@ -3,17 +3,8 @@ import UIKit
 
 /// Экран записи: прочитать, послушать и отдать наружу файлом.
 ///
-/// Сверху вниз — в том порядке, в каком человек спрашивает о записи: что это
-/// (заголовок, описание, дата с темой), послушать (плеер), что с ней сейчас (блок
-/// состояния — только когда есть что сказать) и сам текст. Отдать — «Поделиться»
-/// и «Скопировать» — в панели навигации, чем расшифровано — первой строкой «…».
-///
-/// «Поделиться» остаётся главным глаголом экрана: владелец, 5 октября 2026, «я
-/// чатам там с ИИ не пользуюсь» — расшифровка уходит из Lori файлом. Но 6 октября
-/// он обвёл две крупные капсулы под плеером и строку движка под заголовком: «мне
-/// не нравятся эти кнопки, перенеси наверх». Капсулы отнимали у текста целую
-/// строку экрана, а строка движка — ещё одну, ради сведения, которое нужно редко.
-/// Главным «Поделиться» теперь делает оливковый цвет — единственный в панели.
+/// Под заголовком — итог, отчёт и расшифровка; плеер всегда под рукой внизу.
+/// Позицию публикует только его карточка, а переключение вкладок не меняет звук.
 struct TranscriptScreen: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var reports: ReportRunner
@@ -59,17 +50,20 @@ struct TranscriptScreen: View {
     @State private var documentLoadID = UUID()
     @State private var audioDuration: TimeInterval = 0
     private enum Sheet: Identifiable {
-        case editor, topics, share(SharePayload), report(String)
+        case editor, topics, share(SharePayload)
         var id: String {
             switch self {
             case .editor: "editor"
             case .topics: "topics"
             case .share(let payload): payload.id.uuidString
-            case .report: "report"
             }
         }
     }
-    @State private var transcriptExpanded = false
+    /// nil только до первого открытия. Готовый итог не перебивает выбор человека.
+    @State private var selectedTab: RecordingTab?
+    @State private var reportMarkdown: String?
+    @State private var reportReadFailed = false
+    @State private var exportingReport = false
     @State private var sheet: Sheet?
     @State private var editing = false
     @State private var exporting = false
@@ -124,24 +118,21 @@ struct TranscriptScreen: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     header
-                    PlayerCard(playback: playback, isRecording: isRecording)
-                        .padding(.top, 14)
-                    if let status {
-                        statusBlock(status)
-                            .padding(.top, 16)
-                    }
-                    if recordingSummaries.entry(for: path) == nil { notices }
-                    summaryBlock
-                    reportProgress
-                    if recordingSummaries.entry(for: path) != nil { noteNavigation }
-                    if recordingSummaries.entry(for: path) == nil || transcriptExpanded {
-                        if recordingSummaries.entry(for: path) != nil { notices }
-                        transcriptText.padding(.top, 22)
-                    }
+                    RecordingTabs(selection: tabSelection)
+                        .padding(.top, 10)
+                    tabContent
+                        .padding(.top, 24)
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
                 .padding(.bottom, 32)
+            }
+            .accessibilityIdentifier("recordingScroll")
+            .recordingPlayerBar {
+                PlayerCard(playback: playback, isRecording: isRecording)
+                    .padding(.horizontal, 16)
+                    .padding(.top, 8)
+                    .padding(.bottom, 8)
             }
             .background(LoriPalette.canvas)
             .navigationBarTitleDisplayMode(.inline)
@@ -155,7 +146,6 @@ struct TranscriptScreen: View {
                 case .topics:
                     TopicSheet(topics: topics, title: recordTitle.title, path: path, suggestion: topics.suggestion(for: document.plain))
                 case .share(let payload): ShareSheet(payload: payload)
-                case .report(let markdown): ReportSheet(markdown: markdown, title: "Отчёт — " + exportTitle, regenerate: generateReport)
                 }
             }
             .alert("Переименовать", isPresented: $isRenaming) {
@@ -202,7 +192,7 @@ struct TranscriptScreen: View {
             if transcriptFile != nil { previews.transcriptSaved(path, in: workspace) }
         }
         .onChange(of: reports.completed[path]) { _, value in
-            if value != nil { openReport() }
+            if value != nil { loadReport() }
         }
         .onChange(of: transcriptFile) { _, _ in reload() }
         // Переименование меняет путь: экран переезжает за записью, а не играет
@@ -227,95 +217,198 @@ struct TranscriptScreen: View {
         }
     }
 
+    private var activeTab: RecordingTab {
+        selectedTab ?? (recordingSummaries.entry(for: path) == nil ? .transcript : .summary)
+    }
+
+    private var tabSelection: Binding<RecordingTab> {
+        Binding(get: { activeTab }, set: { selectedTab = $0 })
+    }
+
     @ViewBuilder
+    private var tabContent: some View {
+        switch activeTab {
+        case .summary:
+            VStack(alignment: .leading, spacing: 18) {
+                if let status { summaryTranscriptionLink(status) }
+                summaryBlock
+            }
+        case .report:
+            reportBlock
+        case .transcript:
+            VStack(alignment: .leading, spacing: 0) {
+                if let status { statusBlock(status).padding(.bottom, 16) }
+                notices
+                transcriptText.padding(.top, 12)
+            }
+        }
+    }
+
+    /// Подробности и управление частями живут в расшифровке. В итоге — одна
+    /// короткая строка, чтобы работа над звуком не вытесняла уже готовый текст.
+    private func summaryTranscriptionLink(_ status: Status) -> some View {
+        let title: String = switch status {
+        case .queued: "Расшифровка в очереди"
+        case .running, .sending, .awaitingService: "Идёт расшифровка"
+        case .interrupted: "Расшифровка прервалась"
+        case .failed: "Не получилось расшифровать"
+        case .untranscribed: "Расшифровки пока нет"
+        }
+        return Button { selectedTab = .transcript } label: {
+            Label(title, systemImage: "waveform")
+                .font(LoriFont.small)
+                .frame(minHeight: 44, alignment: .leading)
+        }
+        .foregroundStyle(LoriPalette.muted)
+        .buttonStyle(.plain)
+        .accessibilityHint("Открыть вкладку «Расшифровка»")
+        .accessibilityIdentifier("summaryTranscriptionStatus")
+    }
+
+    // Автоматическая заявка Qwen может ждать весов: она не должна выключать
+    // явный запрос итога через подписку. Работу за шлюзом сериализует бегунок.
+    private var summaryBusy: Bool { summaryRunner.running == path }
+
     private var summaryBlock: some View {
-        if !document.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                if let entry = recordingSummaries.entry(for: path) {
-                    RecordingNote(path: path, entry: entry, refreshing: summaryRunner.running == path) {
-                        summaryRunner.requestSummary(for: path, text: document.plainText)
-                    }
+        VStack(alignment: .leading, spacing: 12) {
+            if let entry = recordingSummaries.entry(for: path) {
+                RecordingNote(path: path, entry: entry, refreshing: summaryBusy) {
+                    summaryRunner.requestSummary(for: path, text: document.plainText)
                 }
-                if summaryRunner.running == path, summaryRunner.preparingSummary {
-                    HStack { ProgressView().controlSize(.small); Text("Готовлю итог…").font(LoriFont.meta) }
-                } else if recordingSummaries.entry(for: path) == nil, GatewaySettings.isConfigured {
-                    Button(recordingSummaries.entry(for: path) == nil ? "Сделать итог" : "Обновить итог") {
+            } else {
+                Text("Итог соберёт главное из расшифровки.")
+                    .font(LoriFont.body).foregroundStyle(LoriPalette.muted)
+                    .accessibilityIdentifier("summaryEmpty")
+                if GatewaySettings.isConfigured {
+                    Button("Сделать итог") {
                         summaryRunner.requestSummary(for: path, text: document.plainText)
                     }
-                    .font(LoriFont.control).foregroundStyle(LoriPalette.lime)
-                    .disabled(summaryRunner.running == path)
+                    .recordingGlassButton()
+                    .disabled(document.isEmpty || summaryBusy)
                     .accessibilityIdentifier("makeRecordingSummary")
-                }
-                if summaryRunner.isQueued(path), summaryRunner.running != path, let reason = summaryRunner.waitingReason {
-                    Text(reason).font(LoriFont.meta).foregroundStyle(LoriPalette.muted)
-                }
-                if summaryRunner.failurePath == path, let failure = summaryRunner.failure {
-                    Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger)
+                    if document.isEmpty {
+                        Text("Сначала расшифруй запись.").font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+                    }
+                } else {
+                    gatewayDirections
                 }
             }
-            .textSelection(.enabled)
-            .padding(.top, 22)
-            .accessibilityElement(children: .contain)
-            .accessibilityIdentifier("recordingSummary")
+            if summaryRunner.running == path, summaryRunner.preparingSummary {
+                HStack(spacing: 8) {
+                    ProgressView().controlSize(.small)
+                    Text("Готовлю итог…").font(LoriFont.meta)
+                }
+            }
+            if summaryRunner.isQueued(path), !summaryBusy {
+                Text(summaryRunner.waitingReason ?? "Итог в очереди")
+                    .font(LoriFont.meta).foregroundStyle(LoriPalette.muted)
+            }
+            if summaryRunner.failurePath == path, let failure = summaryRunner.failure {
+                Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger)
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("recordingSummary")
+    }
+
+    private var gatewayDirections: some View {
+        Text("Настрой подключение: Настройки → Подписка Gemini.")
+            .font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+            .accessibilityIdentifier("recordingGatewayDirections")
+    }
+
+    private var reportBlock: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let markdown = reportMarkdown {
+                ViewThatFits(in: .horizontal) {
+                    HStack(spacing: 12) { reportShareMenu; refreshReportButton }
+                    VStack(alignment: .leading, spacing: 8) { reportShareMenu; refreshReportButton }
+                }
+                reportProgress
+                ReportContent(markdown: markdown)
+            } else {
+                if !reports.running.contains(path) {
+                    Text(reportReadFailed ? "Не удалось прочитать файл отчёта." : "Отчёт соберёт запись в связный документ.")
+                        .font(LoriFont.body).foregroundStyle(LoriPalette.muted)
+                        .accessibilityIdentifier("reportEmpty")
+                    if reportReadFailed {
+                        Button("Открыть снова", action: loadReport).recordingGlassButton()
+                    } else if GatewaySettings.isConfigured {
+                        Button("Сделать отчёт", action: generateReport)
+                            .recordingGlassButton()
+                            .disabled(document.isEmpty)
+                            .accessibilityIdentifier("makeReport")
+                        if document.isEmpty {
+                            Text("Сначала расшифруй запись.").font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+                        }
+                    } else {
+                        gatewayDirections
+                    }
+                }
+                reportProgress
+            }
+            if let failure = reports.failures[path] {
+                Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger)
+            }
         }
     }
 
-    private var noteNavigation: some View {
-        VStack(spacing: 10) {
-            Button { transcriptExpanded.toggle() } label: {
-                noteLink("Расшифровка", detail: LoriFormat.plural(Set(document.lines.compactMap(\.speaker)).count, one: "говорящий", few: "говорящих", many: "говорящих"),
-                         icon: "waveform", expanded: transcriptExpanded)
-            }
-            .accessibilityValue(transcriptExpanded ? "Развёрнуто" : "Свёрнуто")
-            .accessibilityIdentifier("toggleTranscript")
-            Button(action: openOrGenerateReport) {
-                noteLink("Отчёт", detail: reports.running.contains(path) ? "Готовлю отчёт…" :
-                         ((try? workspace.fileURL(for: ReportRunner.path(for: path))) == nil ? "сделать" : nil), icon: "doc.text")
-            }
-            .disabled(reports.running.contains(path))
-            .accessibilityIdentifier("noteReport")
-        }
-        .buttonStyle(.plain).padding(.top, 26)
+    private var refreshReportButton: some View {
+        Button("Обновить отчёт", action: generateReport)
+            .recordingGlassButton()
+            .disabled(document.isEmpty || reports.running.contains(path))
+            .accessibilityIdentifier("refreshReport")
     }
 
-    private func noteLink(_ title: String, detail: String?, icon: String, expanded: Bool = false) -> some View {
-        HStack(spacing: 12) {
-            Image(systemName: icon).foregroundStyle(LoriPalette.lime).frame(width: 20)
-            Text(title).font(LoriFont.meta).foregroundStyle(LoriPalette.ink)
-            Spacer(minLength: 0)
-            if let detail { Text(detail).font(LoriFont.small).foregroundStyle(LoriPalette.muted) }
-            Image(systemName: expanded ? "chevron.down" : "chevron.right").font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+    private var reportShareMenu: some View {
+        Menu {
+            ForEach(TranscriptExportFormat.allCases) { format in
+                Button(format.title, systemImage: format.icon) { exportReport(format) }
+            }
+        } label: {
+            if exportingReport { ProgressView() }
+            else { Label("Поделиться", systemImage: "square.and.arrow.up") }
         }
-        .padding(.horizontal, 16).padding(.vertical, 14).frame(minHeight: 48)
-        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18).stroke(LoriPalette.line.opacity(0.5)))
-        .contentShape(Rectangle())
+        .recordingGlassButton()
+        .disabled(exportingReport)
+        .accessibilityIdentifier("reportShare")
     }
 
-    @ViewBuilder
-    private var reportProgress: some View {
+    @ViewBuilder private var reportProgress: some View {
         if reports.running.contains(path) {
             VStack(alignment: .leading, spacing: 8) {
                 Text("Готовлю отчёт…").font(LoriFont.meta).foregroundStyle(LoriPalette.ink)
                 ProgressTrack(fraction: nil, tint: LoriPalette.lime).accessibilityLabel("Готовлю отчёт")
-                Button("Остановить") { reports.cancel(path) }.font(LoriFont.small)
-            }.padding(.top, 16).accessibilityIdentifier("reportProgress")
-        }
-        if let failure = reports.failures[path] {
-            Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger).padding(.top, 12)
+                Button("Остановить") { reports.cancel(path) }.font(LoriFont.small).frame(minHeight: 44)
+            }.accessibilityIdentifier("reportProgress")
         }
     }
 
     private func generateReport() {
         reports.generate(path: path, transcript: document.plainText, title: exportTitle, workspace: workspace)
     }
-    private func openOrGenerateReport() {
-        if (try? workspace.fileURL(for: ReportRunner.path(for: path))) != nil { openReport() }
-        else { generateReport() }
+
+    private func loadReport() {
+        reportMarkdown = nil
+        reportReadFailed = false
+        guard (try? workspace.fileURL(for: ReportRunner.path(for: path))) != nil else { return }
+        do { reportMarkdown = try ReportRunner.read(for: path, in: workspace) }
+        catch { reportReadFailed = true }
     }
-    private func openReport() {
-        do { sheet = .report(try ReportRunner.read(for: path, in: workspace)) }
-        catch { notice = Notice(title: "Не удалось открыть отчёт", message: "Файл отчёта не читается.") }
+
+    private func exportReport(_ format: TranscriptExportFormat) {
+        guard let markdown = reportMarkdown else { return }
+        exportingReport = true
+        Task {
+            defer { exportingReport = false }
+            do {
+                let title = "Отчёт — " + exportTitle
+                let payload = TranscriptExport.report(markdown: markdown, title: title)
+                sheet = .share(SharePayload(url: try await payload.file(as: format), subject: title))
+            } catch {
+                notice = Notice(title: "Не удалось собрать файл отчёта", message: error.localizedDescription)
+            }
+        }
     }
 
     // MARK: - Шапка
@@ -355,8 +448,8 @@ struct TranscriptScreen: View {
         }
     }
 
-    /// Georgia — только здесь: это единственный «выставочный» момент экрана,
-    /// всё остальное системными стилями.
+    /// Georgia связывает имя записи с заголовками итога/отчёта; основной текст
+    /// остаётся системным, чтобы долгую расшифровку было легче читать.
     @ViewBuilder
     private func titleView(_ title: String) -> some View {
         let text = Text(title)
@@ -1108,9 +1201,6 @@ struct TranscriptScreen: View {
                 Button("Тема", systemImage: "tag") { sheet = .topics }
             }
             Section {
-                Button("Отчёт", systemImage: "doc.richtext") { openOrGenerateReport() }
-                    .disabled(document.isEmpty || reports.running.contains(path))
-                    .accessibilityIdentifier("makeReport")
                 Button("Отправить в Obsidian", systemImage: "book.closed") { sendToObsidian() }
                     .disabled(document.isEmpty)
                 Menu(
@@ -1222,6 +1312,8 @@ struct TranscriptScreen: View {
     // MARK: - Действия
 
     private func open() {
+        if selectedTab == nil { selectedTab = recordingSummaries.entry(for: path) == nil ? .transcript : .summary }
+        loadReport()
         if let url = try? workspace.fileURL(for: path) { playback.load(url) }
         // `load` узнаёт длительность сразу, без подготовки звука: этого числа
         // экрану хватает, а подписываться на плеер ради него незачем.
@@ -1475,7 +1567,7 @@ private enum RecordClock {
 
 // MARK: - Плеер
 
-/// Плеер одной карточкой: кнопка, ползунок, остаток и скорость. Подписан на
+/// Плавающая капсула: кнопка, ползунок, остаток и скорость. Подписана на
 /// плеер сам — позиция меняется каждые 60 мс, и это не повод пересобирать экран.
 private struct PlayerCard: View {
     @ObservedObject var playback: AudioPlaybackStore
@@ -1508,10 +1600,9 @@ private struct PlayerCard: View {
                     }
                 }
             }
-            .padding(.horizontal, 6)
-            .padding(.vertical, 4)
-            .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 18))
-            .overlay(RoundedRectangle(cornerRadius: 18).stroke(LoriPalette.line, lineWidth: 1))
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+            .recordingPlayerSurface(expanded: typeSize.isAccessibilitySize)
 
             if let problem = playback.loadError {
                 Label(problem, systemImage: "exclamationmark.triangle")
@@ -1519,6 +1610,8 @@ private struct PlayerCard: View {
                     .foregroundStyle(LoriPalette.danger)
             }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("floatingPlayer")
     }
 
     private var playButton: some View {
@@ -1526,8 +1619,6 @@ private struct PlayerCard: View {
             Image(systemName: playback.isPlaying ? "pause.fill" : "play.fill")
                 .font(LoriFont.meta.weight(.bold))
                 .foregroundStyle(LoriPalette.ink)
-                .frame(width: 38, height: 38)
-                .background(LoriPalette.bubble, in: Circle())
                 .frame(width: 44, height: 44)
                 .contentShape(Rectangle())
         }
@@ -1572,8 +1663,6 @@ private struct PlayerCard: View {
                 .font(LoriFont.small.monospacedDigit())
                 .foregroundStyle(LoriPalette.ink)
                 .padding(.horizontal, 9)
-                .frame(minWidth: 38, minHeight: 30)
-                .background(LoriPalette.bubble, in: Capsule())
                 .frame(minWidth: 44, minHeight: 44)
                 .contentShape(Rectangle())
         }
