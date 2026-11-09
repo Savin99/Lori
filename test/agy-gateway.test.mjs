@@ -257,6 +257,22 @@ test('annotate/report идут через stdin со схемой, нормал�
   assert.deepEqual(f.logs.find((entry) => entry.type === 'job').deniedActions, ['command', 'read_url'])
 })
 
+test('отчёт просит только настоящие ведущие метки из расшифровки и сохраняет исходный текст', async (t) => {
+  const f = await fixture(t)
+  for (const transcript of ['[00:42] Анна: Обсудили релиз.', 'Анна: В этой записи нет времени.']) {
+    await f.done((await f.submit(transcript, { kind: 'report' })).id)
+  }
+  const starts = (await f.events()).filter((entry) => entry.event === 'start' && entry.kind === 'report')
+  assert.equal(starts.length, 2)
+  for (const [index, start] of starts.entries()) {
+    const prompt = JSON.parse(start.input).message.content
+    assert.match(prompt, /Каждый пункт «Хода обсуждения» начинай с метки \[ММ:СС\] из расшифровки/)
+    assert.match(prompt, /Если меток в расшифровке нет, не выдумывай время и не добавляй метки/)
+    const data = JSON.parse(prompt.split('Данные записи (JSON):\n')[1])
+    assert.equal(data.transcript, index === 0 ? '[00:42] Анна: Обсудили релиз.' : 'Анна: В этой записи нет времени.')
+  }
+})
+
 test('аудио передаётся файлом, словарь декодируется, говорящие отключаются по запросу', async (t) => {
   const f = await fixture(t)
   const submit = (speakers, type = 'audio/mp4') => f.request('/v1/jobs?kind=transcribe', {
