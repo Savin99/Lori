@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Еженедельное обновление Antigravity CLI для шлюза подписки.
+  Шлюз запускает agy с AGY_CLI_DISABLE_AUTO_UPDATE=1, чтобы обновление не оборвало задачу
+  посреди работы; без этой службы бинарник на сервере стареет, пока Google его не отвергнет.
+  Ночь понедельника — задач с телефона в это время почти не бывает.
+  Пути машинно-специфичные — поправь под себя и убери `.example` из имени.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lori.agy-update</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/ilyaqa/.local/bin/agy</string>
+    <string>update</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>/Users/ilyaqa/Services/lori-gateway/agy-home</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+  <key>StartCalendarInterval</key>
+  <dict>
+    <key>Weekday</key>
+    <integer>1</integer>
+    <key>Hour</key>
+    <integer>4</integer>
+    <key>Minute</key>
+    <integer>30</integer>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/ilyaqa/Services/logs/agy-update.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ilyaqa/Services/logs/agy-update.log</string>
+</dict>
+</plist>

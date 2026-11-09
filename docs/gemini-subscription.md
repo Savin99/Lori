@@ -241,6 +241,9 @@ command
   доверие к папке.
 - Туннель `com.lori.agy-gateway-tunnel`: `ssh -R 127.0.0.1:18890:127.0.0.1:18890` на VPS, как
   у scada и torbox.
+- Обновление: шлюз запускает `agy` с `AGY_CLI_DISABLE_AUTO_UPDATE=1`, чтобы обновление не оборвало
+  задачу, поэтому бинарник обновляет служба `com.lori.agy-update` — `agy update` по понедельникам в 4:30
+  (`launchd/com.lori.agy-update.plist.example`, журнал `~/Services/logs/agy-update.log`).
 - nginx на VPS: в сайт Lori добавлен `location /gateway/` → `http://127.0.0.1:18890/`
   (тело до 100 МБ, ожидание 900 с); копия прежнего файла — `/root/lori.nginx.bak-20261109-093440`.
   Адрес для приложения: `https://lori.<ip>.nip.io/gateway`.
