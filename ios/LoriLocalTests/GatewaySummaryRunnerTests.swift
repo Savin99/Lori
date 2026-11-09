@@ -104,6 +104,28 @@ final class GatewaySummaryRunnerTests: XCTestCase {
         XCTAssertNil(recaps.entry(for: "b.wav"))
     }
 
+    func testExplicitSummaryAlsoUsesAlreadyPaidTitleWhenThereIsNoModelTitle() async {
+        for imported in [false, true] {
+            let path = imported ? "import.wav" : "new.wav"
+            if imported { store.setImported(title: "Имя файла", for: path) }
+            let runner = runner(client: client(), source: .local)
+            runner.requestSummary(for: path, text: "Короткий текст")
+            await eventually("итог с заголовком") { runner.pendingCount == 0 }
+            XCTAssertEqual(store.title(for: path), "Выпуск Лори")
+            XCTAssertEqual(store.detail(for: path), "Обсудили выпуск.")
+        }
+    }
+
+    func testExplicitSummaryKeepsExistingModelTitleAndDescription() async {
+        store.store(title: "Уже выбранное имя", detail: "Уже выбранное описание", for: "a.wav")
+        let runner = runner(client: client(), source: .local)
+        runner.requestSummary(for: "a.wav", text: "Короткий текст")
+        await eventually("итог с прежним заголовком") { runner.pendingCount == 0 }
+        XCTAssertEqual(store.title(for: "a.wav"), "Уже выбранное имя")
+        XCTAssertEqual(store.detail(for: "a.wav"), "Уже выбранное описание")
+        XCTAssertNotNil(recaps.entry(for: "a.wav"))
+    }
+
     func testExplicitSummaryUsesGatewayWithLocalTitlesWithoutReplacingManualName() async {
         let runner = runner(client: client(), source: .local)
         store.setManual(title: "Моё имя", for: "a.wav")
@@ -113,5 +135,7 @@ final class GatewaySummaryRunnerTests: XCTestCase {
         await eventually("итог при локальном источнике заголовков") { runner.pendingCount == 0 }
         XCTAssertNotNil(recaps.entry(for: "a.wav"))
         XCTAssertEqual(store.title(for: "a.wav"), "Моё имя")
+        XCTAssertEqual(store.detail(for: "a.wav"), "Обсудили выпуск.")
+        XCTAssertEqual(store.entry(for: "a.wav")?.replaceManual, true)
     }
 }

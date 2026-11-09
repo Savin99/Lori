@@ -63,9 +63,10 @@ final class GatewayUITests: XCTestCase {
         report.tap()
         XCTAssertTrue(app.descendants(matching: .any)["reportMarkdown"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["Обсудили выпуск Лори."].exists)
-        let task = app.staticTexts["- Анна проверит качество завтра."]
+        let task = app.staticTexts["• Анна проверит качество завтра."]
         let questions = app.descendants(matching: .any)["reportMarkdown"].staticTexts["Открытые вопросы"]
-        XCTAssertTrue(task.exists)
+        XCTAssertTrue(task.exists, "Markdown-маркер списка превращается в типографскую точку")
+        XCTAssertFalse(app.staticTexts["- Анна проверит качество завтра."].exists)
         XCTAssertLessThan(task.frame.maxY, questions.frame.minY, "разделы отчёта не перекрываются")
         XCTAssertTrue(app.buttons["reportShare"].exists)
         save("gateway-report-sheet")

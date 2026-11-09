@@ -620,8 +620,11 @@ final class SummaryRunner: ObservableObject {
                    !recordingSummaries.store(result.summary, for: request.path, fingerprint: source.fingerprint) {
                     return .gatewayFailed("Не удалось сохранить итог.")
                 }
-                if request.summaryOnly != true,
-                   !store.store(title: result.title, detail: result.description, for: request.path, force: request.force, source: source.fingerprint) {
+                // Annotate уже оплачен: если заголовка модели ещё нет, берём и его.
+                // «Сделать итог» не исполняет прежнее разрешение заменить ручное имя.
+                if (request.summaryOnly != true || store.entry(for: request.path)?.origin != .generated),
+                   !store.store(title: result.title, detail: result.description, for: request.path,
+                                force: request.summaryOnly == true ? false : request.force, source: source.fingerprint) {
                     return .gatewayFailed("Не удалось сохранить заголовок.")
                 }
                 return .done

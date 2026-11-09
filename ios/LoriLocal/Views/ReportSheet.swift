@@ -13,16 +13,18 @@ struct ReportSheet: View {
         NavigationStack {
             ScrollView {
                 VStack(alignment: .leading, spacing: 12) {
-                    ForEach(Array(markdown.components(separatedBy: .newlines).enumerated()), id: \.offset) { _, line in
-                        if !line.trimmingCharacters(in: .whitespaces).isEmpty {
-                            let level = line.prefix(while: { $0 == "#" }).count
-                            let heading = level > 0 && line.dropFirst(level).hasPrefix(" ")
-                            Text(.init(heading ? String(line.dropFirst(level + 1)) : line))
-                                .font(heading ? LoriFont.control : LoriFont.body)
-                                .foregroundStyle(LoriPalette.ink)
+                    ForEach(Array(ReportMarkdown.rows(markdown).enumerated()), id: \.offset) { _, row in
+                        HStack(alignment: .firstTextBaseline, spacing: 8) {
+                            if let marker = row.marker { Text(marker).accessibilityHidden(true) }
+                            Text(.init(row.text))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                        .font(row.heading ? LoriFont.control : LoriFont.body)
+                        .foregroundStyle(LoriPalette.ink)
+                        .padding(.leading, CGFloat(min(row.indent, 24)) * 6)
+                        .accessibilityElement(children: .combine)
+                        .accessibilityLabel((row.marker.map { $0 + " " } ?? "") + row.text)
                     }
                     if let failure { Text(failure).foregroundStyle(LoriPalette.danger) }
                 }
