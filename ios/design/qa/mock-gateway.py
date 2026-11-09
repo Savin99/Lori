@@ -4,6 +4,9 @@
 python3 design/qa/mock-gateway.py --port 18891
 Fixture token: fixture-gateway (synthetic, not a personal credential).
 СБОЙ → agent; КВОТА → quota; ЗАДЕРЖКА → 20 running polls.
+transcribe: raw audio, X-Lori-Key/Speakers/Language/Vocabulary; no audio is logged.
+--transcribe-error auth|quota|timeout|agent, --transcribe-fail-part N,
+--transcribe-delay N (number of running polls) control audio failures.
 """
 import argparse
 import json
@@ -11,6 +14,7 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from uuid import uuid4
+from urllib.parse import urlsplit, parse_qs, unquote
 
 jobs = {}
 keys = {}
@@ -58,13 +62,24 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         if not self.allowed():
             return
-        if self.path.removeprefix("/gateway") != "/v1/jobs":
+        url = urlsplit(self.path.removeprefix("/gateway"))
+        if url.path != "/v1/jobs":
             return self.reply({"error": {"code": "missing"}}, 404)
+        transcribe = parse_qs(url.query).get("kind") == ["transcribe"]
         try:
-            payload = json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-            text = payload["transcript"]
-            kind = payload["kind"]
-            assert kind in ["annotate", "report"] and isinstance(text, str) and text.strip()
+            body = self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            if transcribe:
+                assert body and self.headers.get("Content-Type", "").startswith("audio/")
+                assert self.headers.get("X-Lori-Speakers") in ["0", "1"]
+                assert self.headers.get("X-Lori-Key")
+                payload = {"key": self.headers["X-Lori-Key"]}
+                kind = "transcribe"
+                text = unquote(self.headers.get("X-Lori-Vocabulary", ""))
+            else:
+                payload = json.loads(body)
+                text = payload["transcript"]
+                kind = payload["kind"]
+                assert kind in ["annotate", "report"] and isinstance(text, str) and text.strip()
         except (ValueError, KeyError, AssertionError):
             return self.reply({"error": {"code": "invalid"}}, 400)
         key = (kind, payload.get("key"))
@@ -74,14 +89,27 @@ class Handler(BaseHTTPRequestHandler):
                 return self.reply({"id": previous["id"], "state": previous["state"]}, 202)
             job_id = str(uuid4())
             job = {"id": job_id, "state": "queued", "polls": 20 if "ЗАДЕРЖКА" in text else 2}
-            if "СБОЙ" in text or "КВОТА" in text:
+            if transcribe:
+                self.server.transcribe_count += 1
+                job["polls"] = self.server.transcribe_delay
+                failure = self.server.transcribe_error if self.server.transcribe_fail_part in [0, self.server.transcribe_count] else None
+                if failure == "auth":
+                    return self.reply({"error": {"code": "auth"}}, 401)
+                if failure:
+                    job.update(state="failed", error={"code": failure, "retryAfter": 120})
+                else:
+                    speakers = self.headers.get("X-Lori-Speakers") == "1"
+                    job["result"] = {"segments": [
+                        {"speaker": "S1" if speakers else None, "start": "09:59", "text": "Сегодня обсуждали выпуск Лори."},
+                        {"speaker": "S2" if speakers else None, "start": None, "text": "Анна проверит качество записи завтра."}]}
+            elif "СБОЙ" in text or "КВОТА" in text:
                 job.update(state="failed", error={"code": "quota" if "КВОТА" in text else "agent", "retryAfter": 120})
             elif kind == "annotate":
                 job["result"] = {"title": "Проверка подписки Gemini", "description": "Обсудили выпуск и проверку качества.",
                     "summary": {"brief": "Анна проверит качество записи завтра.", "highlights": ["Проверка записи"],
                                 "decisions": [], "tasks": ["Анна — проверить качество завтра"], "openQuestions": ["Как дополнить словарь?"]}}
             else:
-                job["result"] = {"markdown": "# Отчёт по записи\n\n## Суть\n\nОбсудили выпуск Лори.\n\n## Задачи\n\n- Анна проверит качество завтра.\n\n## Открытые вопросы\n\nКак дополнить словарь?"}
+                job["result"] = {"markdown": "# Отчёт по записи\n\n## Суть\n\nОбсудили выпуск Лори.\n\n## Задачи\n\n- Анна проверит качество завтра.\n  1. Записать проверку.\n    * Сохранить образец.\n\n## Открытые вопросы\n\nКак дополнить словарь?"}
             jobs[job_id] = job
             keys[key] = job_id
         self.reply({"id": job_id, "state": job["state"]}, 202)
@@ -100,6 +128,14 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--port", type=int, default=18891)
+    parser.add_argument("--transcribe-error", choices=["auth", "quota", "timeout", "agent"])
+    parser.add_argument("--transcribe-fail-part", type=int, default=0, help="0: every part, N: only part N")
+    parser.add_argument("--transcribe-delay", type=int, default=2, help="running polls before done")
     args = parser.parse_args()
     print(f"mock gateway on 127.0.0.1:{args.port}", flush=True)
-    ThreadingHTTPServer(("127.0.0.1", args.port), Handler).serve_forever()
+    server = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
+    server.transcribe_error = args.transcribe_error
+    server.transcribe_fail_part = args.transcribe_fail_part
+    server.transcribe_delay = args.transcribe_delay
+    server.transcribe_count = 0
+    server.serve_forever()

@@ -22,6 +22,7 @@ struct SettingsRoot: View {
     // на их ключи обновляет строку после правок на дочерних экранах.
     @AppStorage(TranscriptionSettings.openAIModelKey) private var openAIModelRaw = ""
     @AppStorage(TranscriptionSettings.geminiModeKey) private var geminiModeRaw = ""
+    @AppStorage(TranscriptionSettings.subscriptionModeKey) private var subscriptionModeRaw = ""
 
     private var engine: TranscriptionEngineKind {
         TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam

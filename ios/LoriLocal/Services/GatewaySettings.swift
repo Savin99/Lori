@@ -7,6 +7,7 @@ enum AnnotationSource: String, CaseIterable, Identifiable {
 }
 
 enum GatewaySettings {
+    static let transcriptionNotice = "Общая модель Gemini по подписке слушает запись: может пересказывать и пропускать речь, точных таймкодов нет. Аудио уходит на Mac mini и оттуда в Google."
     static let baseURLKey = "gatewayBaseURL"
     static let sourceKey = "annotationSource"
     static let autoSummaryKey = "gatewayAutoSummary"
@@ -22,6 +23,7 @@ enum GatewaySettings {
 
     static var baseURL: URL? {
         // Пустой или неправильный ручной адрес — «не настроено», а не откат.
+        if let job = TranscriptionJob.current, job.kind == .geminiSubscription { return job.values[baseURLKey].flatMap(validatedURL) }
         if let value = UserDefaults.standard.string(forKey: baseURLKey) { return validatedURL(value) }
         return BundledAPIKeys.gatewayURL
     }
@@ -38,5 +40,16 @@ enum GatewaySettings {
     }
     static var autoSummary: Bool {
         (UserDefaults.standard.object(forKey: autoSummaryKey) as? Bool) ?? isConfigured
+    }
+}
+
+/// Диаризация относится к присланной части, а не ко всей записи.
+enum SubscriptionMode: String, CaseIterable, Sendable {
+    case verbatim, speakers
+    var title: String { self == .verbatim ? "Дословно" : "С говорящими" }
+    var detail: String {
+        self == .verbatim
+            ? "Просим дословный текст. Время — только границы отправленной части."
+            : "Говорящие различаются внутри каждой части; S1 в разных частях может быть разными людьми. Время — только границы части."
     }
 }

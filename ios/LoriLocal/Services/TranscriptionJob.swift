@@ -37,12 +37,16 @@ struct TranscriptionJob: Codable, Sendable, Equatable {
             TranscriptionSettings.elevenLabsModeKey, TranscriptionSettings.gigaAMVariantKey,
             TranscriptionSettings.vocabularyKey, TranscriptionSettings.languageKey,
             TranscriptionSettings.speakerLabelsKey, TranscriptionSettings.timecodesKey,
-            TranscriptionSettings.geminiPartKey,
+            TranscriptionSettings.geminiPartKey, TranscriptionSettings.subscriptionModeKey,
+            TranscriptionSettings.subscriptionPartKey,
         ]
         var values: [String: String] = [:]
         for key in keys {
             if let value = UserDefaults.standard.object(forKey: key) { values[key] = String(describing: value) }
         }
+        // Адрес фиксируем целиком, включая встроенное умолчание. Иначе продолжение
+        // после смены настроек могло бы отправить аудио уже на другой сервер.
+        if kind == .geminiSubscription { values[GatewaySettings.baseURLKey] = GatewaySettings.baseURL?.absoluteString ?? "" }
         values[TranscriptionSettings.engineKey] = kind.rawValue
         return Self(id: UUID().uuidString, kind: kind, values: values, created: .now)
     }

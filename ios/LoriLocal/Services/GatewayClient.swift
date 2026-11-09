@@ -94,13 +94,14 @@ struct GatewayUsage: Decodable, Sendable {
 }
 
 struct GatewayClient: Sendable {
-    enum Kind: String, Sendable { case annotate, report }
+    enum Kind: String, Sendable { case annotate, report, transcribe }
     let baseURL: URL
     let token: String
     let session: URLSession
     var pollInterval: TimeInterval = 2
     var annotateTimeout: TimeInterval = 300
     var reportTimeout: TimeInterval = 600
+    var transcribeTimeout: TimeInterval = 600
 
     init(baseURL: URL, token: String, session: URLSession = .shared) {
         self.baseURL = baseURL
@@ -108,11 +109,11 @@ struct GatewayClient: Sendable {
         self.session = session
     }
 
-    static func configured() throws -> GatewayClient {
+    static func configured(session: URLSession = .shared) throws -> GatewayClient {
         guard let url = GatewaySettings.baseURL, let token = try KeychainStore.key(for: .gateway), !token.isEmpty else {
             throw GatewayError(code: "configuration")
         }
-        return GatewayClient(baseURL: url, token: token)
+        return GatewayClient(baseURL: url, token: token, session: session)
     }
 
     static func key(kind: Kind, path: String, transcript: String) -> String {
@@ -143,6 +144,40 @@ struct GatewayClient: Sendable {
         return markdown
     }
 
+    struct Segment: Decodable, Sendable {
+        let speaker: String?
+        // Поле start — оценка модели. Разбираем только текст и говорящего,
+        // чтобы оценка никогда не превратилась в таймкод речи.
+        let text: String
+    }
+
+    static func audioKey(path: String, index: Int, start: TimeInterval, end: TimeInterval, identity: String = "", options: String = "") -> String {
+        // Точные двоичные границы не зависят от локали и не округляются до секунд.
+        let fields = ["transcribe", path, String(index), String(start.bitPattern), String(end.bitPattern), identity, options]
+        let data = (try? JSONEncoder().encode(fields)) ?? Data()
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    func transcribe(audio: CloudAudio.Prepared, key: String, speakers: Bool, language: String, vocabulary: [String]) async throws -> [Segment] {
+        var url = URLComponents(url: baseURL.appending(path: "v1/jobs"), resolvingAgainstBaseURL: false)!
+        url.queryItems = [URLQueryItem(name: "kind", value: "transcribe")]
+        var submission = URLRequest(url: url.url!)
+        submission.httpMethod = "POST"
+        submission.timeoutInterval = max(0.01, min(60, transcribeTimeout))
+        submission.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        submission.setValue(audio.mime, forHTTPHeaderField: "Content-Type")
+        submission.setValue(key, forHTTPHeaderField: "X-Lori-Key")
+        submission.setValue(speakers ? "1" : "0", forHTTPHeaderField: "X-Lori-Speakers")
+        submission.setValue(language, forHTTPHeaderField: "X-Lori-Language")
+        let encoded = vocabulary.joined(separator: ",").addingPercentEncoding(withAllowedCharacters: .init(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")) ?? ""
+        submission.setValue(encoded, forHTTPHeaderField: "X-Lori-Vocabulary")
+        submission.httpBody = try Data(contentsOf: audio.url)
+        Diagnostics.note("шлюз: transcribe, \(submission.httpBody?.count ?? 0) байт")
+        let job = try await run(.transcribe, limit: transcribeTimeout, submission: submission)
+        guard let segments = job.result?.segments, !segments.isEmpty else { throw GatewayError(code: "response") }
+        return segments
+    }
+
     private struct Envelope: Decodable { let error: GatewayError }
 
     private struct Payload: Encodable {
@@ -162,17 +197,22 @@ struct GatewayClient: Sendable {
             var description: String?
             var summary: RecordingSummary?
             var markdown: String?
+            var segments: [Segment]?
         }
     }
 
     private func perform(_ kind: Kind, path: String, transcript: String, title: String?, language: String?) async throws -> Job {
-        let started = Date()
         let limit = kind == .annotate ? annotateTimeout : reportTimeout
         let body = try JSONEncoder().encode(Payload(kind: kind.rawValue, key: Self.key(kind: kind, path: path, transcript: transcript), transcript: transcript, title: title, language: language))
         Diagnostics.note("шлюз: \(kind.rawValue), \(transcript.count) знаков, \(body.count) байт")
+        return try await run(kind, limit: limit, submission: makeRequest("v1/jobs", method: "POST", body: body, timeout: min(60, limit)))
+    }
+
+    private func run(_ kind: Kind, limit: TimeInterval, submission: URLRequest) async throws -> Job {
+        let started = Date()
         var id: String?
         do {
-            let accepted: Job = try await request("v1/jobs", method: "POST", body: body, timeout: min(60, limit))
+            let accepted: Job = try await send(submission)
             guard let acceptedID = accepted.id, !acceptedID.isEmpty,
                   acceptedID.rangeOfCharacter(from: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_" )).inverted) == nil else {
                 throw GatewayError(code: "response")
@@ -210,18 +250,26 @@ struct GatewayClient: Sendable {
     }
 
     private func request<T: Decodable>(_ path: String, method: String = "GET", body: Data? = nil, timeout: TimeInterval = 60) async throws -> T {
+        try await send(makeRequest(path, method: method, body: body, timeout: timeout))
+    }
+
+    private func makeRequest(_ path: String, method: String, body: Data?, timeout: TimeInterval) -> URLRequest {
         var request = URLRequest(url: baseURL.appending(path: path))
         request.httpMethod = method
         request.timeoutInterval = max(0.01, timeout)
         request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = body
+        return request
+    }
+
+    private func send<T: Decodable>(_ request: URLRequest) async throws -> T {
         let data: Data
         let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        do { (data, response) = try await BackgroundTranscriptionTransport.data(for: request, session: session) }
         catch {
-            if Task.isCancelled { throw CancellationError() }
-            throw GatewayError(code: "network")
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw GatewayError(code: (error as? URLError)?.code == .timedOut ? "timeout" : "network")
         }
         guard let http = response as? HTTPURLResponse else { throw GatewayError(code: "response") }
         guard (200..<300).contains(http.statusCode) else {

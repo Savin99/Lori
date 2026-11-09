@@ -159,7 +159,7 @@ extension EngineDirectory {
     static func forInterface() -> EngineDirectory {
         #if DEBUG
         if QAStubEngine.enabled {
-            return EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { true })
+            return EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { true }, hasGatewayAddress: { true })
         }
         #endif
         return EngineDirectory()

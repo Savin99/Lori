@@ -23,6 +23,8 @@ struct TranscriptionScreen: View {
     @AppStorage(TranscriptionSettings.openAIModelKey) private var openAIModelRaw = ""
     @AppStorage(TranscriptionSettings.geminiModeKey) private var geminiModeRaw = ""
 
+    @AppStorage(TranscriptionSettings.subscriptionModeKey) private var subscriptionModeRaw = ""
+
     private var engine: TranscriptionEngineKind {
         TranscriptionEngineKind(rawValue: engineRaw) ?? .gigaam
     }
@@ -104,7 +106,7 @@ struct TranscriptionScreen: View {
         }
         let count = LoriFormat.plural(concurrency, one: "запись", few: "записи", many: "записей")
         switch engine {
-        case .apple, .openAI, .gemini, .elevenLabs:
+        case .apple, .openAI, .gemini, .elevenLabs, .geminiSubscription:
             // У Apple своих весов мы не грузим вовсе (распознаёт системная служба),
             // у облачных работа в сети — обещать «общую модель» тут было бы неправдой.
             return "\(count) считаются одновременно; остальные ждут в очереди."

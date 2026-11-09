@@ -8,6 +8,7 @@ struct EngineScreen: View {
 
     @AppStorage(TranscriptionSettings.engineKey) private var engineRaw = TranscriptionEngineKind.gigaam.rawValue
     @AppStorage(TranscriptionSettings.gigaAMVariantKey) private var variantRaw = GigaAMVariant.rnnt.rawValue
+    @AppStorage(TranscriptionSettings.subscriptionPartKey) private var subscriptionPart = TranscriptionSettings.defaultGeminiPart
     @State private var status: String?
 
     private var engine: TranscriptionEngineKind {
@@ -70,6 +71,17 @@ struct EngineScreen: View {
                     Text("Системное распознавание iOS. Ключей не нужно, но пунктуации не будет, и язык берётся системный.")
                         .font(.footnote)
                         .foregroundStyle(.secondary)
+                case .geminiSubscription:
+                    Text(GatewaySettings.transcriptionNotice)
+                        .font(.footnote).foregroundStyle(LoriPalette.muted)
+                    Picker("Длина части", selection: $subscriptionPart) {
+                        ForEach(TranscriptionSettings.geminiPartOptions, id: \.self) { minutes in
+                            Text("\(minutes) минут").tag(minutes)
+                        }
+                    }
+                    .accessibilityIdentifier("subscriptionPartPicker")
+                    NavigationLink("Подписка Gemini") { GatewayScreen() }
+                        .accessibilityIdentifier("subscriptionSettingsLink")
                 case .openAI, .gemini, .elevenLabs:
                     NavigationLink {
                         ProviderScreen(kind: engine, transcription: transcription)
@@ -84,6 +96,7 @@ struct EngineScreen: View {
         .background(LoriPalette.canvas)
         .navigationTitle("Движок")
         .task { await refresh() }
+        .onAppear { engines.refresh(); Task { await refresh() } }
         .onChange(of: engineRaw) { _, _ in Task { await refresh() } }
         .onChange(of: variantRaw) { _, _ in Task { await refresh() } }
         .alert("Lori", isPresented: Binding(

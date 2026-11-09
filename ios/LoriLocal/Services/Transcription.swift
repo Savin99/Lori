@@ -606,7 +606,7 @@ final class TranscriptionService: ObservableObject {
         let total: Int
     }
 
-    /// Все пять движков создаются сразу: они ничего не занимают до первой расшифровки,
+    /// Все движки создаются сразу: они ничего не занимают до первой расшифровки,
     /// а тестам удобно подменять набор целиком.
     init(
         engines: [TranscriptionEngineKind: any Transcribing]? = nil,
@@ -621,6 +621,7 @@ final class TranscriptionService: ObservableObject {
             .apple: AppleSpeechTranscriber(),
             .openAI: OpenAITranscriber(),
             .gemini: GeminiTranscriber(),
+            .geminiSubscription: GatewayTranscriber(),
             .elevenLabs: ElevenLabsTranscriber(),
         ]
         self.interruptedStore = interruptedStore
@@ -1603,6 +1604,7 @@ final class TranscriptionService: ObservableObject {
         case .apple: return .assetsUnavailable
         case .openAI: return .missingKey(.openAI)
         case .gemini: return .missingKey(.gemini)
+        case .geminiSubscription: return .api(GatewayError(code: "configuration").localizedDescription)
         case .elevenLabs: return .missingKey(.elevenLabs)
         }
     }

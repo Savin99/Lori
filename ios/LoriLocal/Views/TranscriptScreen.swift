@@ -684,6 +684,11 @@ struct TranscriptScreen: View {
                 .font(LoriFont.small)
                 .foregroundStyle(LoriPalette.muted)
                 .accessibilityIdentifier("transcribeEstimate")
+            if TranscriptionSettings.engine == .geminiSubscription {
+                Text(GatewaySettings.transcriptionNotice)
+                    .font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+                    .accessibilityIdentifier("subscriptionTranscriptionNotice")
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -1245,7 +1250,7 @@ struct TranscriptScreen: View {
     /// уйдёт звук, сказано до нажатия: облачный движок отправит запись наружу.
     /// Движок назван так же, как в пункте, который человек только что нажал.
     private func retranscribeMessage(_ kind: TranscriptionEngineKind) -> String {
-        let place = kind.leavesDevice
+        let place = kind == .geminiSubscription ? GatewaySettings.transcriptionNotice : kind.leavesDevice
             ? "Запись целиком уйдёт в \(EngineCatalog.descriptor(for: kind).displayName)."
             : "Считает этот iPhone, запись никуда не уходит."
         guard transcriptFile != nil else { return "\(kind.title). \(place)" }

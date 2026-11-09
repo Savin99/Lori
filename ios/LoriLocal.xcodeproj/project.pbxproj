@@ -131,6 +131,7 @@
 		99328785DB8F70D40001F54C /* SummaryModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7C17A20C28533A774DB7F0DB /* SummaryModel.swift */; };
 		993931E9FA6777C6333B792D /* ModelCatalog.swift in Sources */ = {isa = PBXBuildFile; fileRef = BD5DD76F9DFAE6983AF45DA8 /* ModelCatalog.swift */; };
 		9A177D53976AC3E7ACCA3B46 /* RecordingBanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = EDF65995CCD277D9CAA4BA9E /* RecordingBanner.swift */; };
+		9A43D9122756695B3BC30D1A /* GatewayTranscriberTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 067EB3CC57ABA47F39FDDADE /* GatewayTranscriberTests.swift */; };
 		9A939107E8A604C394691A1E /* ImportFormatTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 623C2A92236A9A51EA670AD0 /* ImportFormatTests.swift */; };
 		9AA19FC7E946D2C5D5A40B33 /* Topics.swift in Sources */ = {isa = PBXBuildFile; fileRef = FE34C14BAC42B6B5DF983508 /* Topics.swift */; };
 		9D2AFA65D6D2CACABAC23224 /* ProviderScreen.swift in Sources */ = {isa = PBXBuildFile; fileRef = B4C26F5649C53D75EFD541F1 /* ProviderScreen.swift */; };
@@ -160,6 +161,7 @@
 		BBD84ECD9F9327AC458D96F7 /* LogMelSpectrogram.swift in Sources */ = {isa = PBXBuildFile; fileRef = 66181F5E229CB7C04B067C16 /* LogMelSpectrogram.swift */; };
 		BCDEDAB5FB482A1250570807 /* GatewaySummaryRunnerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 98170C2C9F1160BB7A59BB9E /* GatewaySummaryRunnerTests.swift */; };
 		BE68C8FF98AAA9FE98294DBD /* DeviceSummaryIntegrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 02F45AA1BBC6297722CD11CA /* DeviceSummaryIntegrationTests.swift */; };
+		BFA7F8ED542D0C82589271B8 /* GatewayTranscriber.swift in Sources */ = {isa = PBXBuildFile; fileRef = 920BDA4809E154039BFB4420 /* GatewayTranscriber.swift */; };
 		C08764FDC61743E49A8C57A0 /* RecordingActivityViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4E87C697C23E62F2D06273F4 /* RecordingActivityViews.swift */; };
 		C13A6EF02CFDDE87BF5BB98E /* AsyncAssertions.swift in Sources */ = {isa = PBXBuildFile; fileRef = 10729BAD6A1852CF6418C0AE /* AsyncAssertions.swift */; };
 		C7C10265F0CE08EC9C0E56E7 /* ComposerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1AAB9735EBC5F8A578ABED57 /* ComposerTests.swift */; };
@@ -249,6 +251,7 @@
 		03A3CCDD1E1BCD0A0899F4CE /* GigaAMOnnx.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GigaAMOnnx.swift; sourceTree = "<group>"; };
 		03FB8D56E3D7FB000307E8B3 /* SpeakerNames.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpeakerNames.swift; sourceTree = "<group>"; };
 		05A1050623EFF4DBB584BEC1 /* RecordingActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RecordingActivityAttributes.swift; sourceTree = "<group>"; };
+		067EB3CC57ABA47F39FDDADE /* GatewayTranscriberTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTranscriberTests.swift; sourceTree = "<group>"; };
 		082E457F612C6C1FF4FA139F /* Transcript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Transcript.swift; sourceTree = "<group>"; };
 		08DB23870DCFC5594C6FC6A2 /* StampedTranscript.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = StampedTranscript.swift; sourceTree = "<group>"; };
 		0B7D939E3F05BC05E538D371 /* TranscriptCheckpointTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptCheckpointTests.swift; sourceTree = "<group>"; };
@@ -347,6 +350,7 @@
 		901C84D27F9849E8B9F178ED /* GatewayClientTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayClientTests.swift; sourceTree = "<group>"; };
 		90926BE446DD5A58033F3859 /* QAStubEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = QAStubEngine.swift; sourceTree = "<group>"; };
 		91518CBFF7EF699232C649AE /* WorkspaceImportTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = WorkspaceImportTests.swift; sourceTree = "<group>"; };
+		920BDA4809E154039BFB4420 /* GatewayTranscriber.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GatewayTranscriber.swift; sourceTree = "<group>"; };
 		92A039D21FBC90FA16CAF93E /* EngineSessionCacheTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineSessionCacheTests.swift; sourceTree = "<group>"; };
 		94C80D1B8557556C871738D1 /* SelfTest.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SelfTest.swift; sourceTree = "<group>"; };
 		958482505815CBF0FF333E76 /* EngineControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = EngineControls.swift; sourceTree = "<group>"; };
@@ -477,6 +481,7 @@
 				2CA33C4B2142978CE080EC6E /* GapRecheck.swift */,
 				F764EE7097ECC8F832D3D567 /* GatewayClient.swift */,
 				659B28B3B7CB0DD2EDEB2BE8 /* GatewaySettings.swift */,
+				920BDA4809E154039BFB4420 /* GatewayTranscriber.swift */,
 				355541F46EEE1BD2E5E80AC5 /* GeminiAnnotations.swift */,
 				C00D3C676BA66C599AC6306D /* GeminiTranscriber.swift */,
 				A45ED4979E24CE7B194CB45A /* GigaAMCatalog.swift */,
@@ -562,6 +567,7 @@
 				028302DFA152029542E889C9 /* GapRecheckTests.swift */,
 				901C84D27F9849E8B9F178ED /* GatewayClientTests.swift */,
 				98170C2C9F1160BB7A59BB9E /* GatewaySummaryRunnerTests.swift */,
+				067EB3CC57ABA47F39FDDADE /* GatewayTranscriberTests.swift */,
 				8D9C69F740071924F620A23D /* GeminiPipelineTests.swift */,
 				E41240DBA92DA46E8055B2F0 /* GeminiRequestShapeTests.swift */,
 				55EC47D3DEF80D7425434F1D /* GeminiTranscriberTests.swift */,
@@ -926,6 +932,7 @@
 				8255051E5AB2D9CAECDFD577 /* GatewayClient.swift in Sources */,
 				E1189ADAB261FDE4E9EFE93B /* GatewayScreen.swift in Sources */,
 				B3E5AA4C79EC0A02A35731AF /* GatewaySettings.swift in Sources */,
+				BFA7F8ED542D0C82589271B8 /* GatewayTranscriber.swift in Sources */,
 				1E5DA1D9D8D87E600DD0D4F6 /* GeminiAnnotations.swift in Sources */,
 				179677A6BC286276B619DEB9 /* GeminiTranscriber.swift in Sources */,
 				CC15BD9770FE27F2A8D384BF /* GigaAMCatalog.swift in Sources */,
@@ -1046,6 +1053,7 @@
 				47B522A09350CB10101F678E /* GapRecheckTests.swift in Sources */,
 				F8757AF2BBE835EFB8A0BE1B /* GatewayClientTests.swift in Sources */,
 				BCDEDAB5FB482A1250570807 /* GatewaySummaryRunnerTests.swift in Sources */,
+				9A43D9122756695B3BC30D1A /* GatewayTranscriberTests.swift in Sources */,
 				32CD0C4BA0387479B13E2114 /* GeminiPipelineTests.swift in Sources */,
 				1A814F8A215B51C1F4519228 /* GeminiRequestShapeTests.swift in Sources */,
 				96BAE9E0304277E1A7F57EE9 /* GeminiTranscriberTests.swift in Sources */,

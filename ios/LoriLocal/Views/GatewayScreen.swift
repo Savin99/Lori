@@ -50,7 +50,7 @@ struct GatewayScreen: View {
                 if let status { Text(status).font(LoriFont.meta).foregroundStyle(LoriPalette.ink).accessibilityIdentifier("gatewayStatus") }
                 if let failure { Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger).accessibilityIdentifier("gatewayFailure") }
             } header: { Text("Подключение") } footer: {
-                Text("Текст расшифровки уходит на Mac mini и оттуда в Google по подписке; по условиям Antigravity сотрудники Google вправе его читать.")
+                Text("Аудио и текст расшифровки уходят на Mac mini и оттуда в Google по подписке; по условиям Antigravity сотрудники Google вправе его читать.")
             }
         }
         .font(LoriFont.body)

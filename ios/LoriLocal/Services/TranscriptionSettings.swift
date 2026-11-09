@@ -9,6 +9,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
     case openAI = "openai"
     case gemini
     case elevenLabs = "elevenlabs"
+    case geminiSubscription = "gemini-subscription"
 
     var id: String { rawValue }
 
@@ -19,6 +20,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
         case .apple: "Apple, на устройстве"
         case .openAI: "OpenAI API"
         case .gemini: "Google Gemini API"
+        case .geminiSubscription: "Gemini (подписка)"
         case .elevenLabs: "ElevenLabs Scribe API"
         }
     }
@@ -31,6 +33,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
         case .apple: "Системное распознавание iOS. Работает без ключей, но без пунктуации."
         case .openAI: "Аудио уходит в OpenAI. Нужен ключ. Модель и адрес — ниже."
         case .gemini: "Аудио уходит в Google. Нужен ключ. Имя модели — ниже."
+        case .geminiSubscription: GatewaySettings.transcriptionNotice
         case .elevenLabs: "Аудио уходит в ElevenLabs — целиком, одним запросом. Нужен ключ."
         }
     }
@@ -39,7 +42,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
     var leavesDevice: Bool {
         switch self {
         case .gigaam, .whisper, .apple: false
-        case .openAI, .gemini, .elevenLabs: true
+        case .openAI, .gemini, .elevenLabs, .geminiSubscription: true
         }
     }
 
@@ -48,6 +51,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
         case .gigaam, .whisper, .apple: nil
         case .openAI: .openAI
         case .gemini: .gemini
+        case .geminiSubscription: .gateway
         case .elevenLabs: .elevenLabs
         }
     }
@@ -66,7 +70,7 @@ enum TranscriptionEngineKind: String, CaseIterable, Identifiable, Sendable, Coda
         case .whisper: 700 * 1024 * 1024
         case .apple: 150 * 1024 * 1024
         // Облачным движкам память не нужна: у них работа в сети.
-        case .openAI, .gemini, .elevenLabs: 0
+        case .openAI, .gemini, .elevenLabs, .geminiSubscription: 0
         }
     }
 }
@@ -103,6 +107,18 @@ enum TranscriptionSettings {
     static let concurrencyKey = "transcriptionConcurrency"
     /// Длина части, которой запись уходит в Gemini, в минутах.
     static let geminiPartKey = "geminiPartMinutes"
+    static let subscriptionModeKey = "geminiSubscriptionMode"
+    static let subscriptionPartKey = "geminiSubscriptionPartMinutes"
+
+    static var subscriptionMode: SubscriptionMode {
+        SubscriptionMode(rawValue: setting(forKey: subscriptionModeKey) ?? "") ?? .verbatim
+    }
+    static var subscriptionPartMinutes: Int {
+        let value = Int(setting(forKey: subscriptionPartKey) ?? "") ?? 0
+        return geminiPartOptions.contains(value) ? value : defaultGeminiPart
+    }
+    static var subscriptionPartSeconds: TimeInterval { TimeInterval(subscriptionPartMinutes) * 60 }
+
 
     static let defaultOpenAIBaseURL = "https://api.openai.com/v1"
     static let defaultOpenAIModel = "whisper-1"
@@ -398,6 +414,7 @@ enum TranscriptionSettings {
         switch kind {
         case .gigaam: current = gigaAMVariant.rawValue
         case .gemini: current = geminiMode.rawValue
+        case .geminiSubscription: current = subscriptionMode.rawValue
         case .openAI: current = OpenAIMode.of(openAIModel)?.rawValue
         case .elevenLabs: current = elevenLabsMode.rawValue
         case .whisper, .apple: current = nil
@@ -416,6 +433,8 @@ enum TranscriptionSettings {
             UserDefaults.standard.set(mode.id, forKey: gigaAMVariantKey)
         case .gemini:
             UserDefaults.standard.set(mode.id, forKey: geminiModeKey)
+        case .geminiSubscription:
+            UserDefaults.standard.set(mode.id, forKey: subscriptionModeKey)
         case .openAI:
             // Режим OpenAI — это пресет над моделью: он её и выставляет.
             guard let preset = OpenAIMode(rawValue: mode.id) else { return }
@@ -433,6 +452,7 @@ enum TranscriptionSettings {
         case .whisper, .apple: engine.title
         case .openAI: "\(openAIBaseURL.host() ?? "OpenAI") · \(openAIModel)"
         case .gemini: "\(geminiHost.host() ?? "Gemini") · \(geminiModel)"
+        case .geminiSubscription: "Подписка Gemini"
         case .elevenLabs: "\(elevenLabsBaseURL.host() ?? "ElevenLabs") · \(elevenLabsModel)"
         }
     }

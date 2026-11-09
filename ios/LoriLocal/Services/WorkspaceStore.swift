@@ -587,7 +587,7 @@ final class WorkspaceStore: ObservableObject {
         // Выключенные «Таймкоды реплик» убирают время и из файла — иначе тумблер
         // работал бы только у облачных движков, а у GigaAM время приходит всегда.
         try writeText(
-            transcript.markdown(title: base, engine: engine, mode: mode, stamps: TranscriptionSettings.timecodes),
+            transcript.markdown(title: base, engine: engine, mode: mode, stamps: TranscriptionSettings.engine == .geminiSubscription || TranscriptionSettings.timecodes),
             at: relativePath
         )
         return relativePath
@@ -610,7 +610,7 @@ final class WorkspaceStore: ObservableObject {
             title: base,
             engine: engine,
             mode: mode,
-            stamps: TranscriptionSettings.timecodes
+            stamps: TranscriptionSettings.engine == .geminiSubscription || TranscriptionSettings.timecodes
         )
         try await Task.detached(priority: .utility) {
             try FileManager.default.createDirectory(

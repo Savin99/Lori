@@ -256,6 +256,10 @@ struct ComposerBar: View {
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.muted)
                     .accessibilityIdentifier("attachedEstimate")
+                if engine.kind == .geminiSubscription {
+                    Text(GatewaySettings.transcriptionNotice)
+                        .font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+                }
             }
             .padding(.leading, 8)
             .padding(.top, 2)

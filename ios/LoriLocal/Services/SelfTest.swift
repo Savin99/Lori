@@ -47,8 +47,14 @@ enum SelfTest {
             .apple: AppleSpeechTranscriber(),
             .openAI: OpenAITranscriber(),
             .gemini: GeminiTranscriber(),
+            .geminiSubscription: GatewayTranscriber(),
+            .whisper: WhisperKitTranscriber(),
+            .elevenLabs: ElevenLabsTranscriber(),
         ]
-        let chosen = engines[engine] ?? GigaAMTranscriber()
+        guard let chosen = engines[engine] else {
+            report.write("движок не установлен")
+            return
+        }
         report.write("движок: \(chosen.name)")
         guard await chosen.isAvailable() else {
             report.write("движок недоступен: нет модели или ключа")

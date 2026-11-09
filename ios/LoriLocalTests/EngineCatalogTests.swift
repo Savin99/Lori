@@ -24,7 +24,7 @@ final class EngineCatalogTests: XCTestCase {
 
     func testEnginesAreSplitByLocality() {
         XCTAssertEqual(EngineCatalog.onDevice().map(\.kind), [.gigaam, .whisper, .apple])
-        XCTAssertEqual(EngineCatalog.cloud().map(\.kind), [.openAI, .gemini, .elevenLabs])
+        XCTAssertEqual(EngineCatalog.cloud().map(\.kind), [.openAI, .gemini, .elevenLabs, .geminiSubscription])
         XCTAssertEqual(EngineCatalog.descriptor(for: .gigaam).locality.symbol, "iphone")
     }
 

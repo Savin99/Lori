@@ -121,6 +121,15 @@ enum EngineCatalog {
                 TranscriptionMode(id: $0.rawValue, title: $0.title, short: $0.short, detail: $0.detail)
             }
         ),
+        EngineDescriptor(
+            kind: .geminiSubscription,
+            displayName: "Gemini (подписка)",
+            subtitle: "Через Mac mini · время по частям",
+            locality: .cloud,
+            modes: SubscriptionMode.allCases.map {
+                TranscriptionMode(id: $0.rawValue, title: $0.title, detail: $0.detail)
+            }
+        ),
     ]}
 
     static func descriptor(for kind: TranscriptionEngineKind) -> EngineDescriptor {
@@ -299,6 +308,13 @@ struct EngineToggles: Equatable, Sendable {
             // слов приходят нативно на всю запись, говорящие — отдельным полем
             // `diarize`, и одно другого не требует.
             return EngineToggles(timecodes: .active, speakers: .active)
+        case .geminiSubscription:
+            return EngineToggles(
+                timecodes: .unavailable("Точных таймкодов нет: показаны только границы отправленных частей."),
+                speakers: TranscriptionSettings.subscriptionMode == .speakers
+                    ? .fixedOn("Говорящие различаются внутри каждой части, номера между частями не сопоставлены.")
+                    : .unavailable("Говорящих просит режим «С говорящими».")
+            )
         case .gemini:
             switch TranscriptionSettings.geminiMode {
             case .speakers:
@@ -325,15 +341,18 @@ final class EngineDirectory: ObservableObject {
     private let hasKey: @Sendable (KeychainAccount) -> Bool
     private let hasModel: @Sendable (GigaAMVariant) -> Bool
     private let hasWhisperModel: @Sendable () -> Bool
+    private let hasGatewayAddress: @Sendable () -> Bool
 
     init(
         hasKey: @escaping @Sendable (KeychainAccount) -> Bool = { KeychainStore.hasKey(for: $0) },
         hasModel: @escaping @Sendable (GigaAMVariant) -> Bool = { GigaAMModelSet.locate($0) != nil },
-        hasWhisperModel: @escaping @Sendable () -> Bool = { WhisperModelSet.locate() != nil }
+        hasWhisperModel: @escaping @Sendable () -> Bool = { WhisperModelSet.locate() != nil },
+        hasGatewayAddress: @escaping @Sendable () -> Bool = { GatewaySettings.baseURL != nil }
     ) {
         self.hasKey = hasKey
         self.hasModel = hasModel
         self.hasWhisperModel = hasWhisperModel
+        self.hasGatewayAddress = hasGatewayAddress
         refresh()
     }
 
@@ -350,6 +369,9 @@ final class EngineDirectory: ObservableObject {
     }
 
     private func state(of kind: TranscriptionEngineKind) -> EngineReadiness {
+        if kind == .geminiSubscription {
+            return hasGatewayAddress() && hasKey(.gateway) ? .ready : .unavailable("Настрой подписку")
+        }
         if let account = kind.keychainAccount {
             return hasKey(account) ? .ready : .needsKey
         }

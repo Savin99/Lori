@@ -97,6 +97,7 @@ final class TranscriptionSpeed: ObservableObject {
         case .apple: 0.12
         case .openAI: 0.08
         case .gemini: 0.06
+        case .geminiSubscription: 0.15
         // Запись уходит одним запросом, поэтому в оценке почти всё — выгрузка;
         // сам Scribe считает быстрее реального времени. Живёт до первого замера.
         case .elevenLabs: 0.05

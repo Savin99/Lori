@@ -43,7 +43,7 @@ final class EngineShortlistTests: XCTestCase {
         let groups = EngineShortlist.groups(onlyReady: true, ready: Set(TranscriptionEngineKind.allCases), keeping: .gigaam)
 
         XCTAssertEqual(kinds(groups[0].engines), [.gigaam, .whisper, .apple])
-        XCTAssertEqual(kinds(groups[1].engines), [.openAI, .gemini, .elevenLabs])
+        XCTAssertEqual(kinds(groups[1].engines), [.openAI, .gemini, .elevenLabs, .geminiSubscription])
     }
 
     func testSettingsScreenKeepsTheFullList() {
@@ -76,7 +76,7 @@ final class EngineShortlistTests: XCTestCase {
     }
 
     func testWhisperWithoutModelIsHidden() {
-        let directory = EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { false })
+        let directory = EngineDirectory(hasKey: { _ in true }, hasModel: { _ in true }, hasWhisperModel: { false }, hasGatewayAddress: { false })
 
         XCTAssertEqual(directory.readiness(of: .whisper), .unavailable("Нет модели"))
         XCTAssertFalse(directory.readyKinds.contains(.whisper), "«Нет модели» — тоже не готов")

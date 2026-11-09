@@ -158,7 +158,13 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
         var hash = SHA256()
         hash.update(data: Data((request.httpMethod ?? "GET").utf8))
         hash.update(data: Data((request.url?.absoluteString ?? "").utf8))
-        hash.update(data: request.httpBody ?? Data())
+        if let key = request.value(forHTTPHeaderField: "X-Lori-Key"), request.url?.query == "kind=transcribe" {
+            // Экспорт AAC после перезапуска может отличаться служебными байтами.
+            // Ключ шлюза уже содержит оригинал, границы и настройки части.
+            hash.update(data: Data(key.utf8))
+        } else {
+            hash.update(data: request.httpBody ?? Data())
+        }
         return jobID + "_" + hash.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
