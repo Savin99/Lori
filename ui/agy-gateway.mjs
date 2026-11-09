@@ -250,9 +250,18 @@ function boundedWords (value, limit, suffix = '') {
   return result + suffix
 }
 
+// Модель охотно выделяет метку жирным («- **[00:42]** …»), а приложение берёт за
+// таймкод только метку в самом начале пункта — живой прогон 9 ноября дал именно так.
+export function plainReportStamps (markdown) {
+  const item = String.raw`^(\s*(?:[-+*]|\d+[.)])\s+)`
+  return markdown
+    .replace(new RegExp(item + String.raw`(\*\*|__)(\[\d{1,6}:\d{2}\])\2`, 'gm'), '$1$3')
+    .replace(new RegExp(item + String.raw`(\*\*|__)(\[\d{1,6}:\d{2}\])\s+`, 'gm'), '$1$3 $2')
+}
+
 function normalizeResult (kind, value, speakers) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw agentError('Агент не вернул структурированный результат.')
-  if (kind === 'report') return { markdown: requiredText(value.markdown, 200000) }
+  if (kind === 'report') return { markdown: plainReportStamps(requiredText(value.markdown, 200000)) }
   if (kind === 'transcribe') {
     if (!Array.isArray(value.segments)) throw agentError('Агент вернул неверный список сегментов.')
     const segments = value.segments.slice(0, 10000).flatMap((item) => {
@@ -287,7 +296,7 @@ function promptFor (job) {
   }
   const task = job.kind === 'annotate'
     ? 'Сделай заголовок: именная фраза без глаголов, 3–5 слов, до 60 знаков. Описание: 1–2 предложения до 160 знаков. summary.brief: 2–4 предложения. highlights, decisions, tasks, openQuestions: только явно присутствующее в записи, иначе пустые массивы. tasks: объекты {text, owner, due}; text — действие, owner — исполнитель только если назван, иначе null; due — срок дословно как сказано («до пятницы», «к 15 ноября»), иначе null. Не вычисляй даты и не назначай исполнителей. Язык результата — язык расшифровки.'
-    : 'Напиши развёрнутый отчёт по-русски в markdown. Разделы: «Суть», «Участники» (если различимы), «Ход обсуждения» по темам, «Решения», «Задачи», «Открытые вопросы», «Неуверенные места». Каждый пункт «Хода обсуждения» начинай с метки [ММ:СС] из расшифровки, если для него есть настоящая метка; переноси её точно. Если меток в расшифровке нет, не выдумывай время и не добавляй метки. В задачах укажи кто, что и срок только если они названы. Без выдумок; отсутствие сведений обозначай явно.'
+    : 'Напиши развёрнутый отчёт по-русски в markdown. Разделы: «Суть», «Участники» (если различимы), «Ход обсуждения» по темам, «Решения», «Задачи», «Открытые вопросы», «Неуверенные места». Каждый пункт «Хода обсуждения» начинай с метки [ММ:СС] из расшифровки, если для него есть настоящая метка; переноси её точно и без выделения жирным. Если меток в расшифровке нет, не выдумывай время и не добавляй метки. В задачах укажи кто, что и срок только если они названы. Без выдумок; отсутствие сведений обозначай явно.'
   return `${guard}\n${task}\nДанные записи (JSON):\n${JSON.stringify({ transcript: job.payload.transcript, title: job.payload.title, language: job.payload.language })}`
 }
 

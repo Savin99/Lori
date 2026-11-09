@@ -9,7 +9,7 @@ import { existsSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { setTimeout as delay } from 'node:timers/promises'
-import { createGateway, gatewayConfig } from '../ui/agy-gateway.mjs'
+import { createGateway, gatewayConfig, plainReportStamps } from '../ui/agy-gateway.mjs'
 
 const executeFile = promisify(execFile)
 const TOKEN = 'lori-test-token-012345678901234567890123456789'
@@ -271,6 +271,14 @@ test('отчёт просит только настоящие ведущие м�
     const data = JSON.parse(prompt.split('Данные записи (JSON):\n')[1])
     assert.equal(data.transcript, index === 0 ? '[00:42] Анна: Обсудили релиз.' : 'Анна: В этой записи нет времени.')
   }
+})
+
+test('метка времени в пункте отчёта освобождается от выделения', () => {
+  assert.equal(plainReportStamps('- **[00:42]** Обрывы при звонке'), '- [00:42] Обрывы при звонке')
+  assert.equal(plainReportStamps('  1. __[04:12]__ Сроки'), '  1. [04:12] Сроки')
+  assert.equal(plainReportStamps('- **[09:30] Отчёт в PDF**: нужен ли'), '- [09:30] **Отчёт в PDF**: нужен ли')
+  assert.equal(plainReportStamps('Текст **[00:42]** внутри строки'), 'Текст **[00:42]** внутри строки')
+  assert.equal(plainReportStamps('- [00:42] Уже без выделения'), '- [00:42] Уже без выделения')
 })
 
 test('аудио передаётся файлом, словарь декодируется, говорящие отключаются по запросу', async (t) => {
