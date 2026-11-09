@@ -141,6 +141,77 @@ final class ElevenLabsTranscriberTests: XCTestCase {
         XCTAssertEqual(steps.recorded, [[0, 1], [1, 1]])
     }
 
+    // MARK: - Длинная запись: асинхронно и опросом
+
+    private static let accepted = #"{"message":"Request accepted. Transcription result will be sent to the webhook.","request_id":"r1","transcription_id":"t1"}"#
+    private static let notReady = #"{"detail":{"status":"not_found_error","message":"Transcript not found."}}"#
+
+    /// Длинная запись не ждёт ответ на открытом соединении: оно рвётся через ~60 с,
+    /// и фоновая сессия заливает запись заново (журнал 28 октября 2026: 113 МБ трижды).
+    /// Запись уходит один раз с `webhook=true`, текст забирается опросом по номеру;
+    /// «ещё не готово» (404) — это повод спросить снова, а не ошибка.
+    func testLongRecordingIsSentOnceAndPickedUpByPolling() async throws {
+        let polls = Counter()
+        let session = StubURLProtocol.session { request, _ in
+            guard request.httpMethod == "GET" else { return .json(Self.accepted, status: 202) }
+            return polls.next() == 1 ? .json(Self.notReady, status: 404) : .json(Self.plain)
+        }
+
+        let transcript = try await ElevenLabsTranscriber(
+            session: session, keyProvider: { "тест-ключ" }, asyncFrom: 0, pollEvery: .milliseconds(10)
+        ).transcribe(audioURL: audio)
+
+        XCTAssertEqual(transcript.text, "Привет мир.")
+        let posts = StubURLProtocol.requests.filter { $0.request.httpMethod == "POST" }
+        XCTAssertEqual(posts.count, 1, "запись уходит один раз")
+        XCTAssertTrue(posts.first?.contains("name=\"webhook\"") == true)
+        let gets = StubURLProtocol.requests.filter { $0.request.httpMethod == "GET" }
+        XCTAssertEqual(gets.count, 2, "404 — ещё не готово, спрашиваем снова")
+        XCTAssertEqual(gets.last?.request.url?.absoluteString, "https://api.elevenlabs.io/v1/speech-to-text/transcripts/t1")
+        XCTAssertEqual(gets.last?.request.value(forHTTPHeaderField: "xi-api-key"), "тест-ключ")
+    }
+
+    /// Короткая запись — прежний проверенный путь: один запрос и ответ в нём же.
+    func testShortRecordingStaysOneSynchronousRequest() async throws {
+        _ = try await engine { _, _ in .json(Self.plain) }.transcribe(audioURL: audio)
+
+        XCTAssertEqual(StubURLProtocol.requests.count, 1)
+        XCTAssertFalse(StubURLProtocol.requests.first?.contains("name=\"webhook\"") == true)
+    }
+
+    /// Без webhook в кабинете сервис асинхронно не примет — запись уходит прежним
+    /// запросом, а не обрывается ошибкой.
+    func testMissingWebhookFallsBackToTheSynchronousRequest() async throws {
+        let session = StubURLProtocol.session { _, body in
+            guard body.range(of: Data("name=\"webhook\"".utf8)) != nil else { return .json(Self.plain) }
+            return .json(#"{"detail":{"status":"invalid_request","message":"No speech-to-text webhooks configured."}}"#, status: 400)
+        }
+
+        let transcript = try await ElevenLabsTranscriber(
+            session: session, keyProvider: { "тест-ключ" }, asyncFrom: 0, pollEvery: .milliseconds(10)
+        ).transcribe(audioURL: audio)
+
+        XCTAssertEqual(transcript.text, "Привет мир.")
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+        XCTAssertFalse(StubURLProtocol.requests.last?.contains("name=\"webhook\"") == true)
+    }
+
+    /// Ошибка опроса — не «ещё не готово»: она доходит до человека, а не крутится вечно.
+    func testPollingErrorOtherThanNotReadyReachesThePerson() async {
+        let session = StubURLProtocol.session { request, _ in
+            guard request.httpMethod == "GET" else { return .json(Self.accepted, status: 202) }
+            return .json(#"{"detail":{"status":"missing_permissions","message":"Нет права на чтение расшифровок."}}"#, status: 401)
+        }
+        do {
+            _ = try await ElevenLabsTranscriber(
+                session: session, keyProvider: { "тест-ключ" }, asyncFrom: 0, pollEvery: .milliseconds(10)
+            ).transcribe(audioURL: audio)
+            XCTFail("401 на опросе обязан быть ошибкой")
+        } catch {
+            XCTAssertEqual(error as? TranscriptionError, .api("Нет права на чтение расшифровок."))
+        }
+    }
+
     // MARK: - Словарь
 
     /// Словарь уходит штатным полем, а не подсказкой-текстом: `keyterms` для
@@ -411,4 +482,17 @@ private final class Steps: @unchecked Sendable {
     }
 
     var recorded: [[Int]] { lock.withLock { steps } }
+}
+
+/// Номер очередного запроса из `@Sendable`-замыкания подставной сессии.
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    func next() -> Int {
+        lock.withLock {
+            count += 1
+            return count
+        }
+    }
 }

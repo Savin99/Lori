@@ -22,19 +22,34 @@ struct ElevenLabsTranscriber: Transcribing {
     static let maxSeconds: TimeInterval = 10 * 60 * 60
     static let maxRequestBytes = 5 * 1024 * 1024 * 1024
 
+    /// С какой длины запись уходит асинхронно (`webhook=true`), а ответ забирается
+    /// опросом. Ждать ответ на открытом соединении дольше минуты нельзя: журнал
+    /// 28 октября 2026 — запись 73 минуты, через ~60 с ожидания соединение рвётся, и
+    /// фоновая сессия заливает 113 МБ заново, трижды. Сорок семь минут сервис считал
+    /// 40 с и проходил с первого раза; полчаса — запас от этой границы. Короче —
+    /// прежний синхронный запрос: он проверен на живых записях.
+    static let defaultAsyncFrom: TimeInterval = 30 * 60
+
     let session: URLSession
     let splitter: AudioSplitter
     /// Ключ приходит извне: так движок проверяется тестами без Keychain и без сети.
     let keyProvider: @Sendable () throws -> String?
+    /// Порог асинхронной отправки и пауза между опросами — подставляются тестами.
+    let asyncFrom: TimeInterval
+    let pollEvery: Duration
 
     init(
         session: URLSession = CloudSession.patient,
         splitter: AudioSplitter = AudioSplitter(),
-        keyProvider: @escaping @Sendable () throws -> String? = { try KeychainStore.key(for: .elevenLabs) }
+        keyProvider: @escaping @Sendable () throws -> String? = { try KeychainStore.key(for: .elevenLabs) },
+        asyncFrom: TimeInterval = ElevenLabsTranscriber.defaultAsyncFrom,
+        pollEvery: Duration = .seconds(10)
     ) {
         self.session = session
         self.splitter = splitter
         self.keyProvider = keyProvider
+        self.asyncFrom = asyncFrom
+        self.pollEvery = pollEvery
     }
 
     var name: String { "ElevenLabs · \(TranscriptionSettings.elevenLabsModel)" }
@@ -105,11 +120,18 @@ struct ElevenLabsTranscriber: Transcribing {
         ask: Ask,
         duration: TimeInterval,
         note: @Sendable (String) -> Void,
-        withKeyterms: Bool = true
+        withKeyterms: Bool = true,
+        asynchronously: Bool? = nil
     ) async throws -> Answer {
+        let asynchronously = asynchronously ?? (duration >= asyncFrom)
         let model = TranscriptionSettings.elevenLabsModel
         var body = MultipartBody()
         body.field("model_id", model)
+        // Сервис отвечает сразу номером расшифровки, а текст отдаёт по
+        // `GET /v1/speech-to-text/transcripts/{id}` (`openapi.json`: «If set the
+        // request will return early without the transcription»). Для этого в
+        // кабинете ElevenLabs должен быть заведён webhook — без него откат ниже.
+        if asynchronously { body.field("webhook", "true") }
         // Язык записи: сервис принимает ISO-639-1 и ISO-639-3. «Определять сам» —
         // это отсутствие поля, а не пустая строка.
         if !TranscriptionSettings.detectsLanguage {
@@ -145,6 +167,7 @@ struct ElevenLabsTranscriber: Transcribing {
             "ElevenLabs → \(model) вся запись \(Int(duration)) с, режим \(ask.mode.rawValue), "
             + "таймкоды \(ask.timestamps ? "вкл" : "выкл"), говорящие \(ask.speakers ? "вкл" : "выкл"), "
             + "\(prepared.mime), \(megabytes) МБ, словарь \(keyterms.count)"
+            + (asynchronously ? ", асинхронно" : "")
         )
         // Запрос один и долгий, поэтому о нём говорится словами: иначе на экране
         // минуты пустой полосы без единого признака жизни.
@@ -171,6 +194,17 @@ struct ElevenLabsTranscriber: Transcribing {
         do {
             try APICheck.ensureSuccess(response: response, data: data)
         } catch {
+            // Webhook в кабинете не заведён — асинхронно сервис не примет. Отправляем
+            // по-старому: на записях, которые сервис считает меньше минуты, это
+            // работает, а человек узнаёт, что поправить, одной строкой.
+            if asynchronously, Self.complainsAboutWebhook(error) {
+                Diagnostics.note("ElevenLabs: асинхронно не принято — \(error.localizedDescription); отправляю одним ожиданием")
+                note("в кабинете ElevenLabs нет webhook — отправляю обычным запросом; длинная запись может отправляться заново")
+                return try await send(
+                    audioURL, key: key, ask: ask, duration: duration, note: note,
+                    withKeyterms: withKeyterms, asynchronously: false
+                )
+            }
             // Словарь — удобство, а не условие работы: если сервис ругается
             // именно на `keyterms` (запрещённый символ, слишком длинный термин),
             // повторяем без словаря, а не отдаём человеку отказ.
@@ -178,17 +212,73 @@ struct ElevenLabsTranscriber: Transcribing {
             Diagnostics.log.notice("ElevenLabs: сервис не принял словарь, повторяю без него")
             note("сервис не принял словарь — повторяю без него")
             return try await send(
-                audioURL, key: key, ask: ask, duration: duration, note: note, withKeyterms: false
+                audioURL, key: key, ask: ask, duration: duration, note: note,
+                withKeyterms: false, asynchronously: asynchronously
             )
         }
 
-        guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
+        // Ответ с текстом — расшифровка готова (так отвечает и синхронный запрос).
+        if let decoded = try? JSONDecoder().decode(Response.self, from: data) {
+            return answer(from: decoded, ask: ask)
+        }
+        guard asynchronously, let accepted = try? JSONDecoder().decode(Accepted.self, from: data) else {
             throw TranscriptionError.badResponse("ElevenLabs вернул ответ, который не удалось разобрать.")
         }
-        return Answer(
+        guard let id = accepted.transcriptionID, !id.isEmpty else {
+            throw TranscriptionError.badResponse(
+                "ElevenLabs принял запись, но не сообщил номер расшифровки — забрать её неоткуда. Ответ сервиса: «\(accepted.message ?? "—")»"
+            )
+        }
+        Diagnostics.note("ElevenLabs: запись принята в работу, расшифровка \(id) — забираю опросом")
+        note("запись у сервиса — жду расшифровку")
+        let decoded = try await poll(id, key: key, duration: duration)
+        return answer(from: decoded, ask: ask)
+    }
+
+    private func answer(from decoded: Response, ask: Ask) -> Answer {
+        Answer(
             text: decoded.text.trimmingCharacters(in: .whitespacesAndNewlines),
             words: Self.words(from: decoded.words ?? [], mode: ask.mode)
         )
+    }
+
+    /// Готовая расшифровка по номеру. Каждый опрос — короткий запрос, и долгого
+    /// молчания на соединении, которое рвётся через минуту, больше нет.
+    ///
+    /// Чем сервис отвечает, пока расшифровка не готова, документация не говорит:
+    /// описан только 404 «Transcript not found». Его и считаем «ещё не готово»;
+    /// всё прочее, кроме 200, — ошибка сервиса как есть. Срок — с запасом от
+    /// скорости сервиса (час звука считается около минуты): полчаса плюс половина
+    /// длины записи.
+    private func poll(_ id: String, key: String, duration: TimeInterval) async throws -> Response {
+        let url = TranscriptionSettings.elevenLabsBaseURL.appending(path: "speech-to-text/transcripts/\(id)")
+        let started = ContinuousClock.now
+        let deadline = started + .seconds(30 * 60 + duration / 2)
+        var polls = 0
+        while true {
+            try await Task.sleep(for: pollEvery)
+            polls += 1
+            var request = URLRequest(url: url)
+            request.setValue(key, forHTTPHeaderField: "xi-api-key")
+            request.timeoutInterval = 60
+            let (data, response) = try await BackgroundTranscriptionTransport.data(for: request, session: session)
+            let status = (response as? HTTPURLResponse)?.statusCode
+            if status != 404 {
+                try APICheck.ensureSuccess(response: response, data: data)
+                guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
+                    throw TranscriptionError.badResponse("ElevenLabs отдал расшифровку \(id), которую не удалось разобрать.")
+                }
+                let waited = Int((ContinuousClock.now - started).components.seconds)
+                Diagnostics.note("ElevenLabs: расшифровка \(id) готова через \(waited) с, опросов \(polls)")
+                return decoded
+            }
+            guard ContinuousClock.now < deadline else {
+                Diagnostics.fault("ElevenLabs: расшифровка \(id) не готова после \(polls) опросов")
+                throw TranscriptionError.api(
+                    "ElevenLabs слишком долго не отдаёт расшифровку. Она может появиться позже в кабинете ElevenLabs — номер \(id)."
+                )
+            }
+        }
     }
 
     /// Слова из ответа. `spacing` — это пробелы между словами, они нужны только
@@ -236,6 +326,13 @@ struct ElevenLabsTranscriber: Transcribing {
     static func complainsAboutKeyterms(_ error: Error) -> Bool {
         guard case let .api(message)? = error as? TranscriptionError else { return false }
         return message.localizedCaseInsensitiveContains("keyterm")
+    }
+
+    /// Отказ в асинхронном режиме: текст сервиса на этот случай в документации не
+    /// описан, поэтому узнаём его по слову — как отказ словаря.
+    static func complainsAboutWebhook(_ error: Error) -> Bool {
+        guard case let .api(message)? = error as? TranscriptionError else { return false }
+        return message.localizedCaseInsensitiveContains("webhook")
     }
 
     // MARK: - Разбор ответа
@@ -337,6 +434,17 @@ struct ElevenLabsTranscriber: Transcribing {
             + "\(Int(TranscriptCoverage.share(segments, duration: duration) * 100))%"
         )
         return warnings
+    }
+
+    /// Ответ на асинхронную отправку (`SpeechToTextWebhookResponseModel`).
+    struct Accepted: Decodable {
+        let message: String?
+        let transcriptionID: String?
+
+        enum CodingKeys: String, CodingKey {
+            case message
+            case transcriptionID = "transcription_id"
+        }
     }
 
     struct Response: Decodable {
