@@ -51,6 +51,8 @@ struct TranscriptExport: Sendable {
     /// обязательно — человек, получивший расшифровку, должен знать о дырах.
     let warnings: [String]
     let blocks: [Block]
+    var summary: RecordingSummaryStore.Entry? = nil
+    var reportMarkdown: String? = nil
 
     var isEmpty: Bool { blocks.isEmpty }
 
@@ -71,7 +73,8 @@ struct TranscriptExport: Sendable {
         duration: TimeInterval? = nil,
         detail: String? = nil,
         topic: String? = nil,
-        names: [String: String] = [:]
+        names: [String: String] = [:],
+        summary: RecordingSummaryStore.Entry? = nil
     ) -> TranscriptExport {
         TranscriptExport(
             title: title,
@@ -93,7 +96,8 @@ struct TranscriptExport: Sendable {
                     speaker: line.speaker.map { names[$0] ?? $0 },
                     text: line.text
                 )
-            }
+            },
+            summary: summary
         )
     }
 
@@ -106,7 +110,8 @@ struct TranscriptExport: Sendable {
         duration: TimeInterval? = nil,
         detail: String? = nil,
         topic: String? = nil,
-        names: [String: String] = [:]
+        names: [String: String] = [:],
+        summary: RecordingSummaryStore.Entry? = nil
     ) -> TranscriptExport {
         make(
             document: TranscriptDocument.parse(markdown),
@@ -115,8 +120,15 @@ struct TranscriptExport: Sendable {
             duration: duration,
             detail: detail,
             topic: topic,
-            names: names
+            names: names,
+            summary: summary
         )
+    }
+
+    static func report(markdown: String, title: String, recordedAt: Date = .now) -> TranscriptExport {
+        var result = make(document: .empty, title: title, recordedAt: recordedAt)
+        result.reportMarkdown = markdown
+        return result
     }
 
     // MARK: - Markdown
@@ -126,11 +138,17 @@ struct TranscriptExport: Sendable {
     /// это текст записи, а экспорт человек читает отдельно от приложения, и
     /// шапка ему нужна.
     var markdown: String {
+        if let reportMarkdown { return reportMarkdown }
         var parts = ["# \(title)", "_\(meta)_"]
         if let detail, !detail.isEmpty { parts.append(detail) }
         if let engine, !engine.isEmpty { parts.append("_Расшифровано: \(engine)_") }
         if let mode, !mode.isEmpty { parts.append("_Режим: \(mode)_") }
         if !warnings.isEmpty { parts.append(warnings.map { "> \($0)" }.joined(separator: "\n")) }
+        if let summary {
+            parts.append(summary.summary.markdown)
+            if summary.stale { parts.append("_Итог устарел: текст расшифровки изменился._") }
+            parts.append("## Расшифровка")
+        }
         parts.append(contentsOf: blocks.map(Self.markdownBlock))
         return parts.joined(separator: "\n\n") + "\n"
     }
@@ -237,7 +255,9 @@ extension TranscriptExport {
             engine: engine,
             mode: mode,
             warnings: shown,
-            blocks: blocks
+            blocks: blocks,
+            summary: summary,
+            reportMarkdown: reportMarkdown
         )
     }
 

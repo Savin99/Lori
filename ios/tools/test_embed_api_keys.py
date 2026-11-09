@@ -76,6 +76,13 @@ class EmbedKeysTests(unittest.TestCase):
                 module.embed(dict(self.env, **{field: value}))
                 self.assertFalse(self.destination.exists())
 
+    def test_gateway_fields_embed_without_touching_other_accounts(self):
+        self.source.write_text(json.dumps({"gatewayURL": " https://lori.example/gateway ", "gateway": " fixture-gateway ", "assistant": "ignored"}))
+        module.embed(self.env)
+        self.assertEqual(plistlib.loads(self.destination.read_bytes()), {
+            "gatewayURL": "https://lori.example/gateway", "lori-gateway-token": "fixture-gateway"
+        })
+
     def test_removed_source_removes_previous_keys(self):
         module.embed(self.env)
         self.source.unlink()

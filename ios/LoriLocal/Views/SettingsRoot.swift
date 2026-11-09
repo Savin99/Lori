@@ -53,9 +53,14 @@ struct SettingsRoot: View {
                     NavigationLink {
                         SummaryScreen(models: summaryModels)
                     } label: {
-                        row("Заголовки", symbol: "text.quote", value: summaryModels.statusLine)
+                        row("Заголовки", symbol: "text.quote", value: GatewaySettings.source == .gateway ? "Подписка Gemini" : summaryModels.statusLine)
                     }
                     .accessibilityIdentifier("settingsSummary")
+
+                    NavigationLink { GatewayScreen() } label: {
+                        row("Подписка Gemini", symbol: "sparkles", value: GatewaySettings.isConfigured ? "настроена" : "не настроена")
+                    }
+                    .accessibilityIdentifier("settingsGateway")
 
                     NavigationLink {
                         VocabularyScreen()

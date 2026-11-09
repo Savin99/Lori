@@ -89,6 +89,8 @@ struct ContentView: View {
     @EnvironmentObject private var workspace: WorkspaceStore
     @EnvironmentObject private var transcription: TranscriptionService
     @EnvironmentObject private var runway: TranscriptionRunway
+    @EnvironmentObject private var reports: ReportRunner
+    @EnvironmentObject private var recordingSummaries: RecordingSummaryStore
     @EnvironmentObject private var summaries: SummaryStore
     @EnvironmentObject private var summaryModels: SummaryModelStore
     @EnvironmentObject private var summaryRunner: SummaryRunner
@@ -652,7 +654,7 @@ struct ContentView: View {
     /// Подсказка про модель заголовков: есть что называть, модели нет, и человек
     /// её не убирал. Во время скачивания она остаётся — показывает проценты.
     private var showsTitlesHint: Bool {
-        !workspace.audio.isEmpty && !summaryModels.isReady && !titlesHintDismissed
+        !workspace.audio.isEmpty && !summaryModels.isReady && GatewaySettings.source == .local && !titlesHintDismissed
     }
 
     /// Заголовок на карточке. У записи без заголовка — «Запись 14:58», без «вчера»
@@ -842,7 +844,9 @@ struct ContentView: View {
     }
 
     private func rename(_ entry: WorkspaceEntry, typed: String, currentTitle: String) throws -> String? {
-        try RecordRename.commit(
+        guard !RecordTitle.isNoOpRename(typed: typed, current: currentTitle) else { return nil }
+        reports.cancel(entry.relativePath)
+        return try RecordRename.commit(
             entry,
             typed: typed,
             currentTitle: currentTitle,
@@ -897,11 +901,12 @@ struct ContentView: View {
     private func moveToTrash(_ entry: WorkspaceEntry) throws {
         let path = entry.relativePath
         transcription.forget(path)
-        summaryRunner.forget(path)
+        reports.forget(path)
         if let transcript = workspace.existingTranscript(for: entry) {
             try workspace.moveToTrash(transcript)
         }
         try workspace.moveToTrash(path)
+        summaryRunner.forget(path)
         topics.forget(path)
         summaries.forget(path)
         speakers.forget(path)
@@ -936,7 +941,8 @@ struct ContentView: View {
             // целиком, и повторять его начало незачем.
             detail: outgoing.detail,
             topic: topics.topic(for: entry.relativePath),
-            names: speakers.names[entry.relativePath] ?? [:]
+            names: speakers.names[entry.relativePath] ?? [:],
+            summary: recordingSummaries.entry(for: entry.relativePath)
         )
         let audio = try? workspace.fileURL(for: entry.relativePath)
         Task {

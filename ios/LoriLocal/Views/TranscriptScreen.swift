@@ -16,6 +16,8 @@ import UIKit
 /// Главным «Поделиться» теперь делает оливковый цвет — единственный в панели.
 struct TranscriptScreen: View {
     @EnvironmentObject private var workspace: WorkspaceStore
+    @EnvironmentObject private var reports: ReportRunner
+    @EnvironmentObject private var recordingSummaries: RecordingSummaryStore
     @EnvironmentObject private var summaries: SummaryStore
     @EnvironmentObject private var summaryModels: SummaryModelStore
     @EnvironmentObject private var summaryRunner: SummaryRunner
@@ -56,9 +58,19 @@ struct TranscriptScreen: View {
     @State private var isLoadingDocument = false
     @State private var documentLoadID = UUID()
     @State private var audioDuration: TimeInterval = 0
-    @State private var showEditor = false
-    @State private var showTopics = false
-    @State private var share: SharePayload?
+    private enum Sheet: Identifiable {
+        case editor, topics, share(SharePayload), report(String)
+        var id: String {
+            switch self {
+            case .editor: "editor"
+            case .topics: "topics"
+            case .share(let payload): payload.id.uuidString
+            case .report: "report"
+            }
+        }
+    }
+    @State private var sheet: Sheet?
+    @State private var editing = false
     @State private var exporting = false
     @State private var copied = false
     @State private var copyReset: Task<Void, Never>?
@@ -118,6 +130,8 @@ struct TranscriptScreen: View {
                             .padding(.top, 16)
                     }
                     notices
+                    summaryBlock
+                    reportProgress
                     transcriptText
                         .padding(.top, 22)
                 }
@@ -128,21 +142,17 @@ struct TranscriptScreen: View {
             .background(LoriPalette.canvas)
             .navigationBarTitleDisplayMode(.inline)
             .toolbar { toolbarContent }
-            .sheet(isPresented: $showEditor, onDismiss: editorClosed) {
-                if let file = transcriptFile {
-                    TranscriptEditorSheet(path: file, title: exportTitle)
+            .sheet(item: $sheet, onDismiss: {
+                if editing { editing = false; editorClosed() }
+            }) { target in
+                switch target {
+                case .editor:
+                    if let file = transcriptFile { TranscriptEditorSheet(path: file, title: exportTitle) }
+                case .topics:
+                    TopicSheet(topics: topics, title: recordTitle.title, path: path, suggestion: topics.suggestion(for: document.plain))
+                case .share(let payload): ShareSheet(payload: payload)
+                case .report(let markdown): ReportSheet(markdown: markdown, title: "Отчёт — " + exportTitle, regenerate: generateReport)
                 }
-            }
-            .sheet(isPresented: $showTopics) {
-                TopicSheet(
-                    topics: topics,
-                    title: recordTitle.title,
-                    path: path,
-                    suggestion: topics.suggestion(for: document.plain)
-                )
-            }
-            .sheet(item: $share) { payload in
-                ShareSheet(payload: payload)
             }
             .alert("Переименовать", isPresented: $isRenaming) {
                 TextField("Название", text: $titleDraft)
@@ -187,6 +197,9 @@ struct TranscriptScreen: View {
             reload()
             if transcriptFile != nil { previews.transcriptSaved(path, in: workspace) }
         }
+        .onChange(of: reports.completed[path]) { _, value in
+            if value != nil { openReport() }
+        }
         .onChange(of: transcriptFile) { _, _ in reload() }
         // Переименование меняет путь: экран переезжает за записью, а не играет
         // файл, которого уже нет.
@@ -208,6 +221,76 @@ struct TranscriptScreen: View {
             playback.stop()
             copyReset?.cancel()
         }
+    }
+
+    @ViewBuilder
+    private var summaryBlock: some View {
+        if !document.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                Text("Итог").font(LoriFont.control).foregroundStyle(LoriPalette.ink)
+                if let entry = recordingSummaries.entry(for: path) {
+                    if entry.stale {
+                        Text("Итог устарел: текст расшифровки изменился.")
+                            .font(LoriFont.meta).foregroundStyle(LoriPalette.muted)
+                    }
+                    if !entry.summary.brief.isEmpty {
+                        Text(entry.summary.brief).font(LoriFont.body).foregroundStyle(LoriPalette.ink)
+                    }
+                    ForEach(entry.summary.sections, id: \.title) { section in
+                        Text(section.title).font(LoriFont.control).foregroundStyle(LoriPalette.ink)
+                        ForEach(Array(section.items.enumerated()), id: \.offset) { _, item in
+                            Text("• " + item).font(LoriFont.body).foregroundStyle(LoriPalette.ink)
+                        }
+                    }
+                }
+                if summaryRunner.running == path, summaryRunner.preparingSummary {
+                    HStack { ProgressView().controlSize(.small); Text("Готовлю итог…").font(LoriFont.meta) }
+                } else {
+                    Button(recordingSummaries.entry(for: path) == nil ? "Сделать итог" : "Обновить итог") {
+                        summaryRunner.requestSummary(for: path, text: document.plainText)
+                    }
+                    .font(LoriFont.control).foregroundStyle(LoriPalette.lime)
+                    .disabled(summaryRunner.running == path)
+                    .accessibilityIdentifier("makeRecordingSummary")
+                }
+                if summaryRunner.isQueued(path), summaryRunner.running != path, let reason = summaryRunner.waitingReason {
+                    Text(reason).font(LoriFont.meta).foregroundStyle(LoriPalette.muted)
+                }
+                if summaryRunner.failurePath == path, let failure = summaryRunner.failure {
+                    Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger)
+                }
+            }
+            .textSelection(.enabled)
+            .padding(.top, 22)
+            .accessibilityElement(children: .contain)
+            .accessibilityIdentifier("recordingSummary")
+        }
+    }
+
+    @ViewBuilder
+    private var reportProgress: some View {
+        if reports.running.contains(path) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Готовлю отчёт…").font(LoriFont.meta).foregroundStyle(LoriPalette.ink)
+                ProgressTrack(fraction: nil, tint: LoriPalette.lime).accessibilityLabel("Готовлю отчёт")
+                Button("Остановить") { reports.cancel(path) }.font(LoriFont.small)
+            }.padding(.top, 16).accessibilityIdentifier("reportProgress")
+        }
+        if let failure = reports.failures[path] {
+            Text(failure).font(LoriFont.meta).foregroundStyle(LoriPalette.danger).padding(.top, 12)
+        }
+    }
+
+    private func generateReport() {
+        reports.generate(path: path, transcript: document.plainText, title: exportTitle, workspace: workspace)
+    }
+    private func openOrGenerateReport() {
+        if (try? workspace.fileURL(for: ReportRunner.path(for: path))) != nil { openReport() }
+        else { generateReport() }
+    }
+    private func openReport() {
+        do { sheet = .report(try ReportRunner.read(for: path, in: workspace)) }
+        catch { notice = Notice(title: "Не удалось открыть отчёт", message: "Файл отчёта не читается.") }
     }
 
     // MARK: - Шапка
@@ -289,7 +372,7 @@ struct TranscriptScreen: View {
     /// вместо даты. Обещать «придумываю», пока модели нет, нельзя: заявка без
     /// весов просто ждёт, и строка висела бы вечно.
     private var titleActivity: String? {
-        if summaryRunner.running == path { return "Придумываю заголовок…" }
+        if titleRequested, summaryRunner.running == path { return "Придумываю заголовок…" }
         guard titleRequested, summaryRunner.isQueued(path) else { return nil }
         if summaryModels.downloading != nil {
             return "Скачиваю модель заголовков · \(Int(summaryModels.fraction * 100))%"
@@ -315,7 +398,7 @@ struct TranscriptScreen: View {
 
     private var topicChip: some View {
         let topic = topics.topic(for: path)
-        return Button { showTopics = true } label: {
+        return Button { sheet = .topics } label: {
             HStack(spacing: 4) {
                 if topic == nil {
                     Image(systemName: "plus")
@@ -976,11 +1059,14 @@ struct TranscriptScreen: View {
             Section {
                 // Пока запись считается заново, правка ушла бы в файл, который
                 // через минуту перезапишет движок.
-                Button("Править текст", systemImage: "square.and.pencil") { showEditor = true }
+                Button("Править текст", systemImage: "square.and.pencil") { editing = true; sheet = .editor }
                     .disabled(transcriptFile == nil || isActive)
-                Button("Тема", systemImage: "tag") { showTopics = true }
+                Button("Тема", systemImage: "tag") { sheet = .topics }
             }
             Section {
+                Button("Отчёт", systemImage: "doc.richtext") { openOrGenerateReport() }
+                    .disabled(document.isEmpty || reports.running.contains(path))
+                    .accessibilityIdentifier("makeReport")
                 Button("Отправить в Obsidian", systemImage: "book.closed") { sendToObsidian() }
                     .disabled(document.isEmpty)
                 Menu(
@@ -1264,7 +1350,8 @@ struct TranscriptScreen: View {
             duration: audioDuration,
             detail: recordTitle.generatedDetail,
             topic: topics.topic(for: path),
-            names: speakers.names[path] ?? [:]
+            names: speakers.names[path] ?? [:],
+            summary: recordingSummaries.entry(for: path)
         )
         let audio = try? workspace.fileURL(for: path)
         exporting = true
@@ -1274,7 +1361,7 @@ struct TranscriptScreen: View {
             // наружу не уходит. Сверка уже в кэше, если экран успел её сделать.
             let payload = await draft.hidingSilentGaps(audio: audio)
             do {
-                share = SharePayload(url: try await payload.file(as: format), subject: payload.title)
+                sheet = .share(SharePayload(url: try await payload.file(as: format), subject: payload.title))
             } catch {
                 notice = Notice(title: "Не удалось собрать файл", message: error.localizedDescription)
             }

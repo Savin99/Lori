@@ -248,7 +248,17 @@ final class WorkspaceStore: ObservableObject {
         let trash = root.appending(path: ".LoriTrash", directoryHint: .isDirectory)
         try fileManager.createDirectory(at: trash, withIntermediateDirectories: true)
         let name = "\(UUID().uuidString)-\(source.lastPathComponent)"
-        try fileManager.moveItem(at: source, to: trash.appending(path: name))
+        let target = trash.appending(path: name)
+        try fileManager.moveItem(at: source, to: target)
+        if WorkspaceEntry.audioExtensions.contains(source.pathExtension.lowercased()) {
+            let report = ReportRunner.path(for: relativePath)
+            do {
+                if (try? fileURL(for: report)) != nil { try moveToTrash(report) }
+            } catch {
+                try? fileManager.moveItem(at: target, to: source)
+                throw error
+            }
+        }
         try refresh()
     }
 
@@ -664,18 +674,27 @@ final class WorkspaceStore: ObservableObject {
         // Имя занято — другой записью, её расшифровкой или осиротевшим текстом:
         // переименование в него слило бы две записи в одну. Запись с тем же
         // именем в соседней папке тоже в счёт: расшифровка у них была бы общей.
+        let reportPath = ReportRunner.path(for: relativePath)
+        let report = (try? fileURL(for: reportPath)) != nil ? reportPath : nil
+        let reportDestination = ReportRunner.path(for: destination)
         try ensureFree(destination, for: relativePath)
         try ensureFree(transcriptDestination, for: transcript)
+        try ensureFree(reportDestination, for: report)
         let namesake = audio.contains { other in
             other.relativePath != relativePath && (other.name as NSString).deletingPathExtension == base
         }
         guard !namesake else { throw WorkspaceError.nameTaken }
 
         try rename(relativePath, to: destination)
-        guard let transcript, transcript != transcriptDestination else { return destination }
+        var movedTranscript = false
         do {
-            try rename(transcript, to: transcriptDestination)
+            if let transcript, transcript != transcriptDestination {
+                try rename(transcript, to: transcriptDestination)
+                movedTranscript = true
+            }
+            if let report, report != reportDestination { try rename(report, to: reportDestination) }
         } catch {
+            if movedTranscript, let transcript { try? rename(transcriptDestination, to: transcript) }
             try? rename(destination, to: relativePath)
             throw error
         }

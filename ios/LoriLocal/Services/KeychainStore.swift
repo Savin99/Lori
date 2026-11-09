@@ -12,12 +12,14 @@ enum KeychainAccount: String, CaseIterable, Sendable {
     case openAI = "openai-api-key"
     case gemini = "gemini-api-key"
     case elevenLabs = "elevenlabs-api-key"
+    case gateway = "lori-gateway-token"
 
     var title: String {
         switch self {
         case .openAI: "OpenAI"
         case .gemini: "Gemini"
         case .elevenLabs: "ElevenLabs"
+        case .gateway: "Подписка Gemini"
         }
     }
 }

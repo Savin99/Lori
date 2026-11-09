@@ -13,6 +13,8 @@ ACCOUNTS = {
     "openAI": "openai-api-key",
     "gemini": "gemini-api-key",
     "elevenLabs": "elevenlabs-api-key",
+    "gateway": "lori-gateway-token",
+    "gatewayURL": "gatewayURL",
 }
 
 # Чат «Спроси свой архив» удалён 5 октября 2026, а в личном

@@ -12,6 +12,7 @@ import UIKit
 /// `ios/CLAUDE.md`).
 @MainActor
 final class SummaryRunner: ObservableObject {
+    @Published private(set) var preparingSummary = false
     @Published private(set) var running: String?
     /// Последняя ошибка заголовка. Общая на все записи — поэтому рядом
     /// `failurePath`: экран записи показывает только свою, а не чужую.
@@ -43,6 +44,13 @@ final class SummaryRunner: ObservableObject {
     /// текст начинает счёт заново, «Придумать заголовок» работает всегда.
     static let automaticAttempts = 3
 
+    let recordingSummaries: RecordingSummaryStore
+    private let sourceProvider: @MainActor () -> AnnotationSource
+    private let gatewayProvider: @MainActor () throws -> GatewayClient
+    private let autoSummaryProvider: @MainActor () -> Bool
+    private var usingGateway: Bool { sourceProvider() == .gateway }
+    private var activeGateway = false
+
     private let models: SummaryModelStore
     private let store: SummaryStore
     private let availableMemory: @Sendable () -> UInt64
@@ -56,11 +64,13 @@ final class SummaryRunner: ObservableObject {
     private struct Postponed: Codable, Equatable {
         let path: String
         var force: Bool
+        var summaryOnly: Bool? = nil
     }
 
     /// Что модель получит и по чему узнаётся тот же текст.
     private struct Source: Sendable {
-        /// Начало и конец (`Summarizer.excerpt`) — больше модели не нужно.
+        /// Подписка получает весь очищенный текст, Qwen — начало и конец.
+        let text: String
         let excerpt: String
         /// Отпечаток всего текста, а не отрывка: правка в середине — тоже новый текст.
         let fingerprint: String
@@ -68,6 +78,7 @@ final class SummaryRunner: ObservableObject {
 
         init(text: String) {
             let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            self.text = clean
             excerpt = Summarizer.excerpt(from: clean)
             fingerprint = SummaryStore.fingerprint(of: clean)
             characters = clean.count
@@ -80,6 +91,7 @@ final class SummaryRunner: ObservableObject {
         case dropped
         /// Ушли в фон или освобождали память под расшифровку — повторим.
         case cancelled
+        case gatewayFailed(String)
         /// Модель не справилась; отпечаток — того текста, с которым не справилась.
         case failed(String, fingerprint: String?)
     }
@@ -122,8 +134,16 @@ final class SummaryRunner: ObservableObject {
         store: SummaryStore,
         availableMemory: @escaping @Sendable () -> UInt64 = { MemoryReport.availableBytes },
         isForeground: @escaping @MainActor () -> Bool = { UIApplication.shared.applicationState == .active },
-        summarize: (@Sendable (SummaryVariant, URL, String) async throws -> Summarizer.Summary)? = nil
+        summarize: (@Sendable (SummaryVariant, URL, String) async throws -> Summarizer.Summary)? = nil,
+        recordingSummaries: RecordingSummaryStore? = nil,
+        sourceProvider: @escaping @MainActor () -> AnnotationSource = { GatewaySettings.source },
+        gatewayProvider: @escaping @MainActor () throws -> GatewayClient = { try GatewayClient.configured() },
+        autoSummaryProvider: @escaping @MainActor () -> Bool = { GatewaySettings.autoSummary }
     ) {
+        self.recordingSummaries = recordingSummaries ?? RecordingSummaryStore(url: store.pendingQueueURL.deletingPathExtension().appendingPathExtension("recording-summaries.json"))
+        self.sourceProvider = sourceProvider
+        self.gatewayProvider = gatewayProvider
+        self.autoSummaryProvider = autoSummaryProvider
         self.models = models
         self.store = store
         self.availableMemory = availableMemory
@@ -219,7 +239,8 @@ final class SummaryRunner: ObservableObject {
     func summarize(path: String, text: String, force: Bool = false) {
         store.retryLoadIfNeeded()
         let source = Source(text: text)
-        guard source.characters > Self.minimumCharacters else {
+        recordingSummaries.markStale(path, fingerprint: source.fingerprint)
+        guard source.characters > (usingGateway ? 0 : Self.minimumCharacters) else {
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(Self.name(of: path))»")
             dropStaleAnswer(for: path)
             return
@@ -230,14 +251,16 @@ final class SummaryRunner: ObservableObject {
             persistMisses()
         }
         if !force {
-            guard !gaveUp(on: path) else {
+            guard usingGateway || !gaveUp(on: path) else {
                 note("заголовок: «\(Self.name(of: path))» — модель уже \(Self.automaticAttempts) раза не справилась с этим текстом, автоматически не пробую")
                 return
             }
-            guard !store.isUpToDate(path, fingerprint: source.fingerprint) else { return }
+            let titleReady = store.isUpToDate(path, fingerprint: source.fingerprint)
+            let summaryReady = !usingGateway || !autoSummaryProvider() || recordingSummaries.isUpToDate(path, fingerprint: source.fingerprint)
+            guard !titleReady || !summaryReady else { return }
             // Модель писала по другому тексту: прежний ответ виден, пока не придёт новый.
             store.markStale(path)
-            guard store.needsSummary(for: path) else { return }
+            guard store.needsSummary(for: path) || !summaryReady else { return }
         }
         enqueue(path, force: force, source: source)
     }
@@ -266,7 +289,7 @@ final class SummaryRunner: ObservableObject {
         store.retryLoadIfNeeded()
         failure = nil
         let source = text.map(Source.init(text:))
-        if let source, source.characters <= Self.minimumCharacters {
+        if let source, source.characters <= (usingGateway ? 0 : Self.minimumCharacters) {
             // Ответ «заголовком служит первая фраза» обязан стать правдой.
             dropStaleAnswer(for: path)
             return .tooShort
@@ -276,11 +299,25 @@ final class SummaryRunner: ObservableObject {
         }
         tooShort.remove(path)
         enqueue(path, force: true, source: source)
+        if usingGateway { return .queued }
         switch obstacle() {
         case .noWeights: return .needsModel
         case .notEnoughMemory: return .waitingForMemory(Obstacle.notEnoughMemory.message)
         case nil: return .queued
         }
+    }
+
+    func requestSummary(for path: String, text: String) {
+        guard !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return }
+        tooShort.remove(path)
+        enqueue(path, force: true, source: Source(text: text), summaryOnly: true)
+    }
+
+    func settingsChanged() {
+        task?.cancel()
+        failedThisPass.removeAll()
+        recoverMissingSummaries()
+        drain()
     }
 
     /// Придумать заголовки всем записям, которым их не хватает, — по кнопке в
@@ -299,7 +336,7 @@ final class SummaryRunner: ObservableObject {
     /// Пересчитать, скольким записям не хватает заголовка, — для экрана
     /// настроек. В очередь ничего не ставит и файлов не читает.
     func refreshBacklog() {
-        guard let workspace, hasWeights, !store.isUnreadable else {
+        guard let workspace, (usingGateway || hasWeights), !store.isUnreadable else {
             backlogCount = 0
             return
         }
@@ -310,8 +347,10 @@ final class SummaryRunner: ObservableObject {
     func move(from old: String, to new: String) {
         guard old != new else { return }
         for index in postponed.indices where postponed[index].path == old {
-            postponed[index] = Postponed(path: new, force: postponed[index].force)
+            postponed[index] = Postponed(path: new, force: postponed[index].force, summaryOnly: postponed[index].summaryOnly)
         }
+        recordingSummaries.move(from: old, to: new)
+        if running == old { task?.cancel() }
         if let source = sources.removeValue(forKey: old) { sources[new] = source }
         if tooShort.remove(old) != nil { tooShort.insert(new) }
         failedThisPass.remove(old)
@@ -325,6 +364,8 @@ final class SummaryRunner: ObservableObject {
 
     /// Запись удалили: её заявка больше не нужна.
     func forget(_ path: String) {
+        recordingSummaries.forget(path)
+        if running == path { task?.cancel() }
         postponed.removeAll { $0.path == path }
         sources[path] = nil
         tooShort.remove(path)
@@ -334,17 +375,17 @@ final class SummaryRunner: ObservableObject {
         persist()
     }
 
-    private func enqueue(_ path: String, force: Bool, source: Source?) {
+    private func enqueue(_ path: String, force: Bool, source: Source?, summaryOnly: Bool = false) {
         // Без весов автоматическая заявка не копится: после скачивания такие
         // записи найдёт `recoverMissingSummaries`. Явную просьбу человека держим.
-        guard force || hasWeights else {
+        guard force || usingGateway || hasWeights else {
             note("заголовки: модели нет — у «\(Self.name(of: path))» пока заголовок из первой фразы")
             return
         }
         failedThisPass.remove(path)
         let wasForced = postponed.contains { $0.path == path && $0.force }
         postponed.removeAll { $0.path == path }
-        let request = Postponed(path: path, force: force || wasForced)
+        let request = Postponed(path: path, force: force || wasForced, summaryOnly: summaryOnly ? true : nil)
         if request.force {
             // Явная просьба — первой среди автоматических: человек ждёт её на экране.
             postponed.insert(request, at: postponed.firstIndex { !$0.force } ?? postponed.endIndex)
@@ -360,6 +401,7 @@ final class SummaryRunner: ObservableObject {
     // MARK: - Жизненный цикл
 
     func applicationWillResignActive() {
+        guard !activeGateway else { return }
         task?.cancel()
         memoryRetry?.cancel()
         memoryRetry = nil
@@ -391,6 +433,7 @@ final class SummaryRunner: ObservableObject {
 
     /// Отмена кооперативная: перед загрузкой ASR ждём освобождения весов MLX.
     func prepareForTranscription() async {
+        guard !activeGateway else { return }
         transcriptionPauses += 1
         defer { transcriptionPauses -= 1 }
         applicationWillResignActive()
@@ -421,7 +464,7 @@ final class SummaryRunner: ObservableObject {
             backlogCount = 0
             return
         }
-        guard hasWeights else {
+        guard usingGateway || hasWeights else {
             backlogCount = 0
             return
         }
@@ -447,9 +490,9 @@ final class SummaryRunner: ObservableObject {
 
     private func lacksSummary(_ entry: WorkspaceEntry, in workspace: WorkspaceStore) -> Bool {
         let path = entry.relativePath
-        return store.needsSummary(for: path)
+        return (store.needsSummary(for: path) || (usingGateway && autoSummaryProvider() && recordingSummaries.entry(for: path) == nil))
             && !tooShort.contains(path)
-            && !gaveUp(on: path)
+            && (usingGateway || !gaveUp(on: path))
             && !postponed.contains(where: { $0.path == path })
             && workspace.existingTranscript(for: entry) != nil
     }
@@ -468,7 +511,7 @@ final class SummaryRunner: ObservableObject {
     // MARK: - Очередь
 
     private func drain() {
-        guard transcriptionPauses == 0, running == nil, !postponed.isEmpty else { return }
+        guard running == nil, !postponed.isEmpty else { return }
         // Решать, чьё имя защищено, по пустой памяти нельзя: работа ждёт, пока
         // файл заголовков прочитается (`applicationDidBecomeActive`).
         guard !store.isUnreadable else {
@@ -476,47 +519,52 @@ final class SummaryRunner: ObservableObject {
             note("заголовки: файл заголовков не читается — жду (в очереди \(postponed.count))", reason: "файл")
             return
         }
-        // Графического процессора в фоне нет: команда возвращается с ошибкой, и MLX
-        // гасит процесс из своей очереди. Работа не теряется — откладывается.
-        guard isForeground() else {
-            waitingReason = "Заголовки продолжатся после возвращения в Lori"
-            note("заголовки: жду возвращения в Lori — в фоне графический процессор недоступен (в очереди \(postponed.count))", reason: "фон")
-            return
-        }
-        // Пока запись не закончена, Lori может уйти в фон, не засыпая, — см. `follow(recording:)`.
-        guard !isRecording else {
-            waitingReason = "Заголовки продолжатся, когда запись закончится"
-            note("заголовки: жду конца записи (в очереди \(postponed.count))", reason: "запись")
-            return
-        }
-        guard transcription?.isIdle != false else {
-            waitingReason = "Заголовки ждут завершения расшифровки"
-            note("заголовки: жду конца расшифровки (в очереди \(postponed.count))", reason: "расшифровка")
-            return
-        }
-        guard let variant = choose() else {
-            let obstacle = obstacle()
-            waitingReason = obstacle?.message
-            if obstacle == .notEnoughMemory {
-                note("заголовки: мало памяти — свободно \(availableMemory() / 1_048_576) МБ, повторяю каждые 5 с", reason: "память")
-                if memoryRetry == nil {
-                    memoryRetry = Task { [weak self] in
-                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                        guard let self else { return }
-                        self.memoryRetry = nil
-                        self.drain()
-                    }
-                }
-            } else {
-                note("заголовки: модели нет — ждут \(postponed.count)", reason: "нет модели")
-            }
-            return
-        }
-        postponed.removeAll { !$0.force && (!store.needsSummary(for: $0.path) || gaveUp(on: $0.path)) }
+        postponed.removeAll { !$0.force && ((!store.needsSummary(for: $0.path)
+            && (!usingGateway || !autoSummaryProvider() || recordingSummaries.entry(for: $0.path) != nil)) || (!usingGateway && gaveUp(on: $0.path))) }
         guard let next = postponed.first(where: { !failedThisPass.contains($0.path) }) else {
             persist()
-            waitingReason = postponed.isEmpty ? nil : "Не удалось создать заголовок. Повторю при возвращении в Lori"
+            waitingReason = postponed.isEmpty ? nil : failure ?? "Повторю при возвращении в Lori"
             return
+        }
+        let gateway = usingGateway || next.summaryOnly == true
+        // Графического процессора в фоне нет: команда возвращается с ошибкой, и MLX
+        // гасит процесс из своей очереди. Работа не теряется — откладывается.
+        if !gateway {
+            guard transcriptionPauses == 0 else { return }
+            guard isForeground() else {
+                waitingReason = "Заголовки продолжатся после возвращения в Lori"
+                note("заголовки: жду возвращения в Lori — в фоне графический процессор недоступен (в очереди \(postponed.count))", reason: "фон")
+                return
+            }
+            // Пока запись не закончена, Lori может уйти в фон, не засыпая, — см. `follow(recording:)`.
+            guard !isRecording else {
+                waitingReason = "Заголовки продолжатся, когда запись закончится"
+                note("заголовки: жду конца записи (в очереди \(postponed.count))", reason: "запись")
+                return
+            }
+            guard transcription?.isIdle != false else {
+                waitingReason = "Заголовки ждут завершения расшифровки"
+                note("заголовки: жду конца расшифровки (в очереди \(postponed.count))", reason: "расшифровка")
+                return
+            }
+            guard choose() != nil else {
+                let obstacle = obstacle()
+                waitingReason = obstacle?.message
+                if obstacle == .notEnoughMemory {
+                    note("заголовки: мало памяти — свободно \(availableMemory() / 1_048_576) МБ, повторяю каждые 5 с", reason: "память")
+                    if memoryRetry == nil {
+                        memoryRetry = Task { [weak self] in
+                            do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                            guard let self else { return }
+                            self.memoryRetry = nil
+                            self.drain()
+                        }
+                    }
+                } else {
+                    note("заголовки: модели нет — ждут \(postponed.count)", reason: "нет модели")
+                }
+                return
+            }
         }
         if let workspace, (try? workspace.entry(at: next.path)) == nil {
             postponed.removeAll { $0.path == next.path }
@@ -528,16 +576,20 @@ final class SummaryRunner: ObservableObject {
         running = next.path
         waitingReason = nil
         failure = nil
-        let directory = models.directory(of: variant)
+        activeGateway = gateway
+        preparingSummary = gateway && (autoSummaryProvider() || next.summaryOnly == true)
+        let variant = gateway ? nil : choose()
+        let directory = variant.map { models.directory(of: $0) }
+
         let revision = revisions[next.path] ?? 0
         task = Task { [weak self] in
             guard let self else { return }
-            let outcome = await self.run(next, variant: variant, directory: directory)
+            let outcome = await self.run(next, variant: variant, directory: directory, gateway: gateway)
             self.finish(next, revision: revision, outcome: outcome)
         }
     }
 
-    private func run(_ request: Postponed, variant: SummaryVariant, directory: URL) async -> Outcome {
+    private func run(_ request: Postponed, variant: SummaryVariant?, directory: URL?, gateway: Bool) async -> Outcome {
         let name = Self.name(of: request.path)
         var source = sources[request.path]
         if source == nil, let url = transcriptURL(for: request.path) {
@@ -549,13 +601,37 @@ final class SummaryRunner: ObservableObject {
             if request.force { fail("У записи нет расшифровки — заголовок придумывать не из чего.", for: request.path) }
             return .dropped
         }
-        guard source.characters > Self.minimumCharacters else {
+        guard source.characters > (gateway ? 0 : Self.minimumCharacters) else {
             tooShort.insert(request.path)
             note("заголовок: текст короче \(Self.minimumCharacters) знаков — «\(name)»")
             dropStaleAnswer(for: request.path)
             if request.force { fail("В записи слишком мало текста, чтобы придумать заголовок.", for: request.path) }
             return .dropped
         }
+        if gateway {
+            do {
+                let client = try gatewayProvider()
+                let result = try await client.annotate(path: request.path, transcript: source.text, language: TranscriptionSettings.language)
+                try Task.checkCancellation()
+                if let workspace, (try? workspace.entry(at: request.path)) == nil { return .dropped }
+                // Выключенный автомат не обновляет итог за спиной человека,
+                // даже если ответ для заголовка уже содержит summary.
+                if (autoSummaryProvider() || request.summaryOnly == true),
+                   !recordingSummaries.store(result.summary, for: request.path, fingerprint: source.fingerprint) {
+                    return .gatewayFailed("Не удалось сохранить итог.")
+                }
+                if request.summaryOnly != true,
+                   !store.store(title: result.title, detail: result.description, for: request.path, force: request.force, source: source.fingerprint) {
+                    return .gatewayFailed("Не удалось сохранить заголовок.")
+                }
+                return .done
+            } catch {
+                if Task.isCancelled || error is CancellationError { return .cancelled }
+                Diagnostics.fault("шлюз: annotate, код \((error as? GatewayError)?.code ?? "network")")
+                return .gatewayFailed((error as? GatewayError)?.localizedDescription ?? GatewayError(code: "network").localizedDescription)
+            }
+        }
+        guard let variant, let directory else { return .cancelled }
         // Пока читался файл, приложение могло уйти в фон — модель там гасит процесс.
         guard isForeground(), !isRecording else { return .cancelled }
         note("заголовок: беру \(variant.rawValue), текста \(source.characters) знаков — «\(name)»")
@@ -587,6 +663,7 @@ final class SummaryRunner: ObservableObject {
         case .done:
             if superseded {
                 store.markStale(request.path)
+                recordingSummaries.markStale(request.path)
             } else {
                 postponed.removeAll { $0.path == request.path }
                 sources[request.path] = nil
@@ -600,6 +677,10 @@ final class SummaryRunner: ObservableObject {
             }
         case .cancelled:
             waitingReason = "Заголовки продолжатся после возвращения в Lori"
+        case .gatewayFailed(let message):
+            failedThisPass.insert(request.path)
+            fail(message, for: request.path)
+            waitingReason = message
         case .failed(let message, let fingerprint):
             failedThisPass.insert(request.path)
             fail(message, for: request.path)
@@ -608,6 +689,8 @@ final class SummaryRunner: ObservableObject {
         }
         persist()
         running = nil
+        activeGateway = false
+        preparingSummary = false
         task = nil
         // Ошибка остаётся на диске, но не запускает бесконечный цикл запросов.
         if !Task.isCancelled || isForeground() { drain() }

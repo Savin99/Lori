@@ -8,6 +8,7 @@ struct LoriLocalApp: App {
     @StateObject private var workspace = WorkspaceStore()
     @StateObject private var summaries = SummaryStore()
     @StateObject private var summaryModels = SummaryModelStore()
+    @StateObject private var reports = ReportRunner()
     @StateObject private var summaryRunner: SummaryRunner
     /// Заголовки и сниппеты из расшифровок — на уровне приложения, а не экрана:
     /// расшифровку, сохранённую движком, надо перечитать и тогда, когда список
@@ -36,7 +37,8 @@ struct LoriLocalApp: App {
         let models = SummaryModelStore()
         _summaries = StateObject(wrappedValue: summaries)
         _summaryModels = StateObject(wrappedValue: models)
-        let runner = SummaryRunner(models: models, store: summaries)
+        let recordingSummaries = RecordingSummaryStore(url: RecoveryProbe.enabled ? RecoveryProbe.root.appending(path: "recording-summaries.json") : nil)
+        let runner = SummaryRunner(models: models, store: summaries, recordingSummaries: recordingSummaries)
         _summaryRunner = StateObject(wrappedValue: runner)
 
         let previews = TranscriptPreviews()
@@ -131,6 +133,8 @@ struct LoriLocalApp: App {
                 .environmentObject(summaries)
                 .environmentObject(summaryModels)
                 .environmentObject(summaryRunner)
+                .environmentObject(summaryRunner.recordingSummaries)
+                .environmentObject(reports)
                 .environmentObject(previews)
                 .environmentObject(transcription)
                 .environmentObject(runway)

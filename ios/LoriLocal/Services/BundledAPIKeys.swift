@@ -24,6 +24,7 @@ enum BundledAPIKeys {
         case .openAI: host = "api.openai.com"
         case .gemini: host = "generativelanguage.googleapis.com"
         case .elevenLabs: host = "api.elevenlabs.io"
+        case .gateway: return allowsBundledGateway(at: url, bundled: gatewayURL)
         }
         return url.scheme?.lowercased() == "https" && url.host?.lowercased() == host
             && (url.port == nil || url.port == 443) && url.user == nil && url.password == nil
@@ -34,7 +35,28 @@ enum BundledAPIKeys {
         case .openAI: TranscriptionSettings.openAIBaseURL
         case .gemini: TranscriptionSettings.geminiHost
         case .elevenLabs: TranscriptionSettings.elevenLabsBaseURL
+        case .gateway: GatewaySettings.baseURL ?? URL(string: "https://unconfigured.invalid")!
         }
+    }
+
+
+    static func allowsBundledGateway(at url: URL, bundled: URL?) -> Bool {
+        guard let bundled else { return false }
+        return url.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+            == bundled.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+    }
+
+    static var gatewayURL: URL? {
+        #if targetEnvironment(simulator)
+        return nil
+        #else
+        guard Bundle.main.bundleIdentifier == "ru.ilyaqa.lori.local",
+              let url = Bundle.main.url(forResource: "PrivateAPIKeys", withExtension: "plist"),
+              let data = try? Data(contentsOf: url),
+              let keys = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String],
+              let value = keys["gatewayURL"] else { return nil }
+        return GatewaySettings.validatedURL(value)
+        #endif
     }
 
     static func key(for account: KeychainAccount, in data: Data) -> String? {

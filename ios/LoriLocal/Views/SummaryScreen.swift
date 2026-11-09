@@ -12,6 +12,8 @@ import SwiftUI
 struct SummaryScreen: View {
     @EnvironmentObject private var runner: SummaryRunner
     @ObservedObject var models: SummaryModelStore
+    @AppStorage(GatewaySettings.sourceKey) private var sourceRaw = GatewaySettings.source.rawValue
+    @AppStorage(GatewaySettings.autoSummaryKey) private var autoSummary = GatewaySettings.autoSummary
     @State private var pendingDelete: SummaryVariant?
 
     private var recommended: SummaryVariant { models.recommendedVariant }
@@ -20,6 +22,22 @@ struct SummaryScreen: View {
 
     var body: some View {
         List {
+            Section("Источник") {
+                Picker("Источник", selection: $sourceRaw) {
+                    ForEach(AnnotationSource.allCases) { Text($0.title).tag($0.rawValue) }
+                }
+                .accessibilityIdentifier("annotationSource")
+            }
+            if sourceRaw == AnnotationSource.gateway.rawValue {
+                Section {
+                    Text("Заголовок, описание и итог готовит Gemini через Mac mini.")
+                        .font(LoriFont.body).foregroundStyle(LoriPalette.ink)
+                    NavigationLink("Подписка Gemini") { GatewayScreen() }
+                    Toggle("Итог сразу после расшифровки", isOn: $autoSummary)
+                        .accessibilityIdentifier("autoRecordingSummary")
+                }
+                activity
+            } else {
             Section {
                 Text("Lori придумывает каждой записи короткий заголовок и описание. Модель работает на этом iPhone — текст никуда не уходит.")
                     .font(LoriFont.body)
@@ -53,6 +71,7 @@ struct SummaryScreen: View {
             }
 
             if models.isReady { activity }
+            }
 
             if let failure = runner.failure {
                 Section("Не получилось придумать") {
@@ -72,6 +91,8 @@ struct SummaryScreen: View {
         .navigationBarTitleDisplayMode(.inline)
         .scrollContentBackground(.hidden)
         .background(LoriPalette.canvas)
+        .onChange(of: sourceRaw) { _, _ in runner.settingsChanged() }
+        .onChange(of: autoSummary) { _, _ in runner.settingsChanged() }
         .onAppear {
             models.refresh()
             runner.refreshBacklog()

@@ -221,8 +221,32 @@ enum TranscriptPDF {
         return result
     }
 
+    private static func markdownBody(_ markdown: String) -> NSAttributedString {
+        let result = NSMutableAttributedString()
+        for line in markdown.components(separatedBy: .newlines) {
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            if trimmed.isEmpty { continue }
+            let hashes = trimmed.prefix(while: { $0 == "#" }).count
+            let heading = hashes > 0 && trimmed.dropFirst(hashes).hasPrefix(" ")
+            let text = heading ? String(trimmed.dropFirst(hashes + 1)) : trimmed
+            let rendered = (try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+                .map { NSAttributedString($0).string } ?? text
+            result.append(NSAttributedString(string: rendered + "\n", attributes: attributes(
+                font: heading ? .boldSystemFont(ofSize: hashes < 3 ? 14 : 12) : .systemFont(ofSize: 11),
+                color: ink, style: style(lineSpacing: 5, spacingAfter: 8)
+            )))
+        }
+        return result
+    }
+
     private static func body(for export: TranscriptExport) -> NSAttributedString {
         let result = NSMutableAttributedString()
+        if let markdown = export.reportMarkdown { return markdownBody(markdown) }
+        if let summary = export.summary {
+            result.append(markdownBody(summary.summary.markdown))
+            if summary.stale { result.append(markdownBody("Итог устарел: текст расшифровки изменился.")) }
+            result.append(markdownBody("## Расшифровка"))
+        }
         let paragraph = style(lineSpacing: 6, spacingAfter: 9)
         for (offset, block) in export.blocks.enumerated() {
             if let range = block.markedRange {
