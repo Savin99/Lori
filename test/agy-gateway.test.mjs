@@ -66,7 +66,7 @@ if (process.env.FAKE_SERVICE_TRACES) {
   writeFileSync(join(root, 'implicit', id + '.pb'), 'UUID and workspace')
   writeFileSync(join(root, 'log', 'cli-' + id + '.log'), 'UUID and workspace')
 }
-event({ event: 'start', id, kind, pid: process.pid, directory: process.cwd(), mode: statSync(process.cwd()).mode & 511, args, input, audioName, audioBytes: kind === 'transcribe' ? Buffer.byteLength(content) : undefined, autoUpdate: process.env.AGY_CLI_DISABLE_AUTO_UPDATE })
+event({ event: 'start', id, kind, schema, pid: process.pid, directory: process.cwd(), mode: statSync(process.cwd()).mode & 511, args, input, audioName, audioBytes: kind === 'transcribe' ? Buffer.byteLength(content) : undefined, autoUpdate: process.env.AGY_CLI_DISABLE_AUTO_UPDATE })
 if (stream) console.log(JSON.stringify({ event: 'init', conversation_id: id, init: {} }))
 if (content?.includes('[hang]')) {
   // Потомок игнорирует TERM и наследует pipe: проверяем именно убийство группы.
@@ -227,7 +227,7 @@ test('annotate/report идут через stdin со схемой, нормал�
   assert.equal(first.state, 'done')
   assert.deepEqual(first.result, {
     title: 'План выпуска новой версии', description: 'Короткое описание.',
-    summary: { brief: 'Обсудили выпуск. Остались вопросы.', highlights: ['факт'], decisions: [], tasks: ['проверить'], openQuestions: [] }
+    summary: { brief: 'Обсудили выпуск. Остались вопросы.', highlights: ['факт'], decisions: [], tasks: [{ text: 'проверить', owner: null, due: null }], openQuestions: [] }
   })
   assert.deepEqual(first.usage, { inputTokens: 123, outputTokens: 45 })
   assert.ok(first.durationSeconds >= 0)
@@ -732,4 +732,26 @@ test('при повреждённом settings.json отдельного HOME ш
     assert.equal(await readFile(path, 'utf8'), content)
     assert.equal(existsSync(join(home, 'events.ndjson')), false, 'до отказа CLI не должен запускаться')
   }
+})
+
+ test('annotate: задачи с исполнителем и исходным сроком, мусор и старые строки', async (t) => {
+  const f = await fixture(t)
+  f.config.childEnv.FAKE_ANNOTATION_JSON = JSON.stringify({ summary: { brief: 'План.', tasks: [
+    { text: ' Тесты ', owner: ' Анна ', due: ' до пятницы ' },
+    { text: 'Инструкция', owner: null, due: 'к 15 ноября' },
+    { text: 'Проверить', owner: 7, due: false }, ' Старый формат ', {}, null, 17,
+    { text: ' ', owner: 'Борис', due: 'завтра' }
+  ] } })
+  const result = await f.done((await f.submit('План работ')).id)
+  assert.deepEqual(result.result.summary.tasks, [
+    { text: 'Тесты', owner: 'Анна', due: 'до пятницы' },
+    { text: 'Инструкция', owner: null, due: 'к 15 ноября' },
+    { text: 'Проверить', owner: null, due: null },
+    { text: 'Старый формат', owner: null, due: null }
+  ])
+  const start = (await f.events()).find((item) => item.event === 'start')
+  const schema = start.schema
+  assert.deepEqual(schema.properties.summary.properties.tasks.items.required, ['text', 'owner', 'due'])
+  assert.deepEqual(schema.properties.summary.properties.tasks.items.properties.due.type, ['string', 'null'])
+  assert.ok(start.input.includes('Не вычисляй даты'))
 })

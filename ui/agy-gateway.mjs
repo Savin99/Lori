@@ -27,11 +27,12 @@ const POLICY = {
 }
 const textSchema = (maxLength) => ({ type: 'string', maxLength })
 const listSchema = { type: 'array', maxItems: 100, items: textSchema(1000) }
+const tasksSchema = { type: 'array', maxItems: 100, items: { type: 'object', additionalProperties: false, required: ['text', 'owner', 'due'], properties: { text: textSchema(1000), owner: { type: ['string', 'null'], maxLength: 200 }, due: { type: ['string', 'null'], maxLength: 200 } } } }
 const objectSchema = (properties) => ({ type: 'object', additionalProperties: false, properties, required: Object.keys(properties) })
 const SCHEMAS = {
   annotate: objectSchema({
     title: textSchema(60), description: textSchema(160),
-    summary: objectSchema({ brief: textSchema(4000), highlights: listSchema, decisions: listSchema, tasks: listSchema, openQuestions: listSchema })
+    summary: objectSchema({ brief: textSchema(4000), highlights: listSchema, decisions: listSchema, tasks: tasksSchema, openQuestions: listSchema })
   }),
   report: objectSchema({ markdown: textSchema(200000) }),
   transcribe: objectSchema({ segments: {
@@ -272,7 +273,10 @@ function normalizeResult (kind, value, speakers) {
   const list = (items) => Array.isArray(items) ? items.map((item) => trimmed(item, 1000)).filter(Boolean).slice(0, 100) : []
   return {
     title, description: boundedWords(value.description, 160, '…'),
-    summary: { brief: requiredText(summary.brief, 4000), ...Object.fromEntries(['highlights', 'decisions', 'tasks', 'openQuestions'].map((key) => [key, list(summary[key])])) }
+    summary: { brief: requiredText(summary.brief, 4000), tasks: Array.isArray(summary.tasks) ? summary.tasks.slice(0, 100).flatMap((item) => {
+      const text = trimmed(typeof item === 'string' ? item : item?.text, 1000)
+      return text ? [{ text, owner: trimmed(item?.owner, 200) || null, due: trimmed(item?.due, 200) || null }] : []
+    }) : [], ...Object.fromEntries(['highlights', 'decisions', 'openQuestions'].map((key) => [key, list(summary[key])])) }
   }
 }
 
@@ -282,7 +286,7 @@ function promptFor (job) {
     return `${guard}\nПрочитай файл part.${job.payload.extension} инструментом read_file как аудио. Расшифруй дословно: не пересказывай, не исправляй слова, сохраняй оговорки; неразборчивое обозначай [неразборчиво]. ${job.payload.speakers ? 'Различай говорящих как S1, S2 и далее внутри этой части.' : 'Во всех сегментах speaker: null.'} start — приблизительное время от начала этой части в MM:SS, либо null, если не уверен. Язык-подсказка: ${JSON.stringify(job.payload.language || 'язык записи')}. Словарь-подсказка: ${JSON.stringify(job.payload.vocabulary || '')}.`
   }
   const task = job.kind === 'annotate'
-    ? 'Сделай заголовок: именная фраза без глаголов, 3–5 слов, до 60 знаков. Описание: 1–2 предложения до 160 знаков. summary.brief: 2–4 предложения. highlights, decisions, tasks, openQuestions: только явно присутствующее в записи, иначе пустые массивы. Язык результата — язык расшифровки.'
+    ? 'Сделай заголовок: именная фраза без глаголов, 3–5 слов, до 60 знаков. Описание: 1–2 предложения до 160 знаков. summary.brief: 2–4 предложения. highlights, decisions, tasks, openQuestions: только явно присутствующее в записи, иначе пустые массивы. tasks: объекты {text, owner, due}; text — действие, owner — исполнитель только если назван, иначе null; due — срок дословно как сказано («до пятницы», «к 15 ноября»), иначе null. Не вычисляй даты и не назначай исполнителей. Язык результата — язык расшифровки.'
     : 'Напиши развёрнутый отчёт по-русски в markdown. Разделы: «Суть», «Участники» (если различимы), «Ход обсуждения» по темам, «Решения», «Задачи», «Открытые вопросы», «Неуверенные места». В задачах укажи кто, что и срок только если они названы. Без выдумок; отсутствие сведений обозначай явно.'
   return `${guard}\n${task}\nДанные записи (JSON):\n${JSON.stringify({ transcript: job.payload.transcript, title: job.payload.title, language: job.payload.language })}`
 }
