@@ -372,6 +372,8 @@ final class RecordingFixture {
 
     var store: RecordingSessionStore { RecordingSessionStore(directory: sessionDirectory) }
 
+    private(set) weak var currentController: RecordingController?
+
     /// Новый контроллер на тех же папках — то же, что новый запуск Lori.
     func controller() -> RecordingController {
         var hooks = RecordingController.Hooks()
@@ -391,7 +393,7 @@ final class RecordingFixture {
         hooks.rotateEvery = rotateEvery
         hooks.callSettle = callSettle
         hooks.finishURL = URL(string: "ru.ilyaqa.lori.local.qa://recording/finish")!
-        return RecordingController(
+        let controller = RecordingController(
             workspace: workspace,
             transcription: transcription,
             device: device,
@@ -400,6 +402,8 @@ final class RecordingFixture {
             calls: calls,
             hooks: hooks
         )
+        currentController = controller
+        return controller
     }
 
     /// Файлы в корзине Lori.

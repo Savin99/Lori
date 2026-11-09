@@ -753,6 +753,13 @@ final class RecordingControllerTests: XCTestCase {
         var info: [AnyHashable: Any] = [AVAudioSessionInterruptionTypeKey: type.rawValue]
         if let reason { info[AVAudioSessionInterruptionReasonKey] = reason.rawValue }
         if shouldResume { info[AVAudioSessionInterruptionOptionKey] = AVAudioSession.InterruptionOptions.shouldResume.rawValue }
-        fixture.center.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: info)
+        if #available(iOS 27.0, *) {
+            // На iOS 27 контроллер слушает новые уведомления, контекст которых
+            // создаёт только система. Проверяем ту же машину состояний уже
+            // разобранным событием; legacy-парсер проверяется этим же вызовом.
+            fixture.currentController?.handle(RecordingInterruptions.legacy(info, inCall: fixture.calls.isInCall))
+        } else {
+            fixture.center.post(name: AVAudioSession.interruptionNotification, object: nil, userInfo: info)
+        }
     }
 }
