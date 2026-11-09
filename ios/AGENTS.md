@@ -17,7 +17,7 @@ iOS task. It is a separate program with its own life.
 
 ## Product intent
 
-Lori for iPhone is a **transcription app**, with no layer on top of it. Its whole loop:
+Lori for iPhone is a **transcription app**. Its whole loop:
 
 1. The user records audio from the iPhone microphone, or brings in an audio file (four routes, below).
 2. Lori transcribes it with the engine chosen in settings and saves `Transcripts/<name>.md`.
@@ -26,8 +26,10 @@ Lori for iPhone is a **transcription app**, with no layer on top of it. Its whol
 
 There is no question-and-answer layer. The owner, 5 October 2026: «я чатам там с ИИ не пользуюсь» —
 the transcript leaves Lori as a file, and questions are asked to an AI outside the app. The in-app chat
-«Спроси свой архив» was removed that day; see «The assistant layer» below. Titles and descriptions made
-by the **local** model (`Summarizer`, MLX) are not a chat and stay.
+«Спроси свой архив» was removed that day; see «The assistant layer» below. Owner decision, **9 November 2026**: titles, descriptions, an automatic **«Итог»** and an explicit
+**«Отчёт»** may be made by Gemini through the owner's subscription gateway on Mac mini. This
+explicitly restores only these three functions above transcription, removed on 27 August and
+5 October; no chat, folder classification or wiki. Local Qwen remains a selectable title source.
 
 Everything removed on 27 August 2026 stays removed as well: no wiki, no digests, no autonomous agent,
 no note editor, no folder browser. Do not bring any of it back without an explicit request.
@@ -38,7 +40,8 @@ The writable sandbox stays:
 Documents/Lori/Workspace
 ```
 
-with `Recordings/` (microphone), `Imported/` (brought from outside), `Transcripts/` (results) and
+with `Recordings/` (microphone), `Imported/` (brought from outside), `Transcripts/` (results),
+`Reports/` (generated reports) and
 `.LoriTrash/`. The folder is visible in «Файлы» because file sharing is enabled in `Info.plist`.
 
 Внешнее аудио входит четырьмя дорогами, и все они сходятся в одном месте — прикреплённым файлом
@@ -216,7 +219,7 @@ Hard rules:
 ## Экран записи (5–6 октября 2026)
 
 Сверху вниз — в порядке вопросов человека: заголовок, описание, дата и длительность с темой, плеер,
-блок состояния (только когда есть что сказать), текст. **«Поделиться»** и «Скопировать» — в панели
+блок состояния (только когда есть что сказать), итог (если есть или его можно запросить), текст. **«Поделиться»** и «Скопировать» — в панели
 навигации, чем расшифровано — первой строкой «…».
 
 - **«Поделиться» — главное действие экрана, и стоит оно в панели навигации.** Расшифровка уходит из
@@ -255,7 +258,7 @@ Hard rules:
 - **Дата с длительностью и тема — одной строкой** (`SplitRow`): тема справа, не влезли вместе — тема
   уходит под дату. Ничего не режется: в общем ряду с датой и темой имя движка однажды уже уходило в
   многоточие.
-- **Georgia — только заголовок.** Под ним — только описание локальной модели
+- **Georgia — только заголовок.** Под ним — только описание выбранной модели
   (`RecordTitle.generatedDetail`): начало текста стоит ниже, повторять его незачем. Дата абсолютная.
 - **Имя записи одно на всё** — `RecordTitle.resolve`: шапка, правка текста, тема, файл экспорта,
   заметка Obsidian. У записи без имени файл и заметка называются с полной датой («Запись 5 октября
@@ -1031,14 +1034,14 @@ Dynamic Island — 24 октября 2026» и «Ревью записи в фо
 ## Заголовки и описания записей
 
 Заголовок и описание записи — **одни на все экраны**. Хранит их `SummaryStore`
-(`Application Support/Lori/summaries.json`), придумывает локальная модель (`Summarizer`, MLX; когда
-её запускать, решает `SummaryRunner`), а что показать, решает `RecordTitle.resolve`.
+(`Application Support/Lori/summaries.json`), придумывает выбранный источник — Qwen на iPhone
+(`Summarizer`, MLX) или подписка Gemini (`GatewayClient`); очередь ведёт `SummaryRunner`, а что показать, решает `RecordTitle.resolve`.
 
 - **MLX работает только на устройстве.** В симуляторе нет Metal-устройства, и библиотека не
   бросает ошибку, а гасит процесс в `mlx::core::metal::Device::Device()`. Поэтому в симуляторе
   генерация заголовков не вызывается вовсе (`#if targetEnvironment(simulator)`), а человек видит
   объяснение. Скачивание весов в симуляторе при этом работает и проверяется.
-- **Заголовки делает локальная модель** (Qwen3 4B или 1.7B в четырёх битах). Веса скачиваются по
+- **При источнике «На телефоне (Qwen)» заголовки делает локальная модель** (Qwen3 4B или 1.7B в четырёх битах). Веса скачиваются по
   желанию в «Настройки → Заголовки»; без них заголовком служит первая фраза. Крупная модель берётся,
   только когда `os_proc_available_memory()` показывает запас (`SummaryVariant.requiredFreeBytes`:
   3,1 ГБ у крупной, 1,5 ГБ у лёгкой; скачаны обе — при нехватке берётся лёгкая): права
@@ -1053,7 +1056,7 @@ Dynamic Island — 24 октября 2026» и «Ревью записи в фо
   модели или дочитается расшифровка. Старшинство (`RecordTitle.Source`), сверху вниз:
   1. `manual` — имя дал человек (переименование). Его не переписывает ничто, кроме успешного
      ответа на явное «Придумать заголовок»;
-  2. `model` — заголовок локальной модели; он вправе заменить имя принесённого файла — такое имя
+  2. `model` — заголовок выбранной модели; он вправе заменить имя принесённого файла — такое имя
      временное;
   3. `importedName` — осмысленное имя принесённого файла («Совещание 27.08»): человек уже назвал
      запись, и подменить это первой фразой — значит потерять единственную примету;
@@ -1100,7 +1103,7 @@ Dynamic Island — 24 октября 2026» и «Ревью записи в фо
   нельзя, запись ждёт, пока файл прочитается. Не разбирается — сначала копия рядом
   (`summaries.corrupt-<дата>.json`) и строка в журнал, и лишь потом начало с пустого; не вышла
   копия — поверх не пишем вовсе. Ошибки сохранения тоже идут в журнал.
-- **`SummaryRunner`: ворота на передний план неприкосновенны** (крэш 2 сентября, `CLAUDE.md`).
+- **Для Qwen `SummaryRunner`: ворота на передний план неприкосновенны** (крэш 2 сентября, `CLAUDE.md`).
   Модель считает на графическом процессоре, которого в фоне iOS не даёт, и MLX гасит процесс из
   своей очереди. Поэтому модель стартует только при `applicationState == .active`,
   `willResignActive` (не `didEnterBackground`) отменяет счёт, а прямо перед стартом передний план
@@ -1173,6 +1176,53 @@ Dynamic Island — 24 октября 2026» и «Ревью записи в фо
 - **Имя заметки Obsidian — имя файла в хранилище** (`ObsidianExport.noteName(from:)`): «:», «/», «\»
   → «-», знаки, ломающие ссылки Obsidian или запрещённые на Windows (`* " < > | ? # ^ [ ]`), →
   пробел, `%%` → `%`, точки в начале снимаются, предел 120 знаков, пусто — «Запись».
+
+## Подписка Gemini через шлюз (9 ноября 2026)
+
+`GatewaySettings`: адрес `gatewayBaseURL` в UserDefaults, токен — отдельный аккаунт Keychain
+`.gateway` (`lori-gateway-token`). Старые аккаунты не переиспользовать. При настроенных адресе и
+токене источник заголовков по умолчанию — «Подписка Gemini», иначе Qwen. Выбор сохраняется;
+никакого автоматического перехода между источниками при ошибке. Адрес принимает только http/https
+с хостом, без credentials, query и fragment; мусор означает «не настроено».
+
+«Настройки → Подписка Gemini» (`GatewayScreen`) проверяет health, затем usage, показывает квоты
+группы Gemini и время устаревшего кеша. Сохранённый токен в поле не подставляется. Текст уходит
+на Mac mini и оттуда в Google по подписке; по условиям Antigravity сотрудники Google вправе его
+читать. Личная device-сборка может встраивать `gatewayURL` и `gateway`; ручной Keychain главнее,
+встроенный токен доступен только на встроенном адресе целиком. QA и симулятор не получают их.
+
+`GatewayClient`: POST `/v1/jobs` с `annotate` или `report`, затем GET раз в 2 с; пределы 5 и 10 мин
+включают ожидание очереди. Отмена/таймаут отправляют DELETE. Идемпотентность — SHA256 от вида,
+пути записи и отпечатка полного очищенного текста. Сессия подставляется URLProtocol в тестах.
+Журнал содержит размеры, время и код; текст, токен и серверное error.message туда не попадают.
+
+Один `annotate` даёт заголовок, описание и структурированный итог. Для подписки не действуют
+ворота MLX: веса, память, передний план, расшифровка и `follow(recording:)`; одна задача за раз,
+сохранение очереди путей и `backlogLimit` остаются. Сбой шлюза оставляет заявку до следующего
+прохода с видимой причиной и не расходует лимит ошибок локальной модели. «Сделать итог» — явный
+annotate даже при Qwen, но не разрешение менять заголовок. Тумблер «Итог сразу после расшифровки»
+по умолчанию включён при настроенном шлюзе; при источнике Gemini он также восстанавливает
+недостающие итоги у уже озаглавленных записей. При выключенном тумблере автоматический annotate сохраняет лишь заголовок и описание;
+итог остаётся доступен по явному «Сделать итог».
+
+`RecordingSummaryStore`: `Application Support/Lori/recording-summaries.json`, путь записи,
+отпечаток, дата, источник, stale. Перенос/удаление идут через `SummaryRunner.move/forget` рядом
+с `SummaryStore`; повреждение сначала копируется рядом, ошибка копии запрещает перезапись.
+Экран записи ставит итог после плеера/состояния и перед текстом, скрывает пустые разделы,
+показывает устаревание и кнопку обновления. PDF и Markdown из обоих входов содержат итог
+перед расшифровкой; «Скопировать» остаётся только текстом расшифровки.
+
+`ReportRunner`: явное действие «Отчёт» в «…», полный очищенный текст, бегущая полоса без процентов,
+отмена. Успешный ответ атомарно заменяет `Reports/<имя аудио>.md`, видимый в «Файлах»;
+ошибка оставляет прежний файл. `WorkspaceStore.renameRecording` переносит отчёт вместе с аудио
+и текстом с проверкой коллизий и откатом; `moveToTrash` отправляет отчёт вместе с аудио в корзину.
+`ReportSheet` — Markdown для чтения и экспорт PDF/Markdown через `TranscriptExport`/`TranscriptPDF`.
+У `TranscriptScreen` один `.sheet(item:)` с перечислением редактора, темы, экспорта и отчёта.
+
+Карта нового слоя: `Services/GatewayClient.swift`, `GatewaySettings.swift`, `RecordingSummaryStore.swift`,
+`ReportRunner.swift`; `Views/GatewayScreen.swift`, `ReportSheet.swift`. Проверки: `GatewayClientTests`,
+`GatewaySummaryRunnerTests`, `RecordingSummaryTests`, `GatewayUITests`; заглушка и синтетический посев —
+`design/qa/mock-gateway.py`, `design/qa/seed-gateway.py`. Только QA bundle, никакой сети в модульных тестах.
 
 ## Сколько займёт расшифровка
 
@@ -1369,13 +1419,14 @@ Dynamic Island — 24 октября 2026» и «Ревью записи в фо
 
 ## Verification
 
-Unit tests and UI tests run in the simulator. Only three simulators may be booted at once and `booted`
+Unit tests and UI tests run in the simulator. Keep signing enabled for Keychain tests;
+`CODE_SIGNING_ALLOWED=NO` removes the required entitlement. Only three simulators may be booted at once and `booted`
 is then ambiguous — address the device by id:
 
 ```bash
 xcodebuild -project LoriLocal.xcodeproj -scheme LoriQA \
   -destination 'id=<simulator-udid>' -derivedDataPath <scratch>/dd \
-  CODE_SIGNING_ALLOWED=NO test
+  test
 ```
 
 If `project.yml` or the file list changes: `/opt/homebrew/bin/xcodegen generate`.

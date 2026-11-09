@@ -57,12 +57,49 @@
 Правила работы над проектом — в [AGENTS.md](AGENTS.md), состояние и незакрытые вопросы —
 в [CLAUDE.md](CLAUDE.md).
 
+## Заголовки, итог и отчёт через подписку Gemini
+
+«Настройки → Подписка Gemini»: адрес шлюза Mac mini (полный путь `/gateway`), токен Bearer,
+«Проверить подключение». Экран показывает остаток недельной и пятичасовой квоты; сохранённый токен
+не раскрывается. Текст расшифровки уходит на Mac mini и оттуда в Google по подписке; по условиям
+Antigravity сотрудники Google вправе его читать. Личные поля `gatewayURL` и `gateway` можно
+встроить в device-сборку: [Secrets/README.md](Secrets/README.md).
+
+В «Заголовки» выбирается «На телефоне (Qwen)» или «Подписка Gemini»; при настроенном шлюзе
+подписка выбрана по умолчанию. `annotate` получает всю расшифровку без служебных строк и таймкодов
+и за один запрос возвращает название, описание и итог. Ручное имя защищено; сетевой сбой оставляет
+просьбу в очереди, источники сами не меняются. «Итог сразу после расшифровки» включает
+автоматический итог при источнике Gemini; выключен — автоматически сохраняются только заголовок
+и описание. Без итога на экране записи —
+«Сделать итог», при изменении текста прежний итог помечен устаревшим. Экспорт PDF/Markdown
+содержит итог, затем расшифровку; копирование по-прежнему отдаёт только расшифровку.
+
+«… → Отчёт» создаёт `Reports/<имя записи>.md`, видимый в «Файлах». Лист отчёта доступен только для
+чтения и делится PDF/Markdown; «Сделать заново» заменяет файл лишь после успеха. Переименование
+и корзина переносят отчёт вместе с записью. Чата, вики и автоматической раскладки по папкам нет.
+
+Проверка без живого шлюза:
+
+```bash
+python3 design/qa/mock-gateway.py --port 18891
+python3 design/qa/seed-gateway.py <UUID симулятора с установленной Lori QA>
+# Отдельным процессом, после проверки pgrep -fl xcodebuild:
+xcodebuild -project LoriLocal.xcodeproj -scheme LoriQA \
+  -destination 'id=<UUID>' -derivedDataPath /tmp/lori-gateway-dd \
+  -only-testing:LoriLocalTests -only-testing:LoriLocalUITests/GatewayUITests test
+python3 tools/test_embed_api_keys.py
+```
+
+Заглушка принимает только синтетический `fixture-gateway`, поддерживает health/usage/jobs/cancel;
+`СБОЙ` в тексте даёт `agent`, `КВОТА` — `quota`, `ЗАДЕРЖКА` — долгое ожидание. Личных ключей и
+подписок ей не нужно. Клиент ограничивает ожидание итога 5 минутами, отчёта — 10 минутами.
+
 ## Сборка
 
 ```bash
 xcodegen generate            # после любых изменений в project.yml или списке файлов
-xcodebuild -project LoriLocal.xcodeproj -scheme LoriLocal \
-  -destination 'id=<udid симулятора>' CODE_SIGNING_ALLOWED=NO test
+xcodebuild -project LoriLocal.xcodeproj -scheme LoriQA \
+  -destination 'id=<udid симулятора>' -derivedDataPath /tmp/lori-qa-dd test
 ```
 
 На телефон — с автоматической подписью и своим Team ID:
