@@ -109,6 +109,9 @@ final class SummaryRunner: ObservableObject {
     private var transcriptionPauses = 0
     private let queueURL: URL
     private var modelSubscription: AnyCancellable?
+    private var recordingSubscription: AnyCancellable?
+    /// Есть незаконченная запись — идёт, на паузе или сохраняется. См. `follow(recording:)`.
+    private var isRecording = false
     private weak var workspace: WorkspaceStore?
     private weak var transcription: TranscriptionService?
     /// Последняя строка журнала о причине простоя: одну и ту же не повторяем.
@@ -362,6 +365,30 @@ final class SummaryRunner: ObservableObject {
         memoryRetry = nil
     }
 
+    /// Запись держит процесс живым в фоне (`UIBackgroundModes: audio`), а графического
+    /// процессора в фоне нет. Раньше уход из Lori усыплял процесс вместе с моделью; с
+    /// записью модель продолжает считать, команда возвращается с ошибкой, и MLX гасит
+    /// процесс `abort()` — вместе с идущим куском записи (журнал 25 октября 2026: запись
+    /// начата, через 10 с перезапуск и «потеряно кусков 1», оба раза посреди заголовка).
+    /// `willResignActive` тут не спасает: загрузку весов и первый проход по тексту —
+    /// секунды на графическом процессоре — прервать нечем. Поэтому, пока запись не
+    /// закончена, модель не начинает работу, а начатая обрывается сразу на старте записи.
+    func follow(recording: AnyPublisher<Bool, Never>) {
+        recordingSubscription = recording.removeDuplicates().sink { [weak self] capturing in
+            Task { @MainActor in self?.recordingChanged(capturing) }
+        }
+    }
+
+    private func recordingChanged(_ capturing: Bool) {
+        isRecording = capturing
+        if capturing {
+            if running != nil { note("заголовки: началась запись — обрываю счёт модели") }
+            applicationWillResignActive()
+        } else {
+            drain()
+        }
+    }
+
     /// Отмена кооперативная: перед загрузкой ASR ждём освобождения весов MLX.
     func prepareForTranscription() async {
         transcriptionPauses += 1
@@ -456,6 +483,12 @@ final class SummaryRunner: ObservableObject {
             note("заголовки: жду возвращения в Lori — в фоне графический процессор недоступен (в очереди \(postponed.count))", reason: "фон")
             return
         }
+        // Пока запись не закончена, Lori может уйти в фон, не засыпая, — см. `follow(recording:)`.
+        guard !isRecording else {
+            waitingReason = "Заголовки продолжатся, когда запись закончится"
+            note("заголовки: жду конца записи (в очереди \(postponed.count))", reason: "запись")
+            return
+        }
         guard transcription?.isIdle != false else {
             waitingReason = "Заголовки ждут завершения расшифровки"
             note("заголовки: жду конца расшифровки (в очереди \(postponed.count))", reason: "расшифровка")
@@ -524,7 +557,7 @@ final class SummaryRunner: ObservableObject {
             return .dropped
         }
         // Пока читался файл, приложение могло уйти в фон — модель там гасит процесс.
-        guard isForeground() else { return .cancelled }
+        guard isForeground(), !isRecording else { return .cancelled }
         note("заголовок: беру \(variant.rawValue), текста \(source.characters) знаков — «\(name)»")
         do {
             let summary = try await summarize(variant, directory, source.excerpt)

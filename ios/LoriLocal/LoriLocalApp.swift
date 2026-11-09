@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 
@@ -74,6 +75,9 @@ struct LoriLocalApp: App {
         let recording = (RecordingIntentBridge.handler as? RecordingController)
             ?? RecordingController(workspace: workspace, transcription: transcription, device: Self.recordingDevice())
         _recording = StateObject(wrappedValue: recording)
+        // Модель заголовков и запись вместе не живут: с записью Lori работает в фоне, а
+        // модель там гасит процесс вместе с записью (`SummaryRunner.follow`).
+        runner.follow(recording: recording.$phase.map { $0 != .idle }.eraseToAnyPublisher())
         if !Self.isUnitTestProcess, RecordingIntentBridge.handler == nil {
             // Незаконченная запись поднимается здесь, синхронно: интент из островка,
             // ради которого Lori запустили, должен застать её на месте.

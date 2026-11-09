@@ -1,3 +1,4 @@
+import Combine
 import XCTest
 @testable import LoriLocal
 
@@ -277,6 +278,37 @@ final class SummaryRunnerTests: XCTestCase {
         runner.applicationDidBecomeActive()
         try? await Task.sleep(for: .milliseconds(250))
         XCTAssertEqual(attempts.value, 2, "работа вернулась в очередь и пошла заново")
+    }
+
+    /// **Регрессия, стоившая записи.** С записью Lori не засыпает в фоне, а графического
+    /// процессора там нет: модель, считавшая заголовок в момент ухода, гасила процесс
+    /// вместе с идущим куском (журнал 25 октября 2026: дважды «запись начата», через
+    /// 10 с перезапуск и «потеряно кусков 1»). Пока запись не закончена, модель не
+    /// работает; начатый счёт обрывается на старте записи, работа ждёт её конца.
+    func testRecordingStopsTheModelAndHoldsItUntilTheRecordingEnds() async {
+        let attempts = Attempts()
+        let runner = runner(stage: Stage(true), attempts: attempts, delay: .seconds(5))
+        let recording = CurrentValueSubject<Bool, Never>(false)
+        runner.follow(recording: recording.eraseToAnyPublisher())
+
+        runner.summarize(path: "a.m4a", text: Self.transcript)
+        try? await Task.sleep(for: .milliseconds(150))
+        XCTAssertEqual(runner.running, "a.m4a", "счёт идёт")
+
+        recording.send(true)
+        try? await Task.sleep(for: .milliseconds(250))
+        XCTAssertNil(runner.running, "запись оборвала счёт")
+        XCTAssertNil(store.title(for: "a.m4a"), "оборванный ответ не сохраняется")
+
+        runner.applicationDidBecomeActive()
+        try? await Task.sleep(for: .milliseconds(250))
+        XCTAssertNil(runner.running, "пока запись не закончена, модель не берётся за работу даже на переднем плане")
+        XCTAssertEqual(attempts.value, 1)
+
+        recording.send(false)
+        try? await Task.sleep(for: .milliseconds(250))
+        XCTAssertEqual(runner.running, "a.m4a", "запись закончилась — работа пошла заново")
+        XCTAssertEqual(attempts.value, 2)
     }
 
     /// Две расшифровки, закончившиеся подряд, дают заголовок обеим. Раньше вторая
