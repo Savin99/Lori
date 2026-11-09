@@ -69,6 +69,7 @@ struct TranscriptScreen: View {
             }
         }
     }
+    @State private var transcriptExpanded = false
     @State private var sheet: Sheet?
     @State private var editing = false
     @State private var exporting = false
@@ -129,11 +130,14 @@ struct TranscriptScreen: View {
                         statusBlock(status)
                             .padding(.top, 16)
                     }
-                    notices
+                    if recordingSummaries.entry(for: path) == nil { notices }
                     summaryBlock
                     reportProgress
-                    transcriptText
-                        .padding(.top, 22)
+                    if recordingSummaries.entry(for: path) != nil { noteNavigation }
+                    if recordingSummaries.entry(for: path) == nil || transcriptExpanded {
+                        if recordingSummaries.entry(for: path) != nil { notices }
+                        transcriptText.padding(.top, 22)
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 4)
@@ -227,25 +231,14 @@ struct TranscriptScreen: View {
     private var summaryBlock: some View {
         if !document.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                Text("Итог").font(LoriFont.control).foregroundStyle(LoriPalette.ink)
                 if let entry = recordingSummaries.entry(for: path) {
-                    if entry.stale {
-                        Text("Итог устарел: текст расшифровки изменился.")
-                            .font(LoriFont.meta).foregroundStyle(LoriPalette.muted)
-                    }
-                    if !entry.summary.brief.isEmpty {
-                        Text(entry.summary.brief).font(LoriFont.body).foregroundStyle(LoriPalette.ink)
-                    }
-                    ForEach(entry.summary.sections, id: \.title) { section in
-                        Text(section.title).font(LoriFont.control).foregroundStyle(LoriPalette.ink)
-                        ForEach(Array(section.items.enumerated()), id: \.offset) { _, item in
-                            Text("• " + item).font(LoriFont.body).foregroundStyle(LoriPalette.ink)
-                        }
+                    RecordingNote(path: path, entry: entry, refreshing: summaryRunner.running == path) {
+                        summaryRunner.requestSummary(for: path, text: document.plainText)
                     }
                 }
                 if summaryRunner.running == path, summaryRunner.preparingSummary {
                     HStack { ProgressView().controlSize(.small); Text("Готовлю итог…").font(LoriFont.meta) }
-                } else {
+                } else if recordingSummaries.entry(for: path) == nil, GatewaySettings.isConfigured {
                     Button(recordingSummaries.entry(for: path) == nil ? "Сделать итог" : "Обновить итог") {
                         summaryRunner.requestSummary(for: path, text: document.plainText)
                     }
@@ -265,6 +258,38 @@ struct TranscriptScreen: View {
             .accessibilityElement(children: .contain)
             .accessibilityIdentifier("recordingSummary")
         }
+    }
+
+    private var noteNavigation: some View {
+        VStack(spacing: 10) {
+            Button { transcriptExpanded.toggle() } label: {
+                noteLink("Расшифровка", detail: LoriFormat.plural(Set(document.lines.compactMap(\.speaker)).count, one: "говорящий", few: "говорящих", many: "говорящих"),
+                         icon: "waveform", expanded: transcriptExpanded)
+            }
+            .accessibilityValue(transcriptExpanded ? "Развёрнуто" : "Свёрнуто")
+            .accessibilityIdentifier("toggleTranscript")
+            Button(action: openOrGenerateReport) {
+                noteLink("Отчёт", detail: reports.running.contains(path) ? "Готовлю отчёт…" :
+                         ((try? workspace.fileURL(for: ReportRunner.path(for: path))) == nil ? "сделать" : nil), icon: "doc.text")
+            }
+            .disabled(reports.running.contains(path))
+            .accessibilityIdentifier("noteReport")
+        }
+        .buttonStyle(.plain).padding(.top, 26)
+    }
+
+    private func noteLink(_ title: String, detail: String?, icon: String, expanded: Bool = false) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: icon).foregroundStyle(LoriPalette.lime).frame(width: 20)
+            Text(title).font(LoriFont.meta).foregroundStyle(LoriPalette.ink)
+            Spacer(minLength: 0)
+            if let detail { Text(detail).font(LoriFont.small).foregroundStyle(LoriPalette.muted) }
+            Image(systemName: expanded ? "chevron.down" : "chevron.right").font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+        }
+        .padding(.horizontal, 16).padding(.vertical, 14).frame(minHeight: 48)
+        .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 18))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(LoriPalette.line.opacity(0.5)))
+        .contentShape(Rectangle())
     }
 
     @ViewBuilder
@@ -302,7 +327,7 @@ struct TranscriptScreen: View {
 
             // Только описание модели. Начало расшифровки сюда не подставляется:
             // текст стоит прямо ниже, и повторять его первые строки незачем.
-            if let detail = resolved.generatedDetail {
+            if recordingSummaries.entry(for: path) == nil, let detail = resolved.generatedDetail {
                 Text(detail)
                     .font(LoriFont.meta)
                     .foregroundStyle(LoriPalette.muted)
@@ -540,61 +565,75 @@ struct TranscriptScreen: View {
 
     @ViewBuilder
     private func statusBlock(_ status: Status) -> some View {
-        switch status {
-        case let .queued(position, waitsForMemory):
-            StatusStrip(tint: LoriPalette.warn) {
-                SplitRow {
-                    Label("В очереди · \(position)-я", systemImage: "clock")
+        if let parts = transcription.partProgress[path] {
+            VStack(alignment: .leading, spacing: 8) {
+                PartsProgressView(progress: parts, retry: isActive ? nil : { index in
+                    transcription.retryPart(index, entry: entry, in: workspace)
+                })
+                if isActive { stripTextButton("Остановить") { transcription.cancel(path) } }
+            }
+            .padding(16)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 20))
+            .overlay(RoundedRectangle(cornerRadius: 20).stroke(LoriPalette.line.opacity(0.5)))
+            .accessibilityIdentifier("transcriptionStatus")
+        } else {
+            switch status {
+            case let .queued(position, waitsForMemory):
+                StatusStrip(tint: LoriPalette.warn) {
+                    SplitRow {
+                        Label("В очереди · \(position)-я", systemImage: "clock")
+                            .font(LoriFont.meta.weight(.semibold))
+                            .foregroundStyle(LoriPalette.warn)
+                        stripTextButton("Убрать из очереди") { transcription.cancel(path) }
+                    }
+                    // «В очереди» и «жду память» — разные вещи: первое пройдёт само,
+                    // второе может и не пройти, и человек вправе видеть разницу.
+                    if waitsForMemory {
+                        Text("Жду, пока освободится память")
+                            .font(LoriFont.small)
+                            .foregroundStyle(LoriPalette.ink)
+                    }
+                }
+            case let .running(starting):
+                runningStrip(starting: starting)
+            case let .sending(share):
+                transferStrip(
+                    title: share.map { "Отправляю запись · \(RecordStatus.percent($0))" } ?? "Отправляю запись",
+                    fraction: share
+                )
+            case .awaitingService:
+                transferStrip(title: "Жду ответ сервиса", fraction: nil)
+            case .interrupted:
+                StatusStrip(tint: LoriPalette.warn) {
+                    Label("Расшифровка прервалась", systemImage: "pause.circle")
                         .font(LoriFont.meta.weight(.semibold))
                         .foregroundStyle(LoriPalette.warn)
-                    stripTextButton("Убрать из очереди") { transcription.cancel(path) }
-                }
-                // «В очереди» и «жду память» — разные вещи: первое пройдёт само,
-                // второе может и не пройти, и человек вправе видеть разницу.
-                if waitsForMemory {
-                    Text("Жду, пока освободится память")
+                    Text(interruptedNote)
                         .font(LoriFont.small)
                         .foregroundStyle(LoriPalette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    stripCapsuleButton("Продолжить", action: resume)
+                        .padding(.top, 2)
                 }
+            case let .failed(message):
+                StatusStrip(tint: LoriPalette.danger) {
+                    Label("Не получилось расшифровать", systemImage: "exclamationmark.triangle")
+                        .font(LoriFont.meta.weight(.semibold))
+                        .foregroundStyle(LoriPalette.danger)
+                    // Текст ошибки можно скопировать: с ним идут в настройки или в чат
+                    // с разработчиком, и перепечатывать его руками незачем.
+                    Text(message)
+                        .font(LoriFont.small)
+                        .foregroundStyle(LoriPalette.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                    stripCapsuleButton("Повторить") { run(nil) }
+                        .padding(.top, 2)
+                }
+            case .untranscribed:
+                untranscribedBlock
             }
-        case let .running(starting):
-            runningStrip(starting: starting)
-        case let .sending(share):
-            transferStrip(
-                title: share.map { "Отправляю запись · \(RecordStatus.percent($0))" } ?? "Отправляю запись",
-                fraction: share
-            )
-        case .awaitingService:
-            transferStrip(title: "Жду ответ сервиса", fraction: nil)
-        case .interrupted:
-            StatusStrip(tint: LoriPalette.warn) {
-                Label("Расшифровка прервалась", systemImage: "pause.circle")
-                    .font(LoriFont.meta.weight(.semibold))
-                    .foregroundStyle(LoriPalette.warn)
-                Text(interruptedNote)
-                    .font(LoriFont.small)
-                    .foregroundStyle(LoriPalette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                stripCapsuleButton("Продолжить", action: resume)
-                    .padding(.top, 2)
-            }
-        case let .failed(message):
-            StatusStrip(tint: LoriPalette.danger) {
-                Label("Не получилось расшифровать", systemImage: "exclamationmark.triangle")
-                    .font(LoriFont.meta.weight(.semibold))
-                    .foregroundStyle(LoriPalette.danger)
-                // Текст ошибки можно скопировать: с ним идут в настройки или в чат
-                // с разработчиком, и перепечатывать его руками незачем.
-                Text(message)
-                    .font(LoriFont.small)
-                    .foregroundStyle(LoriPalette.ink)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .textSelection(.enabled)
-                stripCapsuleButton("Повторить") { run(nil) }
-                    .padding(.top, 2)
-            }
-        case .untranscribed:
-            untranscribedBlock
         }
     }
 

@@ -18,7 +18,7 @@ import Foundation
 /// Пропадёт черновик — расшифровка просто пойдёт с нуля, как раньше.
 enum TranscriptCheckpoint {
     /// Готовая реплика: текст и участок записи, который он покрывает.
-    struct Piece: Codable, Equatable {
+    struct Piece: Codable, Equatable, Sendable {
         let start: TimeInterval
         let end: TimeInterval
         let text: String
@@ -37,8 +37,17 @@ enum TranscriptCheckpoint {
         /// а не про сеанс работы, и в готовом файле оно обязано остаться.
         var warnings: [String]
         var saved: Date
+        // Точные границы и оплаченные ответы подписки: повторяем только выбранную часть.
+        var subscriptionParts: [SubscriptionPart]? = nil
 
         var isEmpty: Bool { pieces.isEmpty }
+    }
+
+    struct SubscriptionPart: Codable, Equatable, Sendable {
+        let start: TimeInterval
+        let end: TimeInterval
+        var pieces: [Piece]? = nil
+        var failure: TranscriptionParts.Phase? = nil
     }
 
     /// Черновики старше недели не поднимаем: за неделю человек уже забыл, что

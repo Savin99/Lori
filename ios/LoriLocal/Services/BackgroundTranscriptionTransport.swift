@@ -139,7 +139,13 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     static func data(for request: URLRequest, session: URLSession) async throws -> (Data, URLResponse) {
         guard let job = TranscriptionJob.current,
               session === CloudSession.shared || session === CloudSession.patient else {
-            return try await session.data(for: request)
+            guard let report, let body = request.httpBody, !body.isEmpty else { return try await session.data(for: request) }
+            var upload = request
+            upload.httpBody = nil
+            let delegate = ForegroundUploadReporter(report: report)
+            report(.sending(sent: 0, expected: Int64(body.count)))
+            defer { report(.answered) }
+            return try await session.upload(for: upload, from: body, delegate: delegate)
         }
         return try await shared.perform(request, job: job)
     }
@@ -454,5 +460,15 @@ final class LoriBackgroundDelegate: NSObject, UIApplicationDelegate {
             return
         }
         runway.systemWokeForTransfers(completion: completionHandler)
+    }
+}
+
+/// Делегат отдельного запроса сохраняет тестовую/пользовательскую URLSession.
+private final class ForegroundUploadReporter: NSObject, URLSessionTaskDelegate, Sendable {
+    let report: @Sendable (TransferPhase) -> Void
+    init(report: @escaping @Sendable (TransferPhase) -> Void) { self.report = report }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didSendBodyData bytesSent: Int64,
+                    totalBytesSent: Int64, totalBytesExpectedToSend: Int64) {
+        report(.from(sent: totalBytesSent, expected: totalBytesExpectedToSend))
     }
 }

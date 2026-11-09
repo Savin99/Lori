@@ -59,6 +59,15 @@ enum LoriFormat {
         return dateFormatter(sameYearAs: now, as: date, calendar: calendar).string(from: date)
     }
 
+    /// Возраст итога: короткая относительная подпись без англоязычной локали.
+    static func ago(_ date: Date, now: Date = .now) -> String {
+        let seconds = max(0, now.timeIntervalSince(date))
+        if seconds < 60 { return "сейчас" }
+        if seconds < 3600 { return "\(Int(seconds / 60)) мин назад" }
+        if seconds < 86400 { return "\(Int(seconds / 3600)) ч назад" }
+        return plural(Int(seconds / 86400), one: "день", few: "дня", many: "дней") + " назад"
+    }
+
     /// Длительность записи: «0:07», «12:03».
     /// Грубая оценка времени: «40 сек», «2 мин». Секундная точность в ожидании
     /// только раздражает — числа всё равно скачут.

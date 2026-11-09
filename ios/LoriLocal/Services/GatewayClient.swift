@@ -26,15 +26,39 @@ struct GatewayError: Error, LocalizedError, Decodable, Sendable, Equatable {
     }
 }
 
+/// Строки старых итогов читаем наряду с новой формой шлюза.
+struct SummaryTask: Codable, Equatable, Sendable, ExpressibleByStringLiteral {
+    var text: String
+    var owner: String?
+    var due: String?
+
+    init(text: String, owner: String? = nil, due: String? = nil) {
+        self.text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.owner = owner.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        self.due = due.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+    }
+    init(stringLiteral value: String) { self.init(text: value) }
+    init(from decoder: Decoder) throws {
+        if let text = try? decoder.singleValueContainer().decode(String.self) { self.init(text: text); return }
+        let box = try decoder.container(keyedBy: CodingKeys.self)
+        self.init(text: try box.decode(String.self, forKey: .text), owner: try box.decodeIfPresent(String.self, forKey: .owner), due: try box.decodeIfPresent(String.self, forKey: .due))
+    }
+    var attribution: String? {
+        let fields = [owner, due].compactMap { $0 }
+        return fields.isEmpty ? nil : "— " + fields.joined(separator: ", ")
+    }
+    var displayText: String { [text, attribution].compactMap { $0 }.joined(separator: " ") }
+}
+
 struct RecordingSummary: Codable, Equatable, Sendable {
     var brief: String
     var highlights: [String]
     var decisions: [String]
-    var tasks: [String]
+    var tasks: [SummaryTask]
     var openQuestions: [String]
 
     var sections: [(title: String, items: [String])] {
-        [("Главное", highlights), ("Решения", decisions), ("Задачи", tasks), ("Открытые вопросы", openQuestions)]
+        [("Главное", highlights), ("Решения", decisions), ("Задачи", tasks.map(\.displayText)), ("Открытые вопросы", openQuestions)]
             .map { ($0.0, $0.1.filter { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }) }
             .filter { !$0.1.isEmpty }
     }
@@ -158,7 +182,7 @@ struct GatewayClient: Sendable {
         return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
     }
 
-    func transcribe(audio: CloudAudio.Prepared, key: String, speakers: Bool, language: String, vocabulary: [String]) async throws -> [Segment] {
+    func transcribe(audio: CloudAudio.Prepared, key: String, speakers: Bool, language: String, vocabulary: [String], transfer: (@Sendable (TransferPhase) -> Void)? = nil, listening: @Sendable () -> Void = {}) async throws -> [Segment] {
         var url = URLComponents(url: baseURL.appending(path: "v1/jobs"), resolvingAgainstBaseURL: false)!
         url.queryItems = [URLQueryItem(name: "kind", value: "transcribe")]
         var submission = URLRequest(url: url.url!)
@@ -173,7 +197,7 @@ struct GatewayClient: Sendable {
         submission.setValue(encoded, forHTTPHeaderField: "X-Lori-Vocabulary")
         submission.httpBody = try Data(contentsOf: audio.url)
         Diagnostics.note("шлюз: transcribe, \(submission.httpBody?.count ?? 0) байт")
-        let job = try await run(.transcribe, limit: transcribeTimeout, submission: submission)
+        let job = try await run(.transcribe, limit: transcribeTimeout, submission: submission, submissionReport: transfer, listening: listening)
         guard let segments = job.result?.segments, !segments.isEmpty else { throw GatewayError(code: "response") }
         return segments
     }
@@ -208,12 +232,14 @@ struct GatewayClient: Sendable {
         return try await run(kind, limit: limit, submission: makeRequest("v1/jobs", method: "POST", body: body, timeout: min(60, limit)))
     }
 
-    private func run(_ kind: Kind, limit: TimeInterval, submission: URLRequest) async throws -> Job {
+    private func run(_ kind: Kind, limit: TimeInterval, submission: URLRequest, submissionReport: (@Sendable (TransferPhase) -> Void)? = nil, listening: @Sendable () -> Void = {}) async throws -> Job {
         let started = Date()
         var id: String?
         do {
-            let accepted: Job = try await send(submission)
-            guard let acceptedID = accepted.id, !acceptedID.isEmpty,
+            let submitted: Job = try await BackgroundTranscriptionTransport.$report.withValue(submissionReport ?? BackgroundTranscriptionTransport.report) {
+                try await send(submission)
+            }
+            guard let acceptedID = submitted.id, !acceptedID.isEmpty,
                   acceptedID.rangeOfCharacter(from: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_" )).inverted) == nil else {
                 throw GatewayError(code: "response")
             }
@@ -229,7 +255,10 @@ struct GatewayClient: Sendable {
                     return job
                 case "failed": throw job.error ?? GatewayError(code: "agent")
                 case "cancelled": throw GatewayError(code: "cancelled")
-                case "queued", "running": try await Task.sleep(for: .seconds(min(pollInterval, remaining)))
+                case "running":
+                    listening()
+                    try await Task.sleep(for: .seconds(min(pollInterval, remaining)))
+                case "queued": try await Task.sleep(for: .seconds(min(pollInterval, remaining)))
                 default: throw GatewayError(code: "response")
                 }
             }

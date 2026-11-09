@@ -36,6 +36,16 @@ enum InterruptedRecords {
         /// читаться обязаны, и наоборот — старая сборка, открыв новый файл, просто пропустит
         /// лишний ключ. Без ошибок ключ вовсе не пишется, так что файл остаётся таким же, как был.
         let failures: [String: String]?
+        var partFailures: [String: PartRetry]? = nil
+    }
+
+    struct PartRetry: Codable, Equatable, Sendable {
+        let configuration: TranscriptionJob
+        let progress: TranscriptionParts
+    }
+    static func partFailures(from url: URL) -> [String: PartRetry] {
+        guard let data = try? Data(contentsOf: url), let archive = try? JSONDecoder().decode(Archive.self, from: data) else { return [:] }
+        return archive.partFailures ?? [:]
     }
 
     /// Путь записи → движок, которым её считали.
@@ -73,10 +83,11 @@ enum InterruptedRecords {
         _ jobs: [String: TranscriptionJob],
         legacy: [String: TranscriptionEngineKind] = [:],
         failures: [String: String] = [:],
+        partFailures: [String: PartRetry] = [:],
         to url: URL
     ) throws {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
-        let archive = Archive(jobs: jobs, legacy: legacy, failures: failures.isEmpty ? nil : failures)
+        let archive = Archive(jobs: jobs, legacy: legacy, failures: failures.isEmpty ? nil : failures, partFailures: partFailures.isEmpty ? nil : partFailures)
         try JSONEncoder().encode(archive).write(to: url, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
     }
 

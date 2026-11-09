@@ -85,12 +85,14 @@ struct RecordStatus: Equatable, Sendable {
     enum Action: Equatable, Sendable {
         case transcribe
         case retry
+        case retryPart(Int)
         case resume
 
         var title: String {
             switch self {
             case .transcribe: "Расшифровать"
             case .retry: "Повторить"
+            case let .retryPart(index): "Повторить часть \(index + 1)"
             case .resume: "Продолжить"
             }
         }
@@ -172,7 +174,7 @@ struct RecordStatus: Equatable, Sendable {
     static func engine(for action: Action, interrupted: TranscriptionEngineKind?) -> TranscriptionEngineKind? {
         switch action {
         case .resume: interrupted
-        case .transcribe, .retry: nil
+        case .transcribe, .retry, .retryPart: nil
         }
     }
 

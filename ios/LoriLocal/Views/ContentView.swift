@@ -67,6 +67,7 @@ enum LoriPalette {
 /// иначе интерфейс не реагирует на системный размер текста.
 enum LoriFont {
     static let display = Font.custom("Georgia", size: 30, relativeTo: .largeTitle)
+    static let noteSection = Font.custom("Georgia", size: 21, relativeTo: .title3)
     static let displaySmall = Font.custom("Georgia", size: 27, relativeTo: .title2)
     static let section = Font.system(.subheadline, weight: .medium)
     static let cardTitle = Font.system(.headline)
@@ -293,6 +294,7 @@ struct ContentView: View {
                 Section {
                     QueueBlock(
                         summary: summary,
+                        parts: transcription.currentPath.flatMap { transcription.partProgress[$0] },
                         backgroundReason: backgroundReason,
                         stop: { showStopQueue = true },
                         explainBackground: { backgroundExplanation = backgroundReason }
@@ -361,12 +363,19 @@ struct ContentView: View {
         let title = cardTitle(resolved, entry)
         let state = transcription.state(for: path)
         let hasTranscript = workspace.existingTranscript(for: entry) != nil
-        let status = RecordStatus.make(
-            state: state,
-            hasTranscript: hasTranscript,
-            fraction: transcription.progressFraction(for: path),
-            remaining: transcription.remainingTime(for: path)
-        )
+        let status: RecordStatus? = {
+            var result = RecordStatus.make(
+                state: state,
+                hasTranscript: hasTranscript,
+                fraction: transcription.progressFraction(for: path),
+                remaining: transcription.remainingTime(for: path)
+            )
+
+            if !transcription.isActive(path), let index = transcription.partProgress[path]?.failedIndices.first {
+                result?.action = .retryPart(index)
+            }
+            return result
+        }()
 
         RecordingCard(
             title: title,
@@ -376,6 +385,7 @@ struct ContentView: View {
             topic: topics.topic(for: path),
             needsTopic: needsTopic(entry),
             status: status,
+            parts: transcription.partProgress[path],
             perform: { action in start(entry, action) }
         )
         .listRowBackground(Color.clear)
@@ -572,7 +582,8 @@ struct ContentView: View {
                     engines.refresh()
                 },
                 transcribe: transcribeAttached
-            )
+            ),
+            parts: transcription.currentPath.flatMap { transcription.partProgress[$0] }
         )
         .sheet(isPresented: $showEnginePicker) {
             EnginePicker(directory: engines, selection: $engineRaw, transcription: transcription)
@@ -875,6 +886,10 @@ struct ContentView: View {
     /// Кнопка на карточке и пункт меню: «Продолжить» — тем же движком, что считал
     /// до обрыва (`RecordStatus.engine`), как и на экране записи.
     private func start(_ entry: WorkspaceEntry, _ action: RecordStatus.Action) {
+        if case let .retryPart(index) = action {
+            transcription.retryPart(index, entry: entry, in: workspace)
+            return
+        }
         let engine = RecordStatus.engine(for: action, interrupted: transcription.interruptedEngine(for: entry.relativePath))
         transcription.enqueue(entry, in: workspace, using: engine)
     }

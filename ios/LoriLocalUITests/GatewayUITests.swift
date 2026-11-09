@@ -3,12 +3,13 @@ import XCTest
 /// Запускается с design/qa/mock-gateway.py; данные — только синтетический посев.
 @MainActor
 final class GatewayUITests: XCTestCase {
-    override func setUp() async throws { continueAfterFailure = false }
+    override func setUp() async throws { continueAfterFailure = false; XCUIDevice.shared.appearance = .light }
 
     private func launch(address: String = "http://127.0.0.1:18891/gateway", initialEngine: String? = nil) -> XCUIApplication {
         let app = XCUIApplication()
         app.launchArguments = ["-gatewayBaseURL", address, "-annotationSource", "local", "--forget-attachments"]
         if let initialEngine { app.launchArguments += ["-transcriptionEngine", initialEngine] }
+        app.launchArguments += ["-geminiSubscriptionPartMinutes", "5"]
         app.launch()
         return app
     }
@@ -46,28 +47,24 @@ final class GatewayUITests: XCTestCase {
         configure(app)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.buttons["Готово"].tap()
-        let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
-            .matching(NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Сегодня обсуждали выпуск Лори", "Проверка подписки Gemini")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 8), "нужен посев seed-gateway.py")
-        card.tap()
+        openSummaryRecord(app)
         let summary = app.buttons["makeRecordingSummary"]
-        XCTAssertTrue(summary.waitForExistence(timeout: 5))
+        reveal(summary, in: app)
         summary.tap()
         let completed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
             app.buttons["makeRecordingSummary"].exists && app.buttons["makeRecordingSummary"].isHittable
         }, object: nil)
         XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 15), .completed)
         XCTAssertTrue(app.staticTexts["Проверка подписки Gemini"].waitForExistence(timeout: 5), "тот же annotate даёт и заголовок")
-        XCTAssertTrue(app.staticTexts["Обсудили выпуск и проверку качества."].exists)
+        XCTAssertTrue(app.buttons["summaryTask.0"].exists)
         XCTAssertFalse(app.staticTexts["Итог устарел: текст расшифровки изменился."].exists)
         let brief = app.staticTexts["Анна проверит качество записи завтра."]
         XCTAssertTrue(brief.waitForExistence(timeout: 15))
         XCTAssertFalse(app.staticTexts["Решения"].exists, "пустой раздел скрыт")
         app.scrollViews.firstMatch.swipeDown()
         save("gateway-recording-summary")
-        app.buttons["transcriptMenu"].tap()
-        let report = app.buttons["Отчёт"]
-        XCTAssertTrue(report.waitForExistence(timeout: 5))
+        let report = app.buttons["noteReport"]
+        reveal(report, in: app)
         report.tap()
         XCTAssertTrue(app.descendants(matching: .any)["reportMarkdown"].waitForExistence(timeout: 15))
         XCTAssertTrue(app.staticTexts["Обсудили выпуск Лори."].exists)
@@ -128,10 +125,7 @@ final class GatewayUITests: XCTestCase {
         configure(app)
         app.navigationBars.buttons.element(boundBy: 0).tap()
         app.buttons["Готово"].tap()
-        let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
-            .matching(NSPredicate(format: "label CONTAINS %@ OR label CONTAINS %@", "Сегодня обсуждали выпуск Лори", "Проверка подписки Gemini")).firstMatch
-        XCTAssertTrue(card.waitForExistence(timeout: 8))
-        card.tap()
+        openSummaryRecord(app)
         app.buttons["transcriptMenu"].tap()
         app.buttons["Расшифровать заново"].tap()
         let engine = app.buttons["Gemini (подписка)"]
@@ -139,6 +133,11 @@ final class GatewayUITests: XCTestCase {
         engine.tap()
         XCTAssertTrue(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "может пересказывать и пропускать")).firstMatch.waitForExistence(timeout: 5))
         app.buttons["Расшифровать заново"].tap()
+        let toggle = app.buttons["toggleTranscript"]
+        if toggle.waitForExistence(timeout: 3) {
+            reveal(toggle, in: app)
+            if toggle.value as? String == "Свёрнуто" { toggle.tap() }
+        }
         // Вся запись короче одной части. Время 09:59 из fixture не становится перемоткой.
         app.scrollViews.firstMatch.swipeUp()
         let chunk = app.buttons.matching(identifier: "lineTime").matching(NSPredicate(format: "label == %@", "Примерно 0:00")).firstMatch
@@ -149,6 +148,113 @@ final class GatewayUITests: XCTestCase {
         let provenance = app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Расшифровано в облаке: Gemini (подписка)")).firstMatch
         XCTAssertTrue(provenance.waitForExistence(timeout: 5))
         save("gateway-subscription-transcript-menu")
+    }
+
+    func testNoteTaskPersistsAndTranscriptExpandsInPlace() {
+        let app = launch()
+        configure(app)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["Готово"].tap()
+        openSummaryRecord(app)
+        let refresh = app.buttons["makeRecordingSummary"]
+        reveal(refresh, in: app)
+        refresh.tap()
+        let task = app.buttons["summaryTask.0"]
+        let annotated = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            refresh.exists && refresh.isEnabled && task.label.contains("Проверить качество записи — Анна, завтра")
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [annotated], timeout: 20), .completed)
+        reveal(task, in: app)
+        XCTAssertTrue(task.label.contains("Проверить качество записи — Анна, завтра"))
+        if task.value as? String == "Выполнено" { task.tap() }
+        XCTAssertEqual(task.value as? String, "Не выполнено")
+        task.tap()
+        XCTAssertEqual(task.value as? String, "Выполнено")
+        saveBoth("note-task-completed")
+        app.terminate()
+        let reloaded = launch()
+        openSummaryRecord(reloaded)
+        let restored = reloaded.buttons["summaryTask.0"]
+        reveal(restored, in: reloaded)
+        XCTAssertEqual(restored.value as? String, "Выполнено")
+        let toggle = reloaded.buttons["toggleTranscript"]
+        reveal(toggle, in: reloaded)
+        XCTAssertEqual(toggle.value as? String, "Свёрнуто")
+        XCTAssertFalse(reloaded.descendants(matching: .any)["transcriptLines"].exists)
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "Развёрнуто")
+        reloaded.swipeUp()
+        XCTAssertTrue(reloaded.descendants(matching: .any)["transcriptLines"].waitForExistence(timeout: 5))
+        save("note-transcript-expanded-light")
+        reveal(toggle, in: reloaded, down: true)
+        toggle.tap()
+        XCTAssertEqual(toggle.value as? String, "Свёрнуто")
+        reloaded.swipeDown()
+        saveBoth("note")
+    }
+
+    func testSlowPartFailureAndRetryOnlyMissingPart() {
+        let app = launch(address: "http://127.0.0.1:18892/gateway", initialEngine: "gemini-subscription")
+        configure(app)
+        app.navigationBars.buttons.element(boundBy: 0).tap()
+        app.buttons["Готово"].tap()
+        let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
+            .matching(NSPredicate(format: "label CONTAINS '11:59' OR label CONTAINS '12:00'")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 8), "нужен seed-note-progress.py")
+        card.tap()
+        app.buttons["transcriptMenu"].tap()
+        app.buttons["Расшифровать заново"].tap()
+        app.buttons["Gemini (подписка)"].tap()
+        app.buttons["Расшифровать заново"].tap()
+        let slow = app.staticTexts["Слушает часть 2 из 3"]
+        XCTAssertTrue(slow.waitForExistence(timeout: 40))
+        XCTAssertTrue(app.descendants(matching: .any)["partsProgress"].exists)
+        XCTAssertFalse(app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "Расшифровываю · 50%")).firstMatch.exists)
+        saveBoth("progress-slow-record")
+        app.buttons["Записи"].tap()
+        XCTAssertTrue(app.descendants(matching: .any)["composerPartsProgress"].waitForExistence(timeout: 5))
+        save("progress-home-queue-light")
+        card.tap()
+        let retry = app.buttons["retryPart.1"]
+        XCTAssertTrue(retry.waitForExistence(timeout: 45))
+        XCTAssertTrue(app.staticTexts["Готово, кроме части 2"].exists)
+        saveBoth("progress-failed")
+        retry.tap()
+        let finished = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in !app.descendants(matching: .any)["partsProgress"].exists }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [finished], timeout: 30), .completed)
+        XCTAssertFalse(app.staticTexts["Готово, кроме части 2"].exists)
+        XCTAssertFalse(app.buttons["retryPart.0"].exists)
+        save("progress-retried-light")
+    }
+
+    private func openSummaryRecord(_ app: XCUIApplication) {
+        let named = app.descendants(matching: .any).matching(identifier: "recordingCard")
+            .matching(NSPredicate(format: "label CONTAINS %@ AND NOT label CONTAINS '11:59' AND NOT label CONTAINS '12:00'", "Проверка подписки Gemini")).firstMatch
+        let durationReady = app.descendants(matching: .any).matching(identifier: "recordingCard")
+            .matching(NSPredicate(format: "label CONTAINS '11:59' OR label CONTAINS '12:00'")).firstMatch
+        _ = durationReady.waitForExistence(timeout: 5)
+        if named.waitForExistence(timeout: 3) { named.tap(); return }
+        let card = app.descendants(matching: .any).matching(identifier: "recordingCard")
+            .matching(NSPredicate(format: "(label CONTAINS %@ OR label CONTAINS %@) AND NOT label CONTAINS '12:00' AND NOT label CONTAINS '11:59'", "Сегодня обсуждали выпуск Лори", "Проверка подписки Gemini")).firstMatch
+        XCTAssertTrue(card.waitForExistence(timeout: 8))
+        card.tap()
+    }
+
+    private func reveal(_ element: XCUIElement, in app: XCUIApplication, down: Bool = false) {
+        for _ in 0..<7 {
+            if element.exists && element.isHittable { return }
+            if down { app.swipeDown() } else { app.swipeUp() }
+        }
+        XCTAssertTrue(element.exists && element.isHittable, "элемент должен быть доступен после прокрутки: \(element)")
+    }
+
+    private func saveBoth(_ name: String) {
+        save(name + "-light")
+        XCUIDevice.shared.appearance = .dark
+        Thread.sleep(forTimeInterval: 1)
+        save(name + "-dark")
+        XCUIDevice.shared.appearance = .light
+        Thread.sleep(forTimeInterval: 0.5)
     }
 
     private func save(_ name: String) {

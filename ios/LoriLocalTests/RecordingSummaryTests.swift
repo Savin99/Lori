@@ -31,6 +31,45 @@ final class RecordingSummaryTests: XCTestCase {
         XCTAssertTrue(RecordingSummaryStore(url: url).entries.isEmpty)
     }
 
+    func testOldAndNewTasksDecodeAndExportAttribution() throws {
+        let old = try JSONDecoder().decode(RecordingSummary.self, from: Data(#"{"brief":"Суть","highlights":[],"decisions":[],"tasks":["Проверить"],"openQuestions":[]}"#.utf8))
+        XCTAssertEqual(old.tasks, [SummaryTask(text: "Проверить")])
+        let new = try JSONDecoder().decode(RecordingSummary.self, from: Data(#"{"brief":"Суть","highlights":[],"decisions":[],"tasks":[{"text":"Проверить","owner":"Анна","due":"до пятницы"},{"text":"Записать","owner":null,"due":null}],"openQuestions":[]}"#.utf8))
+        XCTAssertEqual(new.tasks[0].displayText, "Проверить — Анна, до пятницы")
+        XCTAssertEqual(new.tasks[1].displayText, "Записать")
+        XCTAssertTrue(new.markdown.contains("- Проверить — Анна, до пятницы"))
+        let entry = RecordingSummaryStore.Entry(summary: new, fingerprint: "one", createdAt: .now, source: "gateway", stale: false)
+        let payload = TranscriptExport.make(markdown: "Текст.", title: "Запись", recordedAt: .now, summary: entry)
+        XCTAssertTrue(try XCTUnwrap(PDFDocument(data: TranscriptPDF.data(for: payload))).string?.contains("Анна, до пятницы") == true)
+    }
+
+    func testTaskCompletionPersistsAndOnlySameTextCarriesToNewSummary() throws {
+        let url = root.appending(path: "recaps.json")
+        let store = RecordingSummaryStore(url: url)
+        var summary = Self.summary
+        summary.tasks = [.init(text: "Проверить", owner: "Анна", due: "до пятницы"), "Удаляемая"]
+        XCTAssertTrue(store.store(summary, for: "a", fingerprint: "one"))
+        XCTAssertTrue(store.toggleTask("Проверить", for: "a"))
+        XCTAssertTrue(store.toggleTask("Удаляемая", for: "a"))
+        XCTAssertFalse(store.toggleTask("Чужая", for: "a"))
+        let reloaded = RecordingSummaryStore(url: url)
+        XCTAssertEqual(reloaded.entry(for: "a")?.completedTasks, ["Проверить", "Удаляемая"])
+        summary.tasks = [.init(text: "Проверить", owner: "Борис", due: "завтра"), "Новая"]
+        XCTAssertTrue(reloaded.store(summary, for: "a", fingerprint: "two"))
+        XCTAssertEqual(reloaded.entry(for: "a")?.completedTasks, ["Проверить"])
+        XCTAssertTrue(reloaded.toggleTask("Проверить", for: "a"))
+        XCTAssertEqual(RecordingSummaryStore(url: url).entry(for: "a")?.completedTasks, [])
+    }
+
+    func testLegacyStoreWithoutCompletionFieldKeepsSummary() throws {
+        let url = root.appending(path: "legacy.json")
+        try Data(#"{"a":{"summary":{"brief":"Суть","highlights":[],"decisions":[],"tasks":["Проверить"],"openQuestions":[]},"fingerprint":"old","createdAt":0,"source":"gateway","stale":false}}"#.utf8).write(to: url)
+        let store = RecordingSummaryStore(url: url)
+        XCTAssertEqual(store.entry(for: "a")?.summary.tasks.first?.text, "Проверить")
+        XCTAssertEqual(store.entry(for: "a")?.completedTasks, [])
+        XCTAssertFalse(store.isUnreadable)
+    }
+
     func testCorruptFileIsCopiedBeforeAnyWrite() throws {
         let url = root.appending(path: "recaps.json")
         let bytes = Data("{ damaged".utf8)

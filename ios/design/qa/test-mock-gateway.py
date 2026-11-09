@@ -35,6 +35,8 @@ class AudioGatewayFixtureTests(unittest.TestCase):
         self.server.transcribe_error = None
         self.server.transcribe_fail_part = 0
         self.server.transcribe_delay = 2
+        self.server.transcribe_delay_part = 0
+        self.server.transcribe_fail_after_delay = False
 
     def request(self, path, method="GET", body=None, **headers):
         headers["Authorization"] = "Bearer fixture-gateway"
@@ -87,6 +89,31 @@ class AudioGatewayFixtureTests(unittest.TestCase):
             self.assertEqual(self.request(path)[1]["state"], "running")
         self.assertEqual(self.request(path, method="DELETE")[1]["state"], "cancelled")
         self.assertEqual(self.request(path)[1]["state"], "cancelled")
+
+    def test_new_task_shape_and_delayed_second_part_failure_retry(self):
+        _, accepted = self.request("/v1/jobs", method="POST", body=json.dumps({
+            "kind": "annotate", "key": "note", "transcript": "План"}).encode(), **{"Content-Type": "application/json"})
+        path = "/v1/jobs/" + accepted["id"]
+        self.request(path)
+        tasks = self.request(path)[1]["result"]["summary"]["tasks"]
+        self.assertEqual(tasks, [{"text": "Проверить качество записи", "owner": "Анна", "due": "завтра"}])
+        self.server.transcribe_delay = 3
+        self.server.transcribe_delay_part = 2
+        self.server.transcribe_error = "quota"
+        self.server.transcribe_fail_part = 2
+        self.server.transcribe_fail_after_delay = True
+        first = self.post("first")[1]
+        second = self.post("second")[1]
+        path = "/v1/jobs/" + second["id"]
+        self.assertEqual(self.request(path)[1]["state"], "running")
+        self.assertEqual(self.request(path)[1]["state"], "running")
+        self.assertEqual(self.request(path)[1]["state"], "failed")
+        self.assertEqual(self.request(path)[1]["error"]["retryAfter"], 120)
+        retried = self.post("second")[1]
+        self.assertNotEqual(retried["id"], second["id"])
+        self.assertEqual(self.request("/v1/jobs/" + retried["id"])[1]["state"], "running")
+        self.assertEqual(self.request("/v1/jobs/" + retried["id"])[1]["state"], "done")
+        self.assertEqual(self.post("first")[1]["id"], first["id"])
 
     def test_missing_key_and_invalid_speaker_are_rejected(self):
         status, _ = self.request("/v1/jobs?kind=transcribe", method="POST", body=b"synthetic", **{

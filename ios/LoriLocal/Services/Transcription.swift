@@ -502,6 +502,9 @@ final class TranscriptionService: ObservableObject {
     /// Где сейчас запрос облачной записи — по счёту системной передачи
     /// (`BackgroundTranscriptionTransport.report`). Пусто — запроса нет: запись готовит
     /// аудио, разбирает ответ или считается на телефоне.
+    @Published private(set) var partProgress: [String: TranscriptionParts] = [:]
+    private var partRetries: [String: InterruptedRecords.PartRetry] = [:]
+
     @Published private(set) var transfer: [String: TransferPhase] = [:]
 
     private struct Job {
@@ -633,6 +636,8 @@ final class TranscriptionService: ObservableObject {
         // Ошибки прошлых попыток тоже: после перезапуска запись, на которой расшифровка
         // не вышла, обязана выглядеть как «Ошибка», а не как нетронутая.
         failed = InterruptedRecords.failures(from: interruptedStore)
+        partRetries = InterruptedRecords.partFailures(from: interruptedStore)
+        partProgress = partRetries.mapValues(\.progress)
     }
 
     func engine(for kind: TranscriptionEngineKind) -> any Transcribing {
@@ -814,6 +819,8 @@ final class TranscriptionService: ObservableObject {
     /// задания и счёта пачки. Планировщик не трогает — это забота вызывающего, чтобы
     /// «Отменить всё» не освобождало место на каждой записи по отдельности.
     private func removeFromQueue(_ relativePath: String, persist: Bool) {
+        partProgress[relativePath] = nil
+        partRetries[relativePath] = nil
         if let job = configurations.removeValue(forKey: relativePath) {
             GeminiTranscriber.cleanupRemoteFiles(for: job)
             BackgroundTranscriptionTransport.shared.cancel(jobID: job.id)
@@ -1009,6 +1016,8 @@ final class TranscriptionService: ObservableObject {
     /// других поводов забыть её нет. Поэтому экран, удаляющий запись, обязан сказать
     /// об этом здесь, как говорит `topics`, `summaries` и остальным хранилищам.
     func forget(_ relativePath: String) {
+        partProgress[relativePath] = nil
+        partRetries[relativePath] = nil
         let hadFailure = failed.removeValue(forKey: relativePath) != nil
         // `cancel` сам сохраняет очередь, если запись в ней была, — уже без ошибки; если
         // записи в очереди не было, а ошибка была, сохранить нужно отдельно.
@@ -1022,7 +1031,7 @@ final class TranscriptionService: ObservableObject {
     private func pruneFailures(in workspace: WorkspaceStore) {
         let gone = failed.keys.filter { (try? workspace.fileURL(for: $0)) == nil }
         guard !gone.isEmpty else { return }
-        for path in gone { failed.removeValue(forKey: path) }
+        for path in gone { failed.removeValue(forKey: path); partProgress[path] = nil; partRetries[path] = nil }
         _ = persistJobs()
     }
 
@@ -1031,7 +1040,7 @@ final class TranscriptionService: ObservableObject {
         do {
             let all = configurations.filter { inFlight[$0.key] != nil }
             let legacy = inFlight.filter { all[$0.key] == nil }
-            try InterruptedRecords.saveJobs(all, legacy: legacy, failures: failed, to: interruptedStore)
+            try InterruptedRecords.saveJobs(all, legacy: legacy, failures: failed, partFailures: partRetries, to: interruptedStore)
             return true
         } catch {
             lastError = "Не удалось сохранить очередь. Освободи место и повтори."
@@ -1260,6 +1269,16 @@ final class TranscriptionService: ObservableObject {
     private func forget(interrupted path: String) {
         interrupting.remove(path)
         interrupted.remove(path)
+    }
+
+    /// Новый HTTP job, прежние условия и чекпоинт: оплаченные части не отправляются.
+    func retryPart(_ index: Int, entry: WorkspaceEntry, in workspace: WorkspaceStore) {
+        let path = entry.relativePath
+        guard !isActive(path), let retry = partRetries[path], retry.progress.failedIndices.contains(index) else { return }
+        var values = retry.configuration.values
+        values["retrySubscriptionPart"] = String(index)
+        configurations[path] = TranscriptionJob(id: UUID().uuidString, kind: retry.configuration.kind, values: values, created: .now)
+        _ = enqueue(entry, in: workspace, using: retry.configuration.kind)
     }
 
     func progressText(for relativePath: String) -> String? { progress[relativePath] }
@@ -1657,12 +1676,16 @@ final class TranscriptionService: ObservableObject {
         starting.remove(entry.relativePath)
         // Первая строка состояния появляется до начала работы: облачный запрос
         // может уйти на минуту, и всё это время экран не должен выглядеть мёртвым.
+        partProgress[entry.relativePath] = nil
         progress[entry.relativePath] = chosenKind.leavesDevice ? "отправляю запись" : "готовлю аудио"
         defer {
             running.remove(entry.relativePath)
             progress[entry.relativePath] = nil
             fraction[entry.relativePath] = nil
-            partial[entry.relativePath] = nil
+            if partProgress[entry.relativePath]?.failedIndices.isEmpty != false {
+                partial[entry.relativePath] = nil
+                partProgress[entry.relativePath] = nil
+            }
             remaining[entry.relativePath] = nil
             transfer[entry.relativePath] = nil
             clocks[entry.relativePath] = nil
@@ -1695,38 +1718,56 @@ final class TranscriptionService: ObservableObject {
                     MainActor.assumeIsolated { self?.transferChanged(path, phase) }
                 }
             }
-            let transcript = try await BackgroundTranscriptionTransport.$answersOnly.withValue(answersOnly) {
-                try await BackgroundTranscriptionTransport.$report.withValue(reporter) {
-                    try await chosen.transcribe(
-                        audioURL: url,
-                        progress: { done, total in
-                            Task { @MainActor [weak self] in
-                                self?.parts[path] = Parts(done: done, total: total)
-                                self?.progress[path] = Self.note(done: done, total: total, cloud: cloud)
-                                let share = Self.fraction(done: done, total: total)
-                                self?.fraction[path] = share
-                                self?.remaining[path] = share.flatMap {
-                                    Self.estimate(elapsed: Date().timeIntervalSince(started), fraction: $0)
-                                }
-                            }
-                        },
-                        partial: { ready in
-                            Task { @MainActor [weak self] in
-                                self?.partial[path] = ready
-                            }
-                        },
-                        note: { text in
-                            Task { @MainActor [weak self] in
-                                // Пока движок готовится, процентов ещё нет — и полосе тут
-                                // взяться неоткуда, а строка состояния обязана жить.
-                                guard self?.fraction[path] == nil else { return }
-                                self?.progress[path] = text
-                            }
+            let partReporter: @Sendable (TranscriptionParts.Event) -> Void = { [weak self] event in
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        guard self?.running.contains(path) == true else { return }
+                        switch event {
+                        case let .plan(plan): self?.partProgress[path] = plan
+                        default: self?.partProgress[path]?.apply(event)
                         }
-                    )
+                    }
+                }
+            }
+            let retryIndex = TranscriptionJob.current?.values["retrySubscriptionPart"].flatMap(Int.init)
+            let transcript = try await TranscriptionParts.$retryPart.withValue(retryIndex) {
+                try await TranscriptionParts.$report.withValue(partReporter) {
+                    try await BackgroundTranscriptionTransport.$answersOnly.withValue(answersOnly) {
+                        try await BackgroundTranscriptionTransport.$report.withValue(reporter) {
+                            try await chosen.transcribe(
+                                audioURL: url,
+                                progress: { done, total in
+                                    Task { @MainActor [weak self] in
+                                        self?.parts[path] = Parts(done: done, total: total)
+                                        self?.progress[path] = Self.note(done: done, total: total, cloud: cloud)
+                                        let share = Self.fraction(done: done, total: total)
+                                        self?.fraction[path] = share
+                                        self?.remaining[path] = share.flatMap {
+                                            Self.estimate(elapsed: Date().timeIntervalSince(started), fraction: $0)
+                                        }
+                                    }
+                                },
+                                partial: { ready in
+                                    Task { @MainActor [weak self] in
+                                        self?.partial[path] = ready
+                                    }
+                                },
+                                note: { text in
+                                    Task { @MainActor [weak self] in
+                                        // Пока движок готовится, процентов ещё нет — и полосе тут
+                                        // взяться неоткуда, а строка состояния обязана жить.
+                                        guard self?.fraction[path] == nil else { return }
+                                        self?.progress[path] = text
+                                    }
+                                }
+                            )
+                        }
+                    }
                 }
             }
             if deferred() { return deferToReturn(entry.relativePath) }
+            partProgress[path] = nil
+            partRetries[path] = nil
             failed[entry.relativePath] = nil
             await measure(url: url, kind: chosenKind, started: started)
             try Task.checkCancellation()
@@ -1743,6 +1784,16 @@ final class TranscriptionService: ObservableObject {
                 interrupted.insert(entry.relativePath)
             }
             return nil
+        } catch let error as PartTranscriptionError {
+            if deferred() { return deferToReturn(entry.relativePath) }
+            let path = entry.relativePath
+            partProgress[path] = error.progress
+            failed[path] = error.progress.title() + " · " + (error.progress.detail() ?? "")
+            if let configuration = TranscriptionJob.current {
+                partRetries[path] = .init(configuration: configuration, progress: error.progress)
+            }
+            _ = persistJobs()
+            return nil
         } catch {
             if deferred() { return deferToReturn(entry.relativePath) }
             if Task.isCancelled || interrupting.remove(entry.relativePath) != nil {
@@ -1755,6 +1806,7 @@ final class TranscriptionService: ObservableObject {
                 scheduleConnectionRetry(entry.relativePath, in: workspace)
                 return nil
             }
+            partRetries[entry.relativePath] = nil
             let message = Self.explain(error)
             failed[entry.relativePath] = message
             lastError = message

@@ -20,6 +20,7 @@ struct RecordingCard: View {
     /// чтобы такие записи не терялись среди разложенных.
     let needsTopic: Bool
     let status: RecordStatus?
+    var parts: TranscriptionParts? = nil
     let perform: (RecordStatus.Action) -> Void
 
     @Environment(\.dynamicTypeSize) private var typeSize
@@ -35,11 +36,11 @@ struct RecordingCard: View {
                 // она слилась бы с текстом карточки в один элемент VoiceOver и
                 // потерялась бы для UI-теста. Место под неё держит невидимая копия.
                 .overlay(alignment: Alignment(horizontal: .trailing, vertical: .cardStatus)) {
-                    if !stacksAction, let action = status?.action {
+                    if !stacksAction, parts == nil, let action = status?.action {
                         CardActionButton(action: action, record: title) { perform(action) }
                     }
                 }
-            if stacksAction, let action = status?.action {
+            if stacksAction || parts != nil, let action = status?.action {
                 CardActionButton(action: action, record: title) { perform(action) }
             }
         }
@@ -71,7 +72,10 @@ struct RecordingCard: View {
                     .multilineTextAlignment(.leading)
             }
 
-            if let status {
+            if let parts {
+                PartsProgressView(progress: parts, compact: true)
+                    .alignmentGuide(.cardStatus) { $0[VerticalAlignment.center] }
+            } else if let status {
                 StatusRow(status: status, record: title, reservesAction: !stacksAction)
                     .alignmentGuide(.cardStatus) { $0[VerticalAlignment.center] }
             }
@@ -274,6 +278,7 @@ struct ProgressLine: View {
 /// остаток **этой** записи, и в первой строке он читался бы как время всей пачки.
 struct QueueBlock: View {
     let summary: QueueSummary
+    var parts: TranscriptionParts? = nil
     /// Почему фона нет (`TranscriptionRunway.State.foregroundOnly`); nil — фон есть.
     let backgroundReason: String?
     let stop: () -> Void
@@ -330,6 +335,7 @@ struct QueueBlock: View {
 
             // Узкий экран и крупный шрифт: проценты уходят под заголовок, а не
             // выдавливают его в многоточие.
+            if parts == nil {
             ViewThatFits(in: .horizontal) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     titleText
@@ -342,6 +348,13 @@ struct QueueBlock: View {
                 }
             }
 
+            }
+            if let parts {
+                titleText.padding(.trailing, 100)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .alignmentGuide(.queueBar) { $0[VerticalAlignment.center] }
+                PartsProgressView(progress: parts, compact: true)
+            } else {
             HStack(spacing: 12) {
                 ProgressLine(fraction: summary.fraction, height: 6, animatesUnknown: !summary.isWaiting)
                 StopQueueButton.capsule
@@ -350,9 +363,10 @@ struct QueueBlock: View {
             }
             .alignmentGuide(.queueBar) { $0[VerticalAlignment.center] }
 
+            }
             if summary.isWaiting {
                 note("Ждёт своей очереди", color: LoriPalette.warn)
-            } else if let note = summary.note {
+            } else if parts == nil, let note = summary.note {
                 self.note(note, color: LoriPalette.muted)
             }
             if let alongside = summary.alongside {

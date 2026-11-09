@@ -157,6 +157,7 @@ struct ComposerBar: View {
     /// Идёт приём прикреплённого: кнопки панели ждут, пока он кончится.
     let busy: Bool
     let actions: ComposerActions
+    var parts: TranscriptionParts? = nil
 
     @Namespace private var morph
     @State private var expanded = false
@@ -196,6 +197,13 @@ struct ComposerBar: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .composerAccessory(leading: 14, trailing: 14, minHeight: 36)
                     .accessibilityIdentifier("recordingNote")
+            }
+
+            if let parts, state != .recording {
+                PartsProgressView(progress: parts, compact: true)
+                    .padding(.horizontal, 14).padding(.vertical, 10)
+                    .background(LoriPalette.card, in: RoundedRectangle(cornerRadius: 18))
+                    .accessibilityIdentifier("composerPartsProgress")
             }
 
             if model.showsClipboardHint, state != .recording {

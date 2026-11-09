@@ -10,6 +10,21 @@ final class RecordingSummaryStore: ObservableObject {
         let createdAt: Date
         let source: String
         var stale: Bool
+        var completedTasks: Set<String> = []
+
+        private enum CodingKeys: String, CodingKey { case summary, fingerprint, createdAt, source, stale, completedTasks }
+        init(summary: RecordingSummary, fingerprint: String, createdAt: Date, source: String, stale: Bool, completedTasks: Set<String> = []) {
+            self.summary = summary; self.fingerprint = fingerprint; self.createdAt = createdAt
+            self.source = source; self.stale = stale; self.completedTasks = completedTasks
+        }
+        init(from decoder: Decoder) throws {
+            let box = try decoder.container(keyedBy: CodingKeys.self)
+            self.init(summary: try box.decode(RecordingSummary.self, forKey: .summary),
+                      fingerprint: try box.decode(String.self, forKey: .fingerprint),
+                      createdAt: try box.decode(Date.self, forKey: .createdAt), source: try box.decode(String.self, forKey: .source),
+                      stale: try box.decode(Bool.self, forKey: .stale),
+                      completedTasks: try box.decodeIfPresent(Set<String>.self, forKey: .completedTasks) ?? [])
+        }
     }
     @Published private(set) var entries: [String: Entry] = [:]
     private let url: URL
@@ -29,7 +44,17 @@ final class RecordingSummaryStore: ObservableObject {
     @discardableResult
     func store(_ summary: RecordingSummary, for path: String, fingerprint: String) -> Bool {
         change {
-            entries[path] = Entry(summary: summary, fingerprint: fingerprint, createdAt: .now, source: "gateway", stale: false)
+            let completed = (entries[path]?.completedTasks ?? []).intersection(summary.tasks.map(\.text))
+            entries[path] = Entry(summary: summary, fingerprint: fingerprint, createdAt: .now, source: "gateway", stale: false, completedTasks: completed)
+        }
+    }
+
+    @discardableResult
+    func toggleTask(_ text: String, for path: String) -> Bool {
+        guard entries[path]?.summary.tasks.contains(where: { $0.text == text }) == true else { return false }
+        return change {
+            if entries[path]?.completedTasks.contains(text) == true { entries[path]?.completedTasks.remove(text) }
+            else { entries[path]?.completedTasks.insert(text) }
         }
     }
 
