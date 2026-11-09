@@ -53,6 +53,13 @@ final class GatewayUITests: XCTestCase {
         let summary = app.buttons["makeRecordingSummary"]
         XCTAssertTrue(summary.waitForExistence(timeout: 5))
         summary.tap()
+        let completed = XCTNSPredicateExpectation(predicate: NSPredicate { _, _ in
+            app.buttons["makeRecordingSummary"].exists && app.buttons["makeRecordingSummary"].isHittable
+        }, object: nil)
+        XCTAssertEqual(XCTWaiter.wait(for: [completed], timeout: 15), .completed)
+        XCTAssertTrue(app.staticTexts["Проверка подписки Gemini"].waitForExistence(timeout: 5), "тот же annotate даёт и заголовок")
+        XCTAssertTrue(app.staticTexts["Обсудили выпуск и проверку качества."].exists)
+        XCTAssertFalse(app.staticTexts["Итог устарел: текст расшифровки изменился."].exists)
         let brief = app.staticTexts["Анна проверит качество записи завтра."]
         XCTAssertTrue(brief.waitForExistence(timeout: 15))
         XCTAssertFalse(app.staticTexts["Решения"].exists, "пустой раздел скрыт")
