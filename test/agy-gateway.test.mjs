@@ -52,13 +52,20 @@ function traces (conversationId, workspace) {
   writeFileSync(join(root, 'presence', conversationId + '.lock'), 'presence')
   cache[workspace] = conversationId
   execFileSync('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'),
-    "INSERT INTO conversation_summaries VALUES ('" + conversationId + "', 'private'); INSERT INTO conversations_fts VALUES ('" + conversationId + "', 'private'); PRAGMA wal_checkpoint(TRUNCATE);"])
+    "PRAGMA journal_mode=WAL; CREATE TABLE IF NOT EXISTS conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); CREATE VIRTUAL TABLE IF NOT EXISTS conversations_fts USING fts5(conversation_id UNINDEXED, body); INSERT INTO conversation_summaries VALUES ('" + conversationId + "', 'private'); INSERT INTO conversations_fts VALUES ('" + conversationId + "', 'private'); PRAGMA wal_checkpoint(TRUNCATE);"])
   // Настоящий agy закрывает базу без -wal и -shm, а системный sqlite3 их оставляет.
   for (const suffix of ['-wal', '-shm']) rmSync(join(root, 'conversation_summaries.db' + suffix), { force: true })
 }
-traces(id, process.cwd())
+if (kind !== 'usage' || !process.env.FAKE_USAGE_NO_CONVERSATION) traces(id, process.cwd())
 if (content?.includes('[foreign]')) traces('22222222-2222-4222-8222-222222222222', '/another-workspace')
 writeFileSync(join(root, 'cache/last_conversations.json'), JSON.stringify(cache))
+if (process.env.FAKE_SERVICE_TRACES) {
+  writeFileSync(join(root, 'jetbox_summaries_proto.pb'), 'summary metadata: ' + id)
+  for (const suffix of ['-wal', '-shm']) writeFileSync(join(root, 'conversation_summaries.db' + suffix), 'metadata')
+  for (const folder of ['implicit', 'log']) mkdirSync(join(root, folder), { recursive: true })
+  writeFileSync(join(root, 'implicit', id + '.pb'), 'UUID and workspace')
+  writeFileSync(join(root, 'log', 'cli-' + id + '.log'), 'UUID and workspace')
+}
 event({ event: 'start', id, kind, pid: process.pid, directory: process.cwd(), mode: statSync(process.cwd()).mode & 511, args, input, audioName, audioBytes: kind === 'transcribe' ? Buffer.byteLength(content) : undefined, autoUpdate: process.env.AGY_CLI_DISABLE_AUTO_UPDATE })
 if (stream) console.log(JSON.stringify({ event: 'init', conversation_id: id, init: {} }))
 if (content?.includes('[hang]')) {
@@ -380,7 +387,7 @@ test('границы JSON/расшифровки/аудио и неподдер�
 })
 
 test('чистка удаляет ровно свою историю, SQLite/FTS/кеш; чужая и новая чужая остаются', async (t) => {
-  const f = await fixture(t)
+  const f = await fixture(t, ({ home }) => ({ HOME: home, LORI_AGY_HOME: home }))
   for (const directory of ['conversations', 'brain', 'presence', 'cache']) await mkdir(join(f.root, directory), { recursive: true })
   await writeFile(join(f.root, 'conversations', FOREIGN + '.db'), 'foreign')
   await mkdir(join(f.root, 'brain', FOREIGN))
@@ -405,12 +412,103 @@ test('чистка удаляет ровно свою историю, SQLite/FTS
 })
 
 test('LORI_AGY_CLEANUP=0 сохраняет историю, временная рабочая папка всё равно удаляется', async (t) => {
-  const f = await fixture(t, { LORI_AGY_CLEANUP: '0' })
+  const f = await fixture(t, { LORI_AGY_CLEANUP: '0', FAKE_SERVICE_TRACES: '1' })
   await f.done((await f.submit()).id)
   const start = (await f.events()).find((entry) => entry.event === 'start')
   assert.ok(existsSync(join(f.root, 'conversations', start.id + '.db')))
   assert.ok(existsSync(join(f.root, 'brain', start.id)))
+  for (const relative of ['jetbox_summaries_proto.pb', 'conversation_summaries.db', 'conversation_summaries.db-wal', 'conversation_summaries.db-shm', `implicit/${start.id}.pb`, `log/cli-${start.id}.log`]) assert.ok(existsSync(join(f.root, relative)))
   assert.equal(existsSync(start.directory), false)
+})
+
+// Одни файлы agy восстанавливает из служебного кеша, другие нужны для входа и
+// настройки. Проверяем границу чистки на реальных файлах, включая вложенные папки.
+async function metadataFixture (root) {
+  for (const folder of ['implicit/nested', 'log/nested', 'cache']) await mkdir(join(root, folder), { recursive: true })
+  const retained = new Map([
+    ['antigravity-oauth-token', 'isolated auth token'],
+    ['cache/onboarding.json', '{"complete":true}'],
+    ['cache/other.json', '{"keep":true}'],
+    ['other.pb', 'unrelated binary'],
+    ['other.db', 'unrelated database'],
+    ['log/notes.txt', 'unrelated log note'],
+    ['log/nested/keep.log', 'nested log remains']
+  ])
+  for (const [relative, content] of retained) await writeFile(join(root, relative), content, { mode: 0o600 })
+  const settings = join(root, 'settings.json')
+  if (!existsSync(settings)) await writeFile(settings, '{"model":"owner-model"}', { mode: 0o600 })
+  retained.set('settings.json', await readFile(settings, 'utf8'))
+  const metadata = new Map([
+    ['jetbox_summaries_proto.pb', 'old summary metadata'],
+    ['implicit/old.pb', 'old UUID metadata'],
+    ['implicit/nested/old.txt', 'nested UUID metadata'],
+    ['log/cli-old.log', 'old log metadata']
+  ])
+  for (const [relative, content] of metadata) await writeFile(join(root, relative), content)
+  await writeFile(join(root, 'cache/last_conversations.json'), JSON.stringify({ '/foreign': FOREIGN }))
+  return { retained, metadata }
+}
+
+test('отдельный HOME удаляет восстанавливаемую базу и служебные следы, сохраняя вход и настройки', async (t) => {
+  const f = await fixture(t, { FAKE_SERVICE_TRACES: '1' })
+  const { retained } = await metadataFixture(f.root)
+  const cleared = async () => {
+    for (const relative of ['jetbox_summaries_proto.pb', 'conversation_summaries.db', 'conversation_summaries.db-wal', 'conversation_summaries.db-shm']) assert.equal(existsSync(join(f.root, relative)), false, relative)
+    assert.deepEqual(await readdir(join(f.root, 'implicit')), [])
+    assert.deepEqual((await readdir(join(f.root, 'log'))).sort(), ['nested', 'notes.txt'])
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, 'cache/last_conversations.json'), 'utf8')), {})
+    for (const [relative, content] of retained) assert.equal(await readFile(join(f.root, relative), 'utf8'), content, relative)
+  }
+  for (const kind of ['annotate', 'report']) {
+    assert.equal((await f.done((await f.submit('запись', { kind })).id)).state, 'done')
+    await cleared()
+  }
+  // /usage тоже оставляет логи, даже когда не создаёт разговор и не выдаёт UUID.
+  f.config.childEnv.FAKE_USAGE_NO_CONVERSATION = '1'
+  assert.equal((await f.request('/v1/usage')).status, 200)
+  await cleared()
+})
+
+test('в HOME владельца служебные protobuf, база, implicit и log сохраняются', async (t) => {
+  for (const explicit of [false, true, 'alias']) {
+    const f = await fixture(t, async ({ directory, home }) => {
+      let agyHome = explicit ? home : undefined
+      if (explicit === 'alias') {
+        agyHome = join(directory, 'owner-alias')
+        await symlink(home, agyHome)
+      }
+      return { HOME: home, LORI_AGY_HOME: agyHome }
+    })
+    const { retained, metadata } = await metadataFixture(f.root)
+    const result = await f.done((await f.submit()).id)
+    assert.equal(result.state, 'done')
+    assert.ok(existsSync(join(f.root, 'conversation_summaries.db')))
+    for (const [relative, content] of [...retained, ...metadata]) assert.equal(await readFile(join(f.root, relative), 'utf8'), content, relative)
+    assert.deepEqual(JSON.parse(await readFile(join(f.root, 'cache/last_conversations.json'), 'utf8')), { '/foreign': FOREIGN })
+    const start = (await f.events()).find((entry) => entry.event === 'start')
+    assert.equal(existsSync(join(f.root, 'conversations', start.id + '.db')), false)
+    assert.equal(existsSync(join(f.root, 'brain', start.id)), false)
+  }
+})
+
+test('общая чистка отдельного HOME не проходит по ссылкам в служебных путях', async (t) => {
+  for (const relative of ['implicit', 'log', 'jetbox_summaries_proto.pb', '.']) {
+    const f = await fixture(t)
+    const outside = join(f.directory, 'outside')
+    if (relative === '.') await rename(f.root, outside)
+    else await mkdir(outside)
+    const file = join(outside, 'cli-private.log')
+    await writeFile(file, 'outside metadata')
+    await symlink(relative.endsWith('.pb') ? file : outside, join(f.root, relative))
+    const result = await f.done((await f.submit()).id)
+    assert.equal(result.state, 'failed', relative)
+    assert.equal(result.error.code, 'agent')
+    assert.equal(await readFile(file, 'utf8'), 'outside metadata')
+    if (relative === '.') {
+      const start = (await f.events()).find((entry) => entry.event === 'start')
+      assert.ok(existsSync(join(outside, 'conversations', start.id + '.db')))
+    }
+  }
 })
 
 test('результат и ключ истекают по TTL', async (t) => {

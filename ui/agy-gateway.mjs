@@ -84,12 +84,16 @@ export function gatewayConfig (env = process.env) {
   }
 }
 
-async function persistPolicy (config) {
-  if (!config.agyHomeExplicit) return
+async function isDedicatedHome (config) {
+  if (!config.agyHomeExplicit) return false
   const canonical = async (path) => {
     try { return await realpath(path) } catch (cause) { if (cause.code === 'ENOENT') return resolve(path); throw cause }
   }
-  if (await canonical(config.agyHome) === await canonical(config.ownerHome)) return
+  return await canonical(config.agyHome) !== await canonical(config.ownerHome)
+}
+
+async function persistPolicy (config) {
+  if (!await isDedicatedHome(config)) return
   const directory = join(config.agyHome, '.gemini/antigravity-cli')
   const path = join(directory, 'settings.json')
   let settings = {}
@@ -335,10 +339,32 @@ function pruneCache (value, ids) {
   return value
 }
 
+async function cleanupDedicatedMetadata (root) {
+  // В отдельном профиле protobuf снова наполняет SQLite при следующем старте.
+  // Общую метаинформацию удаляем только в профиле шлюза, включая служебные UUID.
+  for (const relative of ['jetbox_summaries_proto.pb', 'conversation_summaries.db', 'conversation_summaries.db-wal', 'conversation_summaries.db-shm']) {
+    await rm(await safePath(root, relative), { force: true })
+  }
+  for (const folder of ['implicit', 'log']) {
+    const directory = await safePath(root, folder)
+    let entries
+    try { entries = await readdir(directory, { withFileTypes: true }) } catch (cause) { if (cause.code === 'ENOENT') continue; throw cause }
+    for (const entry of entries) {
+      if (folder === 'log' && (!entry.name.endsWith('.log') || entry.isDirectory())) continue
+      await rm(await safePath(root, `${folder}/${entry.name}`), { recursive: folder === 'implicit', force: true })
+    }
+  }
+}
+
 async function cleanupConversation (config, directory, observed, before) {
   const rawRoot = join(config.agyHome, '.gemini/antigravity-cli')
+  const dedicated = await isDedicatedHome(config)
   let root
-  try { root = await realpath(rawRoot) } catch (cause) { if (cause.code === 'ENOENT') return; throw cause }
+  try {
+    // Сам корень тоже не должен вести ссылкой в профиль владельца.
+    if (dedicated) await safePath(await realpath(config.agyHome), '.gemini/antigravity-cli')
+    root = await realpath(rawRoot)
+  } catch (cause) { if (cause.code === 'ENOENT') return; throw cause }
   const cachePath = await safePath(root, 'cache/last_conversations.json')
   let cache
   try { cache = JSON.parse(await readFile(cachePath, 'utf8')) } catch (cause) { if (cause.code !== 'ENOENT') throw cause }
@@ -346,9 +372,9 @@ async function cleanupConversation (config, directory, observed, before) {
   // привязку cwd → UUID уже при открытии; уникальная папка доказывает принадлежность.
   const cachedId = cache?.[directory]
   const ids = new Set([...observed, cachedId].filter((id) => typeof id === 'string' && UUID.test(id) && !before.has(id)))
-  if (!ids.size) return
+  if (!ids.size && !dedicated) return
   const database = await safePath(root, 'conversation_summaries.db')
-  if (existsSync(database)) {
+  if (!dedicated && existsSync(database)) {
     // Не запускаем личный .sqliterc; сразу после выхода agy WAL может ещё
     // закрываться. Короткие повторы не расширяют область удаляемых UUID.
     const sqlite = async (args) => {
@@ -371,10 +397,12 @@ async function cleanupConversation (config, directory, observed, before) {
       await rm(await safePath(root, relative), { recursive: true, force: true })
     }
   }
-  if (cache !== undefined) {
+  if (dedicated) await cleanupDedicatedMetadata(root)
+  if (cache !== undefined || dedicated) {
+    if (dedicated) await mkdir(await safePath(root, 'cache'), { recursive: true, mode: 0o700 })
     const temporary = await safePath(root, `cache/.lori-${randomUUID()}.json`)
     try {
-      await writeFile(temporary, JSON.stringify(pruneCache(cache, ids)), { mode: 0o600, flag: 'wx' })
+      await writeFile(temporary, JSON.stringify(dedicated ? {} : pruneCache(cache, ids)), { mode: 0o600, flag: 'wx' })
       await rename(temporary, cachePath)
     } finally { await rm(temporary, { force: true }) }
   }
