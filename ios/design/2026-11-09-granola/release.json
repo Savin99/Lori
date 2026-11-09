@@ -1,0 +1,24 @@
+{
+  "local": "/Users/ilya/orca/workspaces/Lori/coney/ios/build/dist/LoriLocal-unsigned.ipa",
+  "published": "/Users/ilya/Library/Mobile Documents/com~apple~CloudDocs/IPA Shelf/ru.ilyaqa.lori.local--1.0--14.ipa",
+  "bytes": 17612871,
+  "sha256": "603bc66cbb2629bc6ec9ff50fadb901cf0a135ab2aebceb66ed27df41d4dd8af",
+  "cloudMatches": true,
+  "zipValid": true,
+  "bundles": [
+    {
+      "path": "Payload/LoriLocal.app/Info.plist",
+      "bundleID": "ru.ilyaqa.lori.local",
+      "version": "1.0",
+      "build": "14"
+    },
+    {
+      "path": "Payload/LoriLocal.app/PlugIns/RecordingActivity.appex/Info.plist",
+      "bundleID": "ru.ilyaqa.lori.local.RecordingActivity",
+      "version": "1.0",
+      "build": "14"
+    }
+  ],
+  "ownerKeyResourcePresent": true,
+  "qaKeyResourcePresent": false
+}

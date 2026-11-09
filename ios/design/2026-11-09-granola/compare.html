@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Lori · Granola · макет и приложение</title>
+<style>
+:root{color-scheme:dark;font:15px/1.5 -apple-system,BlinkMacSystemFont,system-ui,sans-serif;background:#1f1f1e;color:#f4f3ef}body{margin:0;padding:28px;max-width:1260px;margin-inline:auto}h1{font:32px Georgia,serif;margin:0 0 12px}h2{font:24px Georgia,serif;margin:0 0 8px}p{max-width:920px;color:#a5a5a0}a{color:#c3d86a}nav{display:flex;gap:12px;flex-wrap:wrap;align-items:center;margin:24px 0}select{padding:10px 14px;background:#2a2a28;color:#f4f3ef;border:1px solid #ffffff26;border-radius:12px;font:inherit;min-height:44px}.pair{display:grid;grid-template-columns:repeat(2,minmax(390px,1fr));gap:28px;align-items:start;overflow-x:auto}.frame{width:390px;border:1px solid #ffffff1a;border-radius:22px;overflow:hidden;background:#1f1f1e}iframe{width:390px;height:1300px;border:0;display:block}img{width:390px;height:auto;display:block}figcaption{font-size:13px;color:#a5a5a0;max-width:390px;margin-bottom:10px}figure{margin:0}small{color:#a5a5a0}.lower{margin-top:20px}footer{margin:24px 0;color:#a5a5a0}label{display:flex;gap:8px;align-items:center}
+</style>
+<h1>Экран записи · Granola</h1>
+<p>Слева — утверждённый HTML с поздними поправками владельца: прежние три группы верхней панели, без поиска, логотип Gemini у сути; Georgia и системный шрифт. Исходные макеты сохранены рядом. Справа — необработанные снимки Lori QA на iPhone 17, сборка 14.</p>
+<nav aria-label="Сравнение вкладок">
+<label>Вкладка <select id="tab"><option value="summary">Итог</option><option value="report">Отчёт</option><option value="transcript">Расшифровка</option></select></label>
+<label>Снимок <select id="mode"><option value="dark">Тёмная тема</option><option value="light">Светлая тема</option><option value="large-dark">Крупный шрифт · тёмная</option><option value="large-light">Крупный шрифт · светлая</option></select></label>
+<a id="source" href="summary.html">Исходный макет</a> · <a href="VERIFICATION.md">Проверки и отступления</a>
+</nav>
+<div class="pair">
+<section><h2>Макет</h2><figure><figcaption>390 × 1300 CSS px. Тёмная палитра эталона; светлого HTML-макета владелец не задавал. Верхняя панель здесь — статическая схема нативных групп.</figcaption><div class="frame"><iframe id="reference" src="reference/summary.html" title="Утверждённый макет с поправками владельца"></iframe></div></figure></section>
+<section><h2>Приложение</h2><figure><figcaption id="native-caption">iPhone 17 · тёмная тема · обычный размер. Системные safe area, панель и стекло; фактические дата, время подготовки и позиция плеера.</figcaption><a id="full" href="shots/summary-dark.png"><div class="frame"><img id="shot" src="shots/summary-dark.png" alt="Итог в приложении"></div></a></figure><figure class="lower" id="lower"><figcaption>Ниже по прокрутке (без склейки и ретуши):</figcaption><a id="end-full" href="shots/summary-end-dark.png"><div class="frame"><img id="end-shot" src="shots/summary-end-dark.png" alt="Нижняя часть вкладки"></div></a></figure></section>
+</div>
+<footer>Снимки 1206 × 2622 px (402 × 874 pt); здесь уменьшены до ширины макета. Высота эталона 1300 px отличается от реального окна телефона: весь документ доступен прокруткой. Accessibility L переносит сегменты в столбец, метаданные и атрибуцию — на дополнительные строки, плеер — в две строки. Эталон слева остаётся в обычном размере. Полный перечень нативных адаптаций и непроверенного — в VERIFICATION.md.</footer>
+<script>
+const labels={summary:'Итог',report:'Отчёт',transcript:'Расшифровка'};
+function update(){const tab=document.getElementById('tab').value,mode=document.getElementById('mode').value,large=mode.startsWith('large'),theme=mode.endsWith('dark')?'dark':'light',file=`shots/${tab}-${mode}.png`;document.getElementById('reference').src=`reference/${tab}.html`;document.getElementById('source').href=`${tab}.html`;document.getElementById('shot').src=file;document.getElementById('shot').alt=`${labels[tab]} · ${mode}`;document.getElementById('full').href=file;const end=`shots/${tab}${large?'-large':''}-end-${theme}.png`;const showEnd=!large||tab==='transcript';if(showEnd){document.getElementById('end-shot').src=end;document.getElementById('end-full').href=end;}document.getElementById('lower').hidden=!showEnd;document.getElementById('native-caption').textContent=`iPhone 17 · ${theme==='dark'?'тёмная':'светлая'} тема · ${large?'Accessibility L':'обычный размер'}. Необработанный снимок приложения; фактические дата, время подготовки и позиция плеера.`;}
+document.getElementById('tab').addEventListener('change',update);document.getElementById('mode').addEventListener('change',update);
+</script>
+</html>

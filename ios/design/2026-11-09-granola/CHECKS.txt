@@ -1,0 +1,28 @@
+Модульный набор, окончательный код до прерывания UI [/tmp/lori-granola-20261109/final.log]
+Test Suite 'LoriLocalTests.xctest' passed at 2026-11-09 16:33:25.118.
+	 Executed 914 tests, with 8 tests skipped and 0 failures (0 unexpected) in 49.870 (50.096) seconds
+	 Executed 914 tests, with 8 tests skipped and 0 failures (0 unexpected) in 49.870 (50.097) seconds
+
+Четыре завершённые UI-проверки до перезапуска [/tmp/lori-granola-20261109/final.log]
+Test Case '-[LoriLocalUITests.GatewayUITests testSlowPartFailureAndRetryOnlyMissingPart]' passed (55.790 seconds).
+Test Case '-[LoriLocalUITests.RecordingTabsUITests testCardsTasksAndPersistentCompletion]' passed (20.399 seconds).
+Test Case '-[LoriLocalUITests.RecordingTabsUITests testEmptyTabsHaveNoOutgoingActions]' passed (10.058 seconds).
+Test Case '-[LoriLocalUITests.RecordingTabsUITests testReportAndTranscriptSeekTheSamePlayer]' passed (15.822 seconds).
+
+Завершённый восстановительный UI-прогон [/tmp/lori-granola-20261109/recovered-ui.log]
+	 Executed 6 tests, with 0 failures (0 unexpected) in 175.994 (176.001) seconds
+	 Executed 6 tests, with 0 failures (0 unexpected) in 175.994 (176.002) seconds
+** TEST EXECUTE SUCCEEDED **
+
+node --test [/tmp/lori-granola-20261109/node.log]
+# tests 42
+# pass 42
+# fail 0
+# skipped 0
+# duration_ms 13472.79325
+
+Выпуск [/tmp/lori-granola-20261109/release-final.log]
+Готово: LoriLocal 1.0 (14), /Users/ilya/orca/workspaces/Lori/coney/ios/build/dist/LoriLocal-unsigned.ipa
+
+Публикация [/tmp/lori-granola-20261109/publish.log]
+Опубликовано: /Users/ilya/Library/Mobile Documents/com~apple~CloudDocs/IPA Shelf/ru.ilyaqa.lori.local--1.0--14.ipa

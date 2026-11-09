@@ -1,0 +1,203 @@
+{
+  "resultBundle": "/tmp/lori-granola-20261109/recovered-ui.xcresult",
+  "screenshots": [
+    {
+      "file": "export-report-md.png",
+      "source": "01E86554-85C5-4C3D-B5F7-BAC81BEBFCAB.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231594.373
+    },
+    {
+      "file": "export-report-pdf.png",
+      "source": "BB5ACD8C-294E-4731-9ED3-0ABDAB30B75C.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231587.452
+    },
+    {
+      "file": "export-summary-md.png",
+      "source": "6DAA2D00-E44C-440C-B6E3-198B854A1B0B.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231578.292
+    },
+    {
+      "file": "export-summary-pdf.png",
+      "source": "99F98D15-C468-4187-8583-4E5C01764B85.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231571.139
+    },
+    {
+      "file": "export-transcript-md.png",
+      "source": "46F4365A-3252-42A0-9D39-054A8E1F6C5A.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231610.416
+    },
+    {
+      "file": "export-transcript-pdf.png",
+      "source": "8505A910-7B4E-4ED7-AD1D-8873CE64ACAA.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231603.513
+    },
+    {
+      "file": "player-report-dark.png",
+      "source": "A75FA6B8-8568-4C5F-A80C-44DD12373584.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231520.493
+    },
+    {
+      "file": "player-report-light.png",
+      "source": "7B3BDF49-8B07-4925-A7C2-0158AEC32B07.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231502.973
+    },
+    {
+      "file": "player-summary-dark.png",
+      "source": "6B51DDEF-9F58-4EE3-A73C-A889B5C38E70.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231516.963
+    },
+    {
+      "file": "player-summary-light.png",
+      "source": "013DB531-9B20-43BB-AB6B-9AE1D3343E7E.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231499.376
+    },
+    {
+      "file": "player-transcript-dark.png",
+      "source": "F980FDFA-5B1F-4B90-8F46-D7C6718AE1E6.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231524.81
+    },
+    {
+      "file": "player-transcript-light.png",
+      "source": "26227140-D622-4271-99B6-39C5953BCE36.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231507.421
+    },
+    {
+      "file": "record-text-selection.png",
+      "source": "0FE625BD-D1AC-4A96-A0BD-8C4BCCED53AF.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231639.892
+    },
+    {
+      "file": "report-dark.png",
+      "source": "5E672AEA-B6CD-46C8-8C0D-0492EA314B68.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231520.387
+    },
+    {
+      "file": "report-end-dark.png",
+      "source": "41C1F987-DDAE-4EBB-AAD4-E1EC50945324.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231521.925
+    },
+    {
+      "file": "report-end-light.png",
+      "source": "61C5F836-95B6-41CE-A2D9-E59B7317BD6A.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231504.509
+    },
+    {
+      "file": "report-large-dark.png",
+      "source": "7A36CBDB-1E52-4580-B795-D76F636C64D3.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231551.252
+    },
+    {
+      "file": "report-large-light.png",
+      "source": "DFCB615C-A578-4F43-AD4D-067EA13379DB.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231536.135
+    },
+    {
+      "file": "report-light.png",
+      "source": "1B80EE0B-CB37-4BDA-B121-912A13A9D7AE.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231502.857
+    },
+    {
+      "file": "summary-dark.png",
+      "source": "EC6B00B9-CD2C-4523-8C22-CC2E1BA3F93C.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231516.85
+    },
+    {
+      "file": "summary-end-dark.png",
+      "source": "A7691B58-101C-48DE-BA58-993948436DE1.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231518.382
+    },
+    {
+      "file": "summary-end-light.png",
+      "source": "AAB52381-3896-4D38-AADA-BBC02BCDDEF6.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231500.805
+    },
+    {
+      "file": "summary-large-dark.png",
+      "source": "B27E26C4-B07E-4997-A02D-DCA8ED8E556A.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231550.041
+    },
+    {
+      "file": "summary-large-light.png",
+      "source": "6A4D4A20-808F-4974-B9FE-2354DACE6832.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231534.93
+    },
+    {
+      "file": "summary-light.png",
+      "source": "0A0120B8-CA34-471E-B3D2-90F0E3698A47.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231499.246
+    },
+    {
+      "file": "transcript-dark.png",
+      "source": "B2CD09CC-A9FE-45A3-8C34-7A7AC6595C8B.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231524.705
+    },
+    {
+      "file": "transcript-end-dark.png",
+      "source": "A542F578-3D9B-4E63-ADC2-50A1CD151D30.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231526.348
+    },
+    {
+      "file": "transcript-end-light.png",
+      "source": "E0114134-223A-4101-A00A-38EFD0741892.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231508.936
+    },
+    {
+      "file": "transcript-large-dark.png",
+      "source": "E577447A-6A36-4491-8D13-8776F4AC2F84.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231552.351
+    },
+    {
+      "file": "transcript-large-end-dark.png",
+      "source": "60443194-B132-482C-8B4D-97107013A480.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231556.76
+    },
+    {
+      "file": "transcript-large-end-light.png",
+      "source": "AEF8FE7F-1396-4581-A825-F05D27899005.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231541.719
+    },
+    {
+      "file": "transcript-large-light.png",
+      "source": "3FCB8CED-CCCC-4153-B054-BE2F425AE446.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231537.339
+    },
+    {
+      "file": "transcript-light.png",
+      "source": "3F646180-D096-4397-9939-B9E5369017AD.png",
+      "device": "iPhone 17",
+      "timestamp": 1794231507.317
+    }
+  ]
+}
