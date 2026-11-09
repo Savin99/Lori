@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Шлюз подписки Gemini на Mac mini. До запуска создай папку журналов, файл
+  ~/.config/lori/gateway-token (0600, минимум 32 знака) и выполни отдельный вход:
+  HOME=/Users/ilyaqa/Services/lori-gateway/agy-home /Users/ilyaqa/.local/bin/agy
+  Пути машинно-специфичные — поправь под себя и убери `.example` из имени.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.lori.agy-gateway</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/node</string>
+    <string>/Users/ilyaqa/Services/lori-gateway/ui/agy-gateway.mjs</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/ilyaqa/Services/lori-gateway</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>LORI_GATEWAY_HOST</key>
+    <string>127.0.0.1</string>
+    <key>LORI_GATEWAY_PORT</key>
+    <string>18890</string>
+    <key>LORI_GATEWAY_TOKEN_FILE</key>
+    <string>/Users/ilyaqa/.config/lori/gateway-token</string>
+    <key>LORI_AGY_BIN</key>
+    <string>/Users/ilyaqa/.local/bin/agy</string>
+    <key>LORI_AGY_HOME</key>
+    <string>/Users/ilyaqa/Services/lori-gateway/agy-home</string>
+    <key>LORI_GATEWAY_MODEL</key>
+    <string>gemini-3.8-flash-low</string>
+    <key>LORI_AGY_CLEANUP</key>
+    <string>1</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/Users/ilyaqa/Services/logs/agy-gateway.out.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/ilyaqa/Services/logs/agy-gateway.err.log</string>
+</dict>
+</plist>
