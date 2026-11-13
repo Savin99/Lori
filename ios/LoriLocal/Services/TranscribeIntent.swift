@@ -16,7 +16,7 @@ struct TranscribeInLoriIntent: AppIntent {
     /// в панели, которую никто не открыл.
     static let openAppWhenRun = true
 
-    @Parameter(title: "Аудио", supportedContentTypes: [.audio])
+    @Parameter(title: "Аудио", supportedContentTypes: ImportFormats.contentTypes)
     var audio: IntentFile
 
     static var parameterSummary: some ParameterSummary {

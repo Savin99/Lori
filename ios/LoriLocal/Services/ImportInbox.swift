@@ -31,21 +31,15 @@ enum ImportInbox {
 
     // MARK: - Форматы
 
-    /// Что приложение умеет расшифровывать, — для текста отказа. Так, как это назвал бы
-    /// человек, а не как лежит множество расширений: `WorkspaceEntry.audioExtensions`
-    /// хранит «aif» и «aiff» порознь, а человеку это один формат. Что список не
-    /// расходится с множеством, проверяет тест.
-    static let supportedFormatsTitle = "M4A, MP3, WAV, AAC, CAF, AIFF, MP4 и MOV"
+    static let supportedFormatsTitle = ImportFormats.supportedFormatsTitle
 
-    /// Годится ли файл для расшифровки — по расширению, как и список записей.
-    ///
-    /// Расширение, а не содержимое, потому что именно оно решает судьбу файла дальше:
-    /// запись, которой нет в `audioExtensions`, не попадёт в список, и расшифровать её
-    /// нечем — «Расшифровать можно только аудиофайл». Раньше такой файл (`.ogg`, `.opus`,
-    /// `.flac`) спокойно копировался в рабочую папку и оттуда уже не виден, а человек
-    /// узнавал об этом, не найдя запись. Теперь отказ случается на входе, и с пояснением.
-    static func isSupported(fileName: String) -> Bool {
-        WorkspaceEntry.audioExtensions.contains((fileName as NSString).pathExtension.lowercased())
+    static func isSupported(fileName: String, gatewayConfigured: Bool = GatewaySettings.isConfigured) -> Bool {
+        ImportFormats.accepts(fileName, gatewayConfigured: gatewayConfigured)
+    }
+
+    static func refusal(for name: String) -> ImportError {
+        ImportFormats.route(for: (name as NSString).pathExtension) == .gateway
+            ? .gatewayRequired(fileName: name) : .unsupportedFormat(fileName: name)
     }
 
     static func isSupported(_ url: URL) -> Bool {
@@ -69,7 +63,7 @@ enum ImportInbox {
         guard isSupported(source) else {
             if isInSystemInbox(source) { try? FileManager.default.removeItem(at: source) }
             Diagnostics.note("импорт: «\(source.lastPathComponent)» отклонён, формат не поддерживается")
-            throw ImportError.unsupportedFormat(fileName: source.lastPathComponent)
+            throw refusal(for: source.lastPathComponent)
         }
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         let destination = free(named: source.lastPathComponent)
@@ -97,7 +91,7 @@ enum ImportInbox {
         let name = completingExtension(of: file.filename, with: file.type)
         guard isSupported(fileName: name) else {
             Diagnostics.note("импорт: «\(name)» из Быстрых команд отклонён, формат не поддерживается")
-            throw ImportError.unsupportedFormat(fileName: name)
+            throw refusal(for: name)
         }
         try FileManager.default.createDirectory(at: staging, withIntermediateDirectories: true)
         let destination = free(named: name)
@@ -263,12 +257,27 @@ enum ImportInbox {
 enum ImportError: LocalizedError, Equatable, Sendable {
     /// Формата нет среди тех, что приложение расшифровывает.
     case unsupportedFormat(fileName: String)
+    case gatewayRequired(fileName: String)
+    case unreadable(fileName: String)
+    case conversionRequired(fileName: String)
+    case durationMismatch(fileName: String)
+    case gatewayFailed(reason: String)
     /// Файл принят, но очередь расшифровки сохранить не удалось (нет места, файл закрыт
     /// защитой данных). Импорт при этом откатывается: запись не остаётся «Без расшифровки».
     case queueUnavailable(fileName: String)
 
     var errorDescription: String? {
         switch self {
+        case let .gatewayRequired(fileName):
+            return "Для «\(fileName)» нужен шлюз на Mac mini. Укажи адрес и токен в «Настройки → Подписка Gemini»: там файл будет переведён в M4A."
+        case let .unreadable(fileName):
+            return "Не удалось прочитать звук в «\(fileName)»: файл повреждён или этот кодек не открывается на iPhone. Настрой шлюз на Mac mini для перевода в M4A."
+        case let .conversionRequired(fileName):
+            return "«\(fileName)» нужно перевести в M4A. Добавь его через панель импорта."
+        case let .durationMismatch(fileName):
+            return "Перевод «\(fileName)» получился неполным. Исходный файл сохранён — попробуй снова."
+        case let .gatewayFailed(reason):
+            return "Шлюз на Mac mini не перевёл запись: \(reason)"
         case let .queueUnavailable(fileName):
             return "«\(fileName)» не поставлена в очередь: не удалось сохранить очередь. Освободи место на телефоне и попробуй снова — файл остался прикреплённым."
         case let .unsupportedFormat(fileName):

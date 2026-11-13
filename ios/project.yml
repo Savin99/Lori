@@ -44,7 +44,7 @@ settings:
     LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local
     LORI_DISPLAY_NAME: Lori
     MARKETING_VERSION: "1.0"
-    CURRENT_PROJECT_VERSION: "14"
+    CURRENT_PROJECT_VERSION: "15"
   configs:
     QA:
       LORI_APP_BUNDLE_ID: ru.ilyaqa.lori.local.qa
@@ -120,12 +120,132 @@ targets:
             LSHandlerRank: Alternate
             LSItemContentTypes:
               - public.audio
+              - public.audiovisual-content
+              - public.movie
+              - org.xiph.ogg-audio
+              - org.xiph.flac
+              - org.3gpp.adaptive-multi-rate-audio
+              - com.microsoft.windows-media-wma
+              - org.webmproject.webm
+              - org.xiph.ogg
+              - org.xiph.opus
+              - org.matroska.mkv
+              - org.matroska.mka
+              - ru.ilyaqa.lori.weba
+              - ru.ilyaqa.lori.spx
+              - ru.ilyaqa.lori.ape
+              - ru.ilyaqa.lori.wv
+              - ru.ilyaqa.lori.dss
+              - ru.ilyaqa.lori.awb
+              - ru.ilyaqa.lori.ogv
+              - ru.ilyaqa.lori.flv
+              - ru.ilyaqa.lori.mpa
+              - ru.ilyaqa.lori.mts
+              - ru.ilyaqa.lori.m2ts
+              - ru.ilyaqa.lori.vob
               - public.mp3
               - public.mpeg-4-audio
               - com.apple.m4a-audio
               - public.aac-audio
               - com.microsoft.waveform-audio
               - public.aiff-audio
+        UTImportedTypeDeclarations:
+          - UTTypeIdentifier: org.xiph.ogg
+            UTTypeDescription: OGG OGA media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [ogg, oga]
+              public.mime-type: audio/ogg
+          - UTTypeIdentifier: org.xiph.opus
+            UTTypeDescription: OPUS media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [opus]
+              public.mime-type: audio/opus
+          - UTTypeIdentifier: org.matroska.mkv
+            UTTypeDescription: MKV media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [mkv]
+              public.mime-type: video/x-matroska
+          - UTTypeIdentifier: org.matroska.mka
+            UTTypeDescription: MKA media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [mka]
+              public.mime-type: audio/x-matroska
+          - UTTypeIdentifier: ru.ilyaqa.lori.weba
+            UTTypeDescription: WEBA media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [weba]
+              public.mime-type: audio/webm
+          - UTTypeIdentifier: ru.ilyaqa.lori.spx
+            UTTypeDescription: SPX media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [spx]
+              public.mime-type: audio/ogg
+          - UTTypeIdentifier: ru.ilyaqa.lori.ape
+            UTTypeDescription: APE media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [ape]
+              public.mime-type: audio/x-ape
+          - UTTypeIdentifier: ru.ilyaqa.lori.wv
+            UTTypeDescription: WV media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [wv]
+              public.mime-type: audio/wavpack
+          - UTTypeIdentifier: ru.ilyaqa.lori.dss
+            UTTypeDescription: DSS media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [dss]
+              public.mime-type: audio/dss
+          - UTTypeIdentifier: ru.ilyaqa.lori.awb
+            UTTypeDescription: AWB media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [awb]
+              public.mime-type: audio/amr-wb
+          - UTTypeIdentifier: ru.ilyaqa.lori.ogv
+            UTTypeDescription: OGV media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [ogv]
+              public.mime-type: video/ogg
+          - UTTypeIdentifier: ru.ilyaqa.lori.flv
+            UTTypeDescription: FLV media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [flv]
+              public.mime-type: video/x-flv
+          - UTTypeIdentifier: ru.ilyaqa.lori.mpa
+            UTTypeDescription: MPA media
+            UTTypeConformsTo: [public.audio]
+            UTTypeTagSpecification:
+              public.filename-extension: [mpa]
+              public.mime-type: audio/mpeg
+          - UTTypeIdentifier: ru.ilyaqa.lori.mts
+            UTTypeDescription: MTS media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [mts]
+              public.mime-type: video/mp2t
+          - UTTypeIdentifier: ru.ilyaqa.lori.m2ts
+            UTTypeDescription: M2TS media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [m2ts]
+              public.mime-type: video/mp2t
+          - UTTypeIdentifier: ru.ilyaqa.lori.vob
+            UTTypeDescription: VOB media
+            UTTypeConformsTo: [public.movie]
+            UTTypeTagSpecification:
+              public.filename-extension: [vob]
+              public.mime-type: video/mpeg
         NSMicrophoneUsageDescription: "Lori записывает звук с микрофона, чтобы потом расшифровать его в текст."
         NSSpeechRecognitionUsageDescription: "Lori распознаёт речь из ваших записей движком iOS прямо на этом iPhone."
         NSLocalNetworkUsageDescription: "Lori скачивает модели распознавания и обращается к сервису расшифровки на вашем компьютере в этой же сети, если вы указали адрес в настройках."

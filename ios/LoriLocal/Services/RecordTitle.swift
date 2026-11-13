@@ -145,7 +145,7 @@ extension RecordTitle {
     static func isGenericName(_ name: String) -> Bool {
         var base = name.trimmingCharacters(in: .whitespacesAndNewlines)
         let suffix = (base as NSString).pathExtension.lowercased()
-        if !suffix.isEmpty, WorkspaceEntry.audioExtensions.contains(suffix) {
+        if !suffix.isEmpty, ImportFormats.allExtensions.contains(suffix) {
             base = (base as NSString).deletingPathExtension
         }
         if isUUID(base) { return true }

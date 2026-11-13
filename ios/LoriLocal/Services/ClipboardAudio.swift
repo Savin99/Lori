@@ -71,8 +71,7 @@ enum ClipboardAudio {
     }
 
     static func isAudio(_ identifier: String) -> Bool {
-        guard let type = UTType(identifier) else { return false }
-        return type.conforms(to: .audio)
+        ImportFormats.acceptsType(identifier)
     }
 
     /// Сколько в буфере аудио и ссылок на файлы — **не читая содержимого**: только
@@ -214,7 +213,7 @@ enum ClipboardAudio {
                 )
                 // Формат проверяется до записи: негодное не нужно писать, чтобы потом стирать.
                 guard ImportInbox.isSupported(fileName: name) else {
-                    throw ImportError.unsupportedFormat(fileName: name)
+                    throw ImportInbox.refusal(for: name)
                 }
                 try prepare()
                 let url = ImportInbox.free(named: name)
@@ -263,7 +262,7 @@ enum ClipboardAudio {
                 }
                 let name = stagedName(suggestedName: suggested, sourceName: url.lastPathComponent, typeExtension: typeExtension)
                 guard ImportInbox.isSupported(fileName: name) else {
-                    continuation.resume(throwing: ImportError.unsupportedFormat(fileName: name))
+                    continuation.resume(throwing: ImportInbox.refusal(for: name))
                     return
                 }
                 do {
@@ -306,8 +305,9 @@ enum ClipboardAudio {
         guard source.isFileURL else { return nil }
         let name = source.lastPathComponent
         guard ImportInbox.isSupported(fileName: name) else {
-            if UTType(filenameExtension: source.pathExtension)?.conforms(to: .audio) == true {
-                throw ImportError.unsupportedFormat(fileName: name)
+            if ImportFormats.allExtensions.contains(source.pathExtension.lowercased())
+                || UTType(filenameExtension: source.pathExtension)?.conforms(to: .audiovisualContent) == true {
+                throw ImportInbox.refusal(for: name)
             }
             return nil
         }
@@ -340,7 +340,7 @@ enum ClipboardAudio {
         /// Расширение, по которому видно звук: известное приложению или любой звуковой тип.
         func isAudioExtension(_ suffix: String) -> Bool {
             !suffix.isEmpty && (
-                WorkspaceEntry.audioExtensions.contains(suffix.lowercased())
+                ImportFormats.allExtensions.contains(suffix.lowercased())
                     || UTType(filenameExtension: suffix)?.conforms(to: .audio) == true
             )
         }

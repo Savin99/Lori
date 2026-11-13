@@ -146,6 +146,63 @@ struct GatewayClient: Sendable {
         return SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()
     }
 
+    /// Ресурсный таймаут URLSession нельзя поднять одним URLRequest.
+    static let conversionSession: URLSession = {
+        let config = URLSessionConfiguration.default
+        config.timeoutIntervalForRequest = 900
+        config.timeoutIntervalForResource = 900
+        return URLSession(configuration: config)
+    }()
+
+    /// В обе стороны поток с диска: видео может весить десятки мегабайт.
+    func convert(file source: URL) async throws -> URL {
+        var request = URLRequest(url: baseURL.appending(path: "v1/convert"))
+        request.httpMethod = "POST"
+        request.timeoutInterval = 900
+        request.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        request.setValue("application/octet-stream", forHTTPHeaderField: "Content-Type")
+        let safeName = ImportInbox.cleanFileName(source.lastPathComponent)
+        let encoded = safeName.addingPercentEncoding(withAllowedCharacters: .alphanumerics) ?? "audio"
+        request.setValue(encoded, forHTTPHeaderField: "X-Lori-Filename")
+        request.setValue(String(try source.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0), forHTTPHeaderField: "Content-Length")
+        request.httpBodyStream = InputStream(url: source)
+        let downloaded: URL
+        let response: URLResponse
+        do { (downloaded, response) = try await session.download(for: request, delegate: FileBody(source: source)) }
+        catch {
+            if Task.isCancelled || error is CancellationError { throw CancellationError() }
+            throw ImportError.gatewayFailed(reason: (error as? URLError)?.code == .timedOut
+                ? "шлюз не ответил за 15 минут. Попробуй снова."
+                : "не удалось связаться с Mac mini. Проверь подключение и адрес шлюза.")
+        }
+        defer { try? FileManager.default.removeItem(at: downloaded) }
+        guard let http = response as? HTTPURLResponse else { throw ImportError.gatewayFailed(reason: "непонятный ответ шлюза.") }
+        guard http.statusCode == 200 else {
+            let size = (try? downloaded.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
+            let envelope = size < 65536 ? (try? JSONDecoder().decode(Envelope.self, from: Data(contentsOf: downloaded))) : nil
+            let message: String
+            switch envelope?.error.code {
+            case "audio", "type": message = "файл повреждён или не содержит читаемой звуковой дорожки."
+            case "unavailable": message = "на Mac mini недоступен ffmpeg."
+            case "size": message = "файл превышает предел загрузки шлюза (95 МБ)."
+            case "timeout": message = "Mac mini не успел перевести запись. Попробуй снова."
+            default: message = (envelope?.error ?? GatewayError(code: http.statusCode == 401 ? "auth" : "response")).localizedDescription
+            }
+            throw ImportError.gatewayFailed(reason: message)
+        }
+        let destination = FileManager.default.temporaryDirectory.appending(path: "lori-convert-\(UUID().uuidString).m4a")
+        try FileManager.default.moveItem(at: downloaded, to: destination)
+        return destination
+    }
+
+    private final class FileBody: NSObject, URLSessionTaskDelegate, Sendable {
+        let source: URL
+        init(source: URL) { self.source = source }
+        func urlSession(_ session: URLSession, task: URLSessionTask, needNewBodyStream completionHandler: @escaping (InputStream?) -> Void) {
+            completionHandler(InputStream(url: source))
+        }
+    }
+
     func checkConnection() async throws -> GatewayUsage {
         struct Health: Decodable { let ok: Bool }
         let health: Health = try await request("v1/health")

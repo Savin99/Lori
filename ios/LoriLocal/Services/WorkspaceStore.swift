@@ -18,7 +18,7 @@ struct WorkspaceEntry: Identifiable, Hashable, Sendable {
         !isDirectory && WorkspaceEntry.audioExtensions.contains((name as NSString).pathExtension.lowercased())
     }
 
-    static let audioExtensions: Set<String> = ["m4a", "mp3", "wav", "aac", "caf", "aiff", "aif", "mp4", "mov"]
+    static let audioExtensions = ImportFormats.storedExtensions
 }
 
 enum WorkspaceError: LocalizedError, Equatable, Sendable {
@@ -61,6 +61,9 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var fileTotal = 0
     @Published private(set) var rootPath = ""
     @Published var lastError: String?
+    @Published private(set) var convertingImports = 0
+    private var convertingIDs = Set<UUID>()
+    private let importGateway: GatewayClient?
 
     private let root: URL
     private let fileManager: FileManager
@@ -77,7 +80,8 @@ final class WorkspaceStore: ObservableObject {
     /// `TranscriptionRunway.current`: держит папку приложение, а не это поле.
     private(set) static weak var current: WorkspaceStore?
 
-    init(rootURL: URL? = nil, fileManager: FileManager = .default) {
+    init(rootURL: URL? = nil, fileManager: FileManager = .default, importGateway: GatewayClient? = nil) {
+        self.importGateway = importGateway
         self.fileManager = fileManager
         if let rootURL {
             root = rootURL.standardizedFileURL
@@ -366,6 +370,10 @@ final class WorkspaceStore: ObservableObject {
         let didAccess = externalURL.startAccessingSecurityScopedResource()
         defer { if didAccess { externalURL.stopAccessingSecurityScopedResource() } }
 
+        guard ImportFormats.originalExtensions.contains(externalURL.pathExtension.lowercased()) else {
+            throw ImportError.conversionRequired(fileName: name)
+        }
+        guard (try? AudioImport.readable(externalURL)) != nil else { throw ImportError.unreadable(fileName: name) }
         let taken = Self.occupiedBaseNames(in: root)
         let destination = reserveImportDestination(in: destinationDirectory, preferredName: name, taken: taken)
         defer { releaseImportReservation(destination) }
@@ -374,54 +382,54 @@ final class WorkspaceStore: ObservableObject {
         return importedPath(destination, in: relativeDirectory)
     }
 
-    /// Большая запись копируется не на главном потоке. Иначе после нажатия
-    /// «Расшифровать» интерфейс замирал на всё время копирования из staging.
-    ///
-    /// Что делает импорт, и почему:
-    /// - **Формат проверяется до копирования.** `.ogg`, `.opus`, `.flac` раньше доезжали до
-    ///   `Imported/`, но в список записей не попадали (`WorkspaceEntry.audioExtensions`) и
-    ///   падали с «Расшифровать можно только аудиофайл»; человек не находил запись.
-    /// - **Имя уникально по базе, а не по полному имени.** Расшифровка лежит в
-    ///   `Transcripts/<база>.md`, и `Совещание.m4a` рядом с `Совещание.mp3` — или такая же
-    ///   база в `Recordings/` и `Imported/` — делили бы один файл текста: вторая расшифровка
-    ///   затирала бы первую. Занятыми считаются база любого аудио в любой папке и база любой
-    ///   расшифровки (текст мог пережить удалённое аудио). Имя при этом остаётся таким, как
-    ///   дали, пока не занято; занято — получает номер: «Совещание 2.mp3».
-    /// - **Дата изменения — момент импорта.** Список «новые сверху» сортируется по ней, а
-    ///   копия сохраняет дату оригинала: запись месячной давности ушла бы в середину списка,
-    ///   и человек, только что добавивший пять файлов, не находил бы их наверху. Своей
-    ///   «даты записи» у приложения нет — везде (группы по дням, время на карточке, экран
-    ///   записи, экспорт) читается именно `modifiedAt`, так что у принесённой записи это
-    ///   день её принесения.
-    /// - **Копия целиком или никак.** Файл копируется под скрытым именем и только потом
-    ///   переименовывается: оборванная посреди копия не должна лежать под настоящим именем и
-    ///   выглядеть записью.
+    /// Проверка кодека, перевод и запись идут вне главного актора. Имя выбирается
+    /// после перевода (теперь оно может оканчиваться на .m4a), с прежней бронью базы.
     @discardableResult
     func importFileAsync(
         from externalURL: URL,
         into relativeDirectory: String = "Imported",
         modifiedAt: Date = .now
     ) async throws -> String {
-        let (destinationDirectory, name) = try prepareImport(from: externalURL, into: relativeDirectory)
-
-        // Обход всей папки — не на главном акторе. Выбор имени после него — синхронный и
-        // на главном акторе, поэтому два импорта разом не выберут одно имя: второй увидит
-        // бронь первого.
-        let root = root
-        let taken = await Task.detached(priority: .userInitiated) {
-            Self.occupiedBaseNames(in: root)
-        }.value
-        let destination = reserveImportDestination(in: destinationDirectory, preferredName: name, taken: taken)
-        defer { releaseImportReservation(destination) }
+        let (directory, _) = try prepareImport(from: externalURL, into: relativeDirectory)
+        let gateway = importGateway ?? (try? GatewayClient.configured(session: GatewayClient.conversionSession))
         let didAccess = externalURL.startAccessingSecurityScopedResource()
-
+        defer { if didAccess { externalURL.stopAccessingSecurityScopedResource() } }
+        let id = UUID()
+        defer {
+            convertingIDs.remove(id)
+            convertingImports = convertingIDs.count
+        }
+        let preparation = Task.detached(priority: .userInitiated) {
+            try await AudioImport.prepare(externalURL, in: directory, gateway: gateway) {
+                await self.markConverting(id)
+            }
+        }
+        let prepared = try await withTaskCancellationHandler {
+            try await preparation.value
+        } onCancel: { preparation.cancel() }
+        defer { prepared.discard() }
+        try Task.checkCancellation()
+        let root = root
+        let taken = await Task.detached(priority: .userInitiated) { Self.occupiedBaseNames(in: root) }.value
+        let base = externalURL.deletingPathExtension().lastPathComponent
+        let destination = reserveImportDestination(in: directory, preferredName: "\(base).\(prepared.suffix)", taken: taken)
+        defer { releaseImportReservation(destination) }
         try await Task.detached(priority: .userInitiated) {
-            defer { if didAccess { externalURL.stopAccessingSecurityScopedResource() } }
-            try Self.copyAtomically(from: externalURL, to: destination, modifiedAt: modifiedAt)
+            if prepared.isTemporary {
+                try FileManager.default.setAttributes([.modificationDate: modifiedAt], ofItemAtPath: prepared.url.path)
+                try FileManager.default.moveItem(at: prepared.url, to: destination)
+            } else {
+                try Self.copyAtomically(from: prepared.url, to: destination, modifiedAt: modifiedAt)
+            }
         }.value
-
+        Diagnostics.note(prepared.journal(sourceName: externalURL.lastPathComponent))
         requestRefresh()
         return importedPath(destination, in: relativeDirectory)
+    }
+
+    private func markConverting(_ id: UUID) {
+        convertingIDs.insert(id)
+        convertingImports = convertingIDs.count
     }
 
     /// Откат импорта: убирает файл, который `importFileAsync` только что создал.
@@ -443,7 +451,7 @@ final class WorkspaceStore: ObservableObject {
         try ensureRoot()
         let name = externalURL.lastPathComponent
         guard !name.isEmpty, !name.contains("/") else { throw WorkspaceError.importFailed }
-        guard ImportInbox.isSupported(fileName: name) else { throw ImportError.unsupportedFormat(fileName: name) }
+        guard ImportInbox.isSupported(fileName: name, gatewayConfigured: importGateway != nil || GatewaySettings.isConfigured) else { throw ImportInbox.refusal(for: name) }
         let destinationDirectory = try safeURL(for: relativeDirectory)
         try rejectSymbolicLinks(for: relativeDirectory)
         try fileManager.createDirectory(at: destinationDirectory, withIntermediateDirectories: true)
@@ -475,7 +483,7 @@ final class WorkspaceStore: ObservableObject {
             let suffix = url.pathExtension.lowercased()
             if relative.hasPrefix("Transcripts/") {
                 if suffix == "md" { taken.insert(baseKey(url.deletingPathExtension().lastPathComponent)) }
-            } else if WorkspaceEntry.audioExtensions.contains(suffix) {
+            } else if ImportFormats.allExtensions.contains(suffix) {
                 taken.insert(baseKey(url.deletingPathExtension().lastPathComponent))
             }
         }
@@ -520,7 +528,7 @@ final class WorkspaceStore: ObservableObject {
     private func isTakenOnDisk(_ base: String, in directory: URL) -> Bool {
         let transcript = root.appending(path: "Transcripts").appending(path: "\(base).md")
         if fileManager.fileExists(atPath: transcript.path) { return true }
-        return WorkspaceEntry.audioExtensions.contains { suffix in
+        return ImportFormats.allExtensions.contains { suffix in
             fileManager.fileExists(atPath: directory.appending(path: "\(base).\(suffix)").path)
         }
     }

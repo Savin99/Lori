@@ -264,6 +264,10 @@ struct ComposerBar: View {
                     .font(LoriFont.small)
                     .foregroundStyle(LoriPalette.muted)
                     .accessibilityIdentifier("attachedEstimate")
+                if let notice = ImportFormats.conversionNotice(for: model.attached.map { $0.url.lastPathComponent }, gatewayConfigured: GatewaySettings.isConfigured) {
+                    Text(notice).font(LoriFont.small).foregroundStyle(LoriPalette.muted)
+                        .accessibilityIdentifier("importConversionNotice")
+                }
                 if engine.kind == .geminiSubscription {
                     Text(GatewaySettings.transcriptionNotice)
                         .font(LoriFont.small).foregroundStyle(LoriPalette.muted)

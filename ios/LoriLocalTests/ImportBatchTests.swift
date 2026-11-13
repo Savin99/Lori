@@ -33,7 +33,7 @@ final class ImportBatchTests: XCTestCase {
     private func staged(_ name: String, bytes: [UInt8] = [1, 2, 3]) throws -> URL {
         try manager.createDirectory(at: ImportInbox.staging, withIntermediateDirectories: true)
         let url = ImportInbox.staging.appending(path: name)
-        try Data(bytes).write(to: url)
+        try FormatFixture.original(named: name).write(to: url)
         return url
     }
 
@@ -86,19 +86,33 @@ final class ImportBatchTests: XCTestCase {
 
     func testUnsupportedFormatIsRefusedAndTheStagedCopyIsCleanedUp() async throws {
         let service = fixture.service(gate: QueueGate(blocking: false))
-        let file = try staged("Голосовое.ogg")
+        let file = try staged("Документ.pdf")
 
         do {
             _ = try await service.importAndEnqueue(file, into: fixture.workspace, using: .gigaam)
             XCTFail("неподдерживаемый формат должен быть отклонён")
         } catch let error as ImportError {
-            XCTAssertEqual(error, .unsupportedFormat(fileName: "Голосовое.ogg"))
+            XCTAssertEqual(error, .unsupportedFormat(fileName: "Документ.pdf"))
         }
 
         XCTAssertEqual(stagedNames, [], "негодная промежуточная копия убрана")
         XCTAssertFalse(manager.fileExists(atPath: fixture.root.appending(path: "Imported").path), "в рабочую папку ничего не попало")
         XCTAssertTrue(service.isIdle)
         XCTAssertEqual(service.batchTotal, 0)
+    }
+
+    func testUnreadableAcceptedAudioKeepsStagedCopy() async throws {
+        let service = fixture.service(gate: QueueGate(blocking: false))
+        let file = try staged("Битое.ogg")
+        do {
+            _ = try await service.importAndEnqueue(file, into: fixture.workspace, using: .gigaam)
+            XCTFail("Битое аудио не должно импортироваться")
+        } catch let error as ImportError {
+            XCTAssertEqual(error, .unreadable(fileName: "Битое.ogg"))
+        }
+        XCTAssertEqual(stagedNames, ["Битое.ogg"], "оригинал остаётся для повтора")
+        XCTAssertEqual(try manager.contentsOfDirectory(atPath: fixture.root.appending(path: "Imported").path), [])
+        XCTAssertTrue(service.isIdle)
     }
 
     /// Не вышло скопировать — файл остаётся в промежуточной папке: человек повторит.
@@ -192,14 +206,14 @@ final class ImportBatchTests: XCTestCase {
         XCTAssertEqual(service.lastBatch?.succeeded.count, 5)
     }
 
-    /// Пять файлов, один из них `.ogg`: четыре идут, пятый назван с причиной.
+    /// Пять файлов, один из них `.pdf`: четыре идут, пятый назван с причиной.
     func testBatchReportsAPartialFailureAndTheRestGoOn() async throws {
         let order = QueueGate(blocking: false)
         let service = fixture.service(gate: order)
         let files = [
             try staged("Один.m4a"),
             try staged("Два.mp3"),
-            try staged("Голосовое.opus"),
+            try staged("Документ.pdf"),
             try staged("Четыре.wav"),
             try staged("Пять.m4a"),
         ]
@@ -208,8 +222,8 @@ final class ImportBatchTests: XCTestCase {
         await service.waitForDrain()
 
         XCTAssertEqual(report.imported.map(\.source.lastPathComponent), ["Один.m4a", "Два.mp3", "Четыре.wav", "Пять.m4a"])
-        XCTAssertEqual(report.failed.map(\.source.lastPathComponent), ["Голосовое.opus"])
-        XCTAssertTrue(report.failed[0].message.contains("Голосовое.opus"), report.failed[0].message)
+        XCTAssertEqual(report.failed.map(\.source.lastPathComponent), ["Документ.pdf"])
+        XCTAssertTrue(report.failed[0].message.contains("Документ.pdf"), report.failed[0].message)
         XCTAssertFalse(report.isComplete)
         let arrivals = await order.arrivals()
         XCTAssertEqual(arrivals, ["Один.m4a", "Два.mp3", "Четыре.wav", "Пять.m4a"])

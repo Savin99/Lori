@@ -167,7 +167,7 @@ struct ContentView: View {
         dialogs(sheets(screen))
             .fileImporter(
                 isPresented: $showFileImporter,
-                allowedContentTypes: [.audio, .mpeg4Audio, .mp3, .wav, .aiff],
+                allowedContentTypes: ImportFormats.contentTypes,
                 allowsMultipleSelection: true,
                 onCompletion: attachFiles
             )
@@ -580,7 +580,7 @@ struct ContentView: View {
             speed: speed,
             engine: engine,
             mode: TranscriptionSettings.mode(for: engine.kind),
-            status: importing > 0 ? "Добавляю \(HomeFormat.records(importing))…" : nil,
+            status: workspace.convertingImports > 0 ? "Перевожу в M4A…" : importing > 0 ? "Добавляю \(HomeFormat.records(importing))…" : nil,
             busy: importing > 0,
             actions: ComposerActions(
                 record: startRecording,

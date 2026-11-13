@@ -41,23 +41,25 @@ final class ImportFormatTests: XCTestCase {
     /// тем, что приложение и правда принимает. Добавили расширение в `audioExtensions`, а
     /// в тексте забыли — тест падает.
     func testTheListedFormatsAreExactlyTheAcceptedExtensions() {
-        let tokens = ImportInbox.supportedFormatsTitle
-            .replacingOccurrences(of: " и ", with: ", ")
-            .components(separatedBy: ", ")
-        let listed = Set(tokens.map { $0.lowercased() == "aiff" ? ["aiff", "aif"] : [$0.lowercased()] }.flatMap { $0 })
-        XCTAssertEqual(listed, WorkspaceEntry.audioExtensions)
+        let title = ImportInbox.supportedFormatsTitle
+        let local = title.components(separatedBy: ". Через шлюз на Mac mini: ")[0].components(separatedBy: ": ").last!
+        let remote = title.components(separatedBy: ". Через шлюз на Mac mini: ").last!
+        let listed = Set((local + ", " + remote).components(separatedBy: ", ").map { $0.lowercased() })
+        XCTAssertEqual(listed, ImportFormats.allExtensions)
+        XCTAssertTrue(title.contains("Telegram и WhatsApp"))
+        XCTAssertTrue(title.contains("видео"))
     }
 
     func testEveryAcceptedExtensionPassesInAnyCase() {
-        for suffix in WorkspaceEntry.audioExtensions {
-            XCTAssertTrue(ImportInbox.isSupported(fileName: "Запись.\(suffix)"), suffix)
-            XCTAssertTrue(ImportInbox.isSupported(fileName: "Запись.\(suffix.uppercased())"), suffix.uppercased())
+        for suffix in ImportFormats.allExtensions {
+            XCTAssertTrue(ImportInbox.isSupported(fileName: "Запись.\(suffix)", gatewayConfigured: true), suffix)
+            XCTAssertTrue(ImportInbox.isSupported(fileName: "Запись.\(suffix.uppercased())", gatewayConfigured: true), suffix.uppercased())
         }
     }
 
     func testOtherFormatsAreNotSupported() {
-        for suffix in ["ogg", "oga", "opus", "flac", "wma", "amr", "webm", "mka", "txt", "pdf", "png"] {
-            XCTAssertFalse(ImportInbox.isSupported(fileName: "Запись.\(suffix)"), suffix)
+        for suffix in ["txt", "pdf", "png"] {
+            XCTAssertFalse(ImportInbox.isSupported(fileName: "Запись.\(suffix)", gatewayConfigured: true), suffix)
         }
         XCTAssertFalse(ImportInbox.isSupported(fileName: "Без расширения"))
         XCTAssertFalse(ImportInbox.isSupported(fileName: ".m4a"), "скрытый файл без имени — не запись")
@@ -66,7 +68,7 @@ final class ImportFormatTests: XCTestCase {
     // MARK: - Отказ при приёме
 
     func testUnsupportedFileIsRejectedBeforeAnythingIsCopied() throws {
-        for suffix in ["ogg", "opus", "flac"] {
+        for suffix in ["txt", "pdf", "png"] {
             let source = try outsideFile("Голосовое.\(suffix)")
 
             XCTAssertThrowsError(try ImportInbox.stage(source), suffix) { error in
@@ -79,7 +81,7 @@ final class ImportFormatTests: XCTestCase {
 
     /// Копия из «Поделиться» не чужая: отвергнутую оставлять на виду в «Файлах» нельзя.
     func testRejectedFileFromTheVisibleInboxIsRemoved() throws {
-        let shared = try inboxFile("Голосовое.opus")
+        let shared = try inboxFile("Документ.pdf")
 
         XCTAssertThrowsError(try ImportInbox.stage(shared))
 
@@ -88,11 +90,11 @@ final class ImportFormatTests: XCTestCase {
     }
 
     func testRejectionNamesTheFileTheFormatAndWhatIsSupported() throws {
-        let error = ImportError.unsupportedFormat(fileName: "Голосовое.OGG")
+        let error = ImportError.unsupportedFormat(fileName: "Документ.PDF")
         let text = try XCTUnwrap(error.errorDescription)
 
-        XCTAssertTrue(text.contains("Голосовое.OGG"), text)
-        XCTAssertTrue(text.contains(".ogg"), text)
+        XCTAssertTrue(text.contains("Документ.PDF"), text)
+        XCTAssertTrue(text.contains(".pdf"), text)
         for name in ["M4A", "MP3", "WAV", "AAC", "CAF", "AIFF", "MP4", "MOV"] {
             XCTAssertTrue(text.contains(name), "\(name) в: \(text)")
         }
@@ -115,16 +117,16 @@ final class ImportFormatTests: XCTestCase {
     func testStageAllKeepsTheGoodOnesInOrderAndReportsTheBadOnes() throws {
         let sources = [
             try outsideFile("Один.m4a"),
-            try outsideFile("Два.opus"),
+            try outsideFile("Два.pdf"),
             try outsideFile("Три.mp3"),
-            try outsideFile("Четыре.flac"),
+            try outsideFile("Четыре.png"),
             try outsideFile("Пять.wav"),
         ]
 
         let report = ImportInbox.stageAll(sources)
 
         XCTAssertEqual(report.staged.map(\.lastPathComponent), ["Один.m4a", "Три.mp3", "Пять.wav"])
-        XCTAssertEqual(report.rejected.map(\.name), ["Два.opus", "Четыре.flac"])
+        XCTAssertEqual(report.rejected.map(\.name), ["Два.pdf", "Четыре.png"])
         for rejection in report.rejected {
             XCTAssertTrue(rejection.message.contains(rejection.name), rejection.message)
         }
@@ -155,20 +157,20 @@ final class ImportFormatTests: XCTestCase {
 
     func testSystemInboxReportsRejectedFilesAndStillClearsTheFolder() throws {
         _ = try inboxFile("Хорошая.m4a")
-        _ = try inboxFile("Плохая.opus")
+        _ = try inboxFile("Плохая.pdf")
         _ = try inboxFile("Ещё хорошая.mp3")
 
         let report = ImportInbox.collectSystemInbox()
 
         XCTAssertEqual(Set(report.staged.map(\.lastPathComponent)), ["Хорошая.m4a", "Ещё хорошая.mp3"])
-        XCTAssertEqual(report.rejected.map(\.name), ["Плохая.opus"])
+        XCTAssertEqual(report.rejected.map(\.name), ["Плохая.pdf"])
         XCTAssertFalse(manager.fileExists(atPath: ImportInbox.systemInbox.path), "Documents виден в «Файлах»")
     }
 
     /// Прежний вызов отдаёт только принятые — и тоже не оставляет отвергнутых на виду.
     func testDrainStillReturnsOnlyWhatWasTaken() throws {
         _ = try inboxFile("Хорошая.m4a")
-        _ = try inboxFile("Плохая.ogg")
+        _ = try inboxFile("Плохая.pdf")
 
         let taken = ImportInbox.drainSystemInbox()
 
@@ -210,15 +212,12 @@ final class ImportFormatTests: XCTestCase {
         XCTAssertEqual(try ImportInbox.stage(file).lastPathComponent, "Звонок.mp3")
     }
 
-    func testIntentFileOfAnUnsupportedTypeIsRejected() throws {
-        // Тип известен не на каждой версии системы: тогда проверять нечего.
-        guard let ogg = UTType("org.xiph.ogg-audio") else { throw XCTSkip("в этой системе нет типа Ogg") }
+    func testIntentFileWithOggTypeIsAccepted() throws {
+        let ogg = try XCTUnwrap(UTType("org.xiph.ogg-audio"))
         let file = IntentFile(data: Data([1]), filename: "Голосовое", type: ogg)
-
-        XCTAssertThrowsError(try ImportInbox.stage(file)) { error in
-            XCTAssertEqual(error as? ImportError, .unsupportedFormat(fileName: "Голосовое.ogg"))
-        }
-        XCTAssertEqual(ImportInbox.waiting(), [])
+        let staged = try ImportInbox.stage(file)
+        XCTAssertEqual(staged.lastPathComponent, "Голосовое.ogg")
+        XCTAssertEqual(ImportInbox.waiting(), [staged])
     }
 
     func testIntentFileWithNoNameAtAllIsStillTaken() throws {

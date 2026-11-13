@@ -217,30 +217,19 @@ final class ClipboardBatchTests: XCTestCase {
     // MARK: - Форматы
 
     /// Одно неподдерживаемое не отменяет остальных — и не пропадает молча.
-    func testUnsupportedItemIsSkippedWithAReasonAndTheRestAreTaken() async throws {
+    func testOggItemIsTakenAlongsideOtherAudio() async throws {
         putData([(mp3, [1]), ("org.xiph.ogg-audio", [2]), (m4a, [3])])
-
         let result = try await ClipboardAudio.takeBatch(from: pasteboard)
-
-        XCTAssertEqual(result.urls.count, 2)
-        XCTAssertEqual(try result.urls.map { try Data(contentsOf: $0) }, [Data([1]), Data([3])])
-        XCTAssertEqual(result.skipped.count, 1)
-        XCTAssertEqual(result.skipped[0].index, 1)
-        let refusal = result.skipped[0].error as? ImportError
-        XCTAssertEqual(refusal, .unsupportedFormat(fileName: "Вставленное.ogg"))
-        XCTAssertTrue(result.messages[0].contains(".ogg"), result.messages[0])
-        XCTAssertEqual(ImportInbox.waiting().count, 2, "негодное в папку не попало")
-        let all = try await ClipboardAudio.takeAll(from: pasteboard)
-        XCTAssertEqual(all.count, 2, "takeAll при частичном успехе не бросает")
+        XCTAssertEqual(result.urls.count, 3)
+        XCTAssertEqual(try result.urls.map { try Data(contentsOf: $0) }, [Data([1]), Data([2]), Data([3])])
+        XCTAssertTrue(result.skipped.isEmpty)
+        XCTAssertEqual(result.urls[1].pathExtension, "ogg")
     }
 
-    func testOnlyUnsupportedItemsFailWithTheFormatMessage() async {
+    func testOggAndFlacAreBothAccepted() async throws {
         putData([("org.xiph.ogg-audio", [1]), ("org.xiph.flac", [2])])
-
-        await assertThrowsAsync(try await ClipboardAudio.takeAll(from: pasteboard)) { error in
-            XCTAssertEqual(error as? ImportError, .unsupportedFormat(fileName: "Вставленное.ogg"))
-        }
-        XCTAssertEqual(ImportInbox.waiting(), [], "ничего не осталось лежать")
+        let result = try await ClipboardAudio.takeAll(from: pasteboard)
+        XCTAssertEqual(result.map(\.pathExtension), ["ogg", "flac"])
     }
 
     // MARK: - Обещания файлов и ссылки
@@ -351,15 +340,13 @@ final class ClipboardBatchTests: XCTestCase {
         XCTAssertTrue(result.skipped.isEmpty, "pdf — не звук и не отказ")
     }
 
-    func testFileReferenceToAnUnsupportedAudioFormatIsRefusedWithAReason() async throws {
+    func testFileReferenceToOggIsTaken() async throws {
         let ogg = try outsideFile("Голосовое.ogg", bytes: [1])
         let good = try outsideFile("Запись.m4a", bytes: [2])
         pasteboard.setItems([ogg, good].map { [UTType.fileURL.identifier: $0] }, options: [:])
-
         let result = try await ClipboardAudio.takeBatch(from: pasteboard)
-
-        XCTAssertEqual(result.urls.map(\.lastPathComponent), ["Запись.m4a"])
-        XCTAssertEqual(result.skipped.first?.error as? ImportError, .unsupportedFormat(fileName: "Голосовое.ogg"))
+        XCTAssertEqual(result.urls.map(\.lastPathComponent), ["Голосовое.ogg", "Запись.m4a"])
+        XCTAssertTrue(result.skipped.isEmpty)
     }
 
     // MARK: - Имя файла

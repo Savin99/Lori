@@ -31,7 +31,7 @@ final class WorkspaceImportTests: XCTestCase {
         let directory = folder.map { sources.appending(path: $0, directoryHint: .isDirectory) } ?? sources!
         try manager.createDirectory(at: directory, withIntermediateDirectories: true)
         let url = directory.appending(path: name)
-        try Data(bytes).write(to: url)
+        try FormatFixture.original(named: name).write(to: url)
         if let modified { try manager.setAttributes([.modificationDate: modified], ofItemAtPath: url.path) }
         return url
     }
@@ -53,7 +53,7 @@ final class WorkspaceImportTests: XCTestCase {
         let path = try await workspace.importFileAsync(from: try source("Совещание 27.08.m4a"))
 
         XCTAssertEqual(path, "Imported/Совещание 27.08.m4a")
-        XCTAssertEqual(try Data(contentsOf: root.appending(path: path)), Data([1, 2, 3]))
+        XCTAssertEqual(try Data(contentsOf: root.appending(path: path)), try FormatFixture.data("reference.m4a"))
     }
 
     /// `Совещание.m4a` и `Совещание.mp3` делили бы `Transcripts/Совещание.md`.
@@ -156,7 +156,7 @@ final class WorkspaceImportTests: XCTestCase {
     // MARK: - Формат
 
     func testUnsupportedFormatIsRejectedAndNothingIsCopied() async throws {
-        for name in ["Голосовое.ogg", "Голосовое.opus", "Музыка.flac", "Без расширения"] {
+        for name in ["Документ.pdf", "Картинка.png", "Без расширения"] {
             let file = try source(name)
 
             do {
@@ -273,7 +273,7 @@ final class WorkspaceImportTests: XCTestCase {
         XCTAssertEqual(renamed, "Imported/Совещание 2.mp3")
         XCTAssertGreaterThanOrEqual(try workspace.entry(at: renamed).modifiedAt.timeIntervalSince(before), -1)
         XCTAssertThrowsError(try workspace.importFile(from: try source("Голосовое.ogg"))) { error in
-            XCTAssertEqual(error as? ImportError, .unsupportedFormat(fileName: "Голосовое.ogg"))
+            XCTAssertEqual(error as? ImportError, .conversionRequired(fileName: "Голосовое.ogg"))
         }
         XCTAssertEqual(try importedNames(), ["Совещание 2.mp3"])
     }

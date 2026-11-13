@@ -1997,7 +1997,7 @@ extension TranscriptionService {
         do {
             return try await workspace.importFileAsync(from: staged, modifiedAt: modifiedAt)
         } catch let refusal as ImportError {
-            ImportInbox.forget(staged)
+            if case .unsupportedFormat = refusal { ImportInbox.forget(staged) }
             throw refusal
         }
     }
