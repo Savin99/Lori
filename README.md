@@ -96,6 +96,8 @@ LORI_AGY_HOME=~/Services/lori-gateway/agy-home node ui/agy-gateway.mjs
 
 | Переменная | По умолчанию / назначение |
 | --- | --- |
+| `LORI_FFMPEG` | `ffmpeg` из PATH; перевод без agy/Google |
+| `LORI_GATEWAY_CONVERT_TIMEOUT_SECONDS` | `600`, таймаут перевода аудио/видео |
 | `LORI_GATEWAY_HOST`, `LORI_GATEWAY_PORT` | `127.0.0.1`, `18890` |
 | `LORI_GATEWAY_TOKEN_FILE` | `~/.config/lori/gateway-token`; без файла или с коротким токеном шлюз не стартует |
 | `LORI_AGY_BIN` | первый существующий `~/.local/bin/agy`, `~/Documents/Developer/bin/agy`, иначе `agy` из PATH |
@@ -156,3 +158,16 @@ LORI_AGY_HOME=~/Services/lori-gateway/agy-home node ui/agy-gateway.mjs
 - В iOS-приложении это верно для локальных движков (GigaAM, Apple). Облачные движки — OpenAI
   и Gemini — по явному выбору человека отправляют сервису запись целиком; приложение говорит
   об этом прямо в настройках и не переключается на облако само.
+
+
+Шлюз также переводит внешнее аудио и видео: `POST /v1/convert`, сырые байты файла до 95 МБ,
+тот же Bearer-токен, `X-Lori-Filename` — необязательная подсказка расширения (UTF-8 percent encoding).
+Ответ — M4A (`audio/mp4`), AAC моно 48 кГц / 64 кбит/с. Перевод выполняет ffmpeg на Mac mini,
+не обращаясь к Google; своя очередь: один перевод и двое ожидающих, затем 429 с `Retry-After`.
+`GET /v1/health` сообщает `convert: true|false`. Подробности ошибок, настройки и проверка
+развёртывания — [в описании шлюза](docs/gemini-subscription.md#перевод-аудио-и-видео--13-ноября-2026).
+
+Lori для iPhone принимает голосовые Telegram/WhatsApp, FLAC и видео из «Файлов»,
+«Поделиться», буфера и Быстрых команд. Сначала пробует перевести звук в M4A на телефоне;
+для WebM/Matroska/WMA и кодеков, которые iOS не декодирует, нужен настроенный шлюз на Mac mini.
+Форматы, проверка длительности и сохранность оригиналов описаны в [правилах iOS](ios/AGENTS.md).
