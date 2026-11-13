@@ -7,7 +7,8 @@ import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir, tmpdir } from 'node:os'
 import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { createReadStream, existsSync } from 'node:fs'
+import { pipeline } from 'node:stream/promises'
 import { join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -76,6 +77,8 @@ export function gatewayConfig (env = process.env) {
       annotate: positiveNumber(env, 'LORI_GATEWAY_ANNOTATE_TIMEOUT_SECONDS', 300),
       report: positiveNumber(env, 'LORI_GATEWAY_REPORT_TIMEOUT_SECONDS', 600)
     },
+    ffmpegBin: env.LORI_FFMPEG || 'ffmpeg',
+    convertTimeout: positiveNumber(env, 'LORI_GATEWAY_CONVERT_TIMEOUT_SECONDS', 600),
     usageTimeout: positiveNumber(env, 'LORI_GATEWAY_USAGE_TIMEOUT_SECONDS', 30),
     uploadTimeout: positiveNumber(env, 'LORI_GATEWAY_UPLOAD_TIMEOUT_SECONDS', 600),
     resultTtlMs: positiveNumber(env, 'LORI_GATEWAY_RESULT_TTL_SECONDS', 7200) * 1000,
@@ -463,6 +466,57 @@ async function readBody (request, limit, file) {
   return { size, body: file ? undefined : Buffer.concat(chunks).toString('utf8') }
 }
 
+// Имя — только подсказка демультиплексору; путь и basename всегда наши.
+function conversionSuffix (value) {
+  let name
+  try { name = decodeURIComponent(typeof value === 'string' ? value : '') } catch { name = '' }
+  return /\.([a-z0-9]{1,8})$/i.exec(name.slice(-256))?.[1].toLowerCase() || 'bin'
+}
+
+async function ffmpegAvailable (config) {
+  try {
+    await executeFile(config.ffmpegBin, ['-version'], { env: config.childEnv, timeout: 5000, maxBuffer: 65536 })
+    return true
+  } catch { return false }
+}
+
+function convertAudio (config, directory, suffix, signal) {
+  return new Promise((resolveConvert, rejectConvert) => {
+    if (signal.aborted) { rejectConvert(new GatewayError(503, 'unavailable', 'Перевод остановлен.')); return }
+    const output = join(directory, 'audio.m4a')
+    const child = spawn(config.ffmpegBin, [
+      '-nostdin', '-hide_banner', '-loglevel', 'error', '-protocol_whitelist', 'file',
+      '-i', join(directory, `input.${suffix}`), '-map', '0:a:0', '-vn', '-sn', '-dn',
+      '-ac', '1', '-ar', '48000', '-c:a', 'aac', '-b:a', '64k', output
+    ], { cwd: directory, env: config.childEnv, detached: true, stdio: 'ignore' })
+    let stopped
+    let spawnError
+    let killTimer
+    const kill = (name) => { if (child.pid) { try { process.kill(-child.pid, name) } catch {} } }
+    const stop = (reason) => {
+      if (stopped) return
+      stopped = reason
+      kill('SIGTERM')
+      killTimer = setTimeout(() => kill('SIGKILL'), 250)
+    }
+    const abort = () => stop('cancelled')
+    const timer = setTimeout(() => stop('timeout'), config.convertTimeout * 1000)
+    signal.addEventListener('abort', abort, { once: true })
+    child.on('error', (cause) => { spawnError = cause })
+    child.on('close', (code) => {
+      clearTimeout(timer)
+      clearTimeout(killTimer)
+      signal.removeEventListener('abort', abort)
+      kill('SIGKILL')
+      if (stopped === 'timeout') rejectConvert(new GatewayError(504, 'timeout', 'Mac mini не успел перевести запись.'))
+      else if (stopped) rejectConvert(new GatewayError(503, 'unavailable', 'Перевод остановлен.'))
+      else if (spawnError) rejectConvert(new GatewayError(503, 'unavailable', 'На Mac mini недоступен ffmpeg.'))
+      else if (code !== 0) rejectConvert(new GatewayError(415, 'audio', 'Не удалось прочитать звуковую дорожку. Файл повреждён или не содержит звука.'))
+      else resolveConvert(output)
+    })
+  })
+}
+
 export async function createGateway (config = gatewayConfig(), { logger = (entry) => console.log(JSON.stringify(entry)) } = {}) {
   let token
   try { token = (await readFile(config.tokenFile, 'utf8')).trim() } catch { throw new Error('Не удалось прочитать файл токена шлюза. Создайте LORI_GATEWAY_TOKEN_FILE с токеном не короче 32 знаков.') }
@@ -482,6 +536,18 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
   const keys = new Map()
   const expirations = new Set()
   const controllers = new Set()
+  // Своя очередь, не расходующая подписку и не задерживающая agy.
+  let conversionCount = 0
+  let conversionTail = Promise.resolve()
+  const conversions = new Set()
+  const reserveConversion = () => {
+    if (conversionCount >= 3) throw new GatewayError(429, 'rate', 'Mac mini переводит другие записи. Повторите позже.', 10)
+    conversionCount += 1
+    const previous = conversionTail
+    let release
+    conversionTail = new Promise((done) => { release = done })
+    return { previous, release: () => { conversionCount -= 1; release() } }
+  }
   const log = (entry) => { try { logger(entry) } catch { /* Журнал не должен останавливать очередь. */ } }
 
   const commonArgs = (timeout) => ['--model', config.model, '--sandbox', '--print-timeout', `${timeout}s`, '--settings', JSON.stringify(POLICY)]
@@ -653,7 +719,42 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
       if (closing) throw new GatewayError(503, 'queue', 'Шлюз останавливается. Повторите позже.')
       const url = new URL(request.url, 'http://localhost')
       if (request.method === 'GET' && url.pathname === '/v1/health') {
-        kind = 'health'; reply(200, { ok: true, agy: { path: config.agyBin, version } }); state = 'done'
+        kind = 'health'; reply(200, { ok: true, convert: await ffmpegAvailable(config), agy: { path: config.agyBin, version } }); state = 'done'
+      } else if (request.method === 'POST' && url.pathname === '/v1/convert') {
+        kind = 'convert'
+        if (!await ffmpegAvailable(config)) throw new GatewayError(503, 'unavailable', 'На Mac mini недоступен ffmpeg.')
+        const slot = reserveConversion()
+        const controller = new AbortController()
+        controllers.add(controller)
+        let finished
+        const completion = new Promise((done) => { finished = done })
+        conversions.add(completion)
+        const disconnect = () => { if (!response.writableFinished) controller.abort() }
+        response.once('close', disconnect)
+        let directory
+        try {
+          directory = await temporaryDirectory()
+          const suffix = conversionSuffix(request.headers['x-lori-filename'])
+          const file = await open(join(directory, `input.${suffix}`), 'wx', 0o600)
+          try { bytes = (await readBody(request, config.maxAudioBytes, file)).size } finally { await file.close() }
+          if (!bytes) throw new GatewayError(415, 'audio', 'Файл пустой, звука нет.')
+          await slot.previous
+          const output = await convertAudio(config, directory, suffix, controller.signal)
+          const info = await lstat(output).catch((cause) => { if (cause.code === 'ENOENT') return undefined; throw cause })
+          if (!info?.isFile() || !info.size) throw new GatewayError(415, 'audio', 'Не удалось получить звуковую дорожку.')
+          response.writeHead(200, { 'content-type': 'audio/mp4', 'content-length': info.size, 'cache-control': 'no-store' })
+          await pipeline(createReadStream(output), response)
+          state = 'done'
+        } finally {
+          response.off('close', disconnect)
+          if (directory) await rm(directory, { recursive: true, force: true })
+          // Пропущенный слот тоже ждёт предыдущий: иначе третья запись обгонит первую.
+          await slot.previous
+          slot.release()
+          controllers.delete(controller)
+          conversions.delete(completion)
+          finished()
+        }
       } else if (request.method === 'GET' && url.pathname === '/v1/usage') {
         kind = 'usage'
         // Телефон проверяет соединение и во время длинной расшифровки. Кеш
@@ -731,7 +832,7 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
     } finally {
       request.resume()
       bytes = request.loriBytes ?? bytes
-      log({ type: 'request', method: request.method, kind: ['health', 'usage', 'transcribe', 'annotate', 'report', 'json'].includes(kind) ? kind : 'unknown', bytes, chars, durationSeconds: (Date.now() - started) / 1000, state, ...(errorCode && { errorCode }) })
+      log({ type: 'request', method: request.method, kind: ['health', 'usage', 'transcribe', 'annotate', 'report', 'convert', 'json'].includes(kind) ? kind : 'unknown', bytes, chars, durationSeconds: (Date.now() - started) / 1000, state, ...(errorCode && { errorCode }) })
     }
   })
   server.requestTimeout = config.uploadTimeout * 1000
@@ -755,6 +856,7 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
         work.job.state = 'cancelled'; finish(work.job); work.resolveDone()
       } else work.reject(new GatewayError(503, 'queue', 'Шлюз останавливается.'))
     }
+    await Promise.allSettled([...conversions])
     if (pumping) await pumping
     for (const timer of expirations) clearTimeout(timer)
     expirations.clear()

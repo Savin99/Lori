@@ -113,6 +113,28 @@ if (content?.includes('[hang]')) {
   event({ event: 'end', kind, id })
 }
 `
+const fakeFFmpegSource = String.raw`
+import { appendFileSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { spawn } from 'node:child_process'
+const args = process.argv.slice(2)
+if (args.includes('-version')) { console.log('ffmpeg fake'); process.exit(0) }
+const input = args[args.indexOf('-i') + 1]
+const content = readFileSync(input, 'utf8')
+const event = (value) => appendFileSync(join(process.env.HOME, 'convert.ndjson'), JSON.stringify(value) + '\n')
+event({ event: 'start', args, input, directory: process.cwd(), mode: statSync(process.cwd()).mode & 511 })
+if (content === 'hang') {
+  const descendant = spawn(process.execPath, ['-e', "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], { stdio: 'ignore' })
+  event({ event: 'descendant', pid: descendant.pid })
+  process.on('SIGTERM', () => {})
+  setInterval(() => {}, 1000)
+} else {
+  await new Promise((done) => setTimeout(done, content === 'slow' ? 350 : 10))
+  if (content === 'bad') process.exitCode = 1
+  else if (content !== 'empty') writeFileSync(args.at(-1), 'converted:' + content)
+  event({ event: 'end' })
+}
+`
 // Абсолютный путь в shebang не зависит от PATH дочернего HOME и launchd.
 // Файл, HTTP-порт и HOME каждого теста свои; наружу тесты не обращаются.
 async function fixture (t, settings = {}, prepare) {
@@ -122,6 +144,9 @@ async function fixture (t, settings = {}, prepare) {
   const bin = join(directory, 'agy')
   await writeFile(bin, `#!${process.execPath}\n` + fakeSource)
   await chmod(bin, 0o755)
+  const ffmpeg = join(directory, 'ffmpeg')
+  await writeFile(ffmpeg, `#!${process.execPath}\n` + fakeFFmpegSource)
+  await chmod(ffmpeg, 0o755)
   const tokenFile = join(directory, 'token')
   await writeFile(tokenFile, TOKEN, { mode: 0o600 })
   const root = join(home, '.gemini/antigravity-cli')
@@ -130,7 +155,7 @@ async function fixture (t, settings = {}, prepare) {
   // и открыть такую базу только на чтение нельзя: на Mac mini чистка падала именно так.
   await executeFile('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'), 'PRAGMA journal_mode=WAL; CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, body);'])
   const config = gatewayConfig({ ...process.env,
-    LORI_AGY_BIN: bin, LORI_AGY_HOME: home, LORI_GATEWAY_TOKEN_FILE: tokenFile,
+    LORI_AGY_BIN: bin, LORI_FFMPEG: ffmpeg, LORI_AGY_HOME: home, LORI_GATEWAY_TOKEN_FILE: tokenFile,
     LORI_GATEWAY_PORT: '0', LORI_AGY_CLEANUP: '1',
     LORI_GATEWAY_ANNOTATE_TIMEOUT_SECONDS: '5', LORI_GATEWAY_REPORT_TIMEOUT_SECONDS: '5', LORI_GATEWAY_TRANSCRIBE_TIMEOUT_SECONDS: '5',
     ...(typeof settings === 'function' ? await settings({ directory, home, root }) : settings)
@@ -778,4 +803,109 @@ test('при повреждённом settings.json отдельного HOME ш
   assert.deepEqual(schema.properties.summary.properties.tasks.items.required, ['text', 'owner', 'due'])
   assert.deepEqual(schema.properties.summary.properties.tasks.items.properties.due.type, ['string', 'null'])
   assert.ok(start.input.includes('Не вычисляй даты'))
+})
+
+async function convertRequest (f, body = 'sound', headers = {}) {
+  return fetch(f.base + '/v1/convert', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'x-lori-filename': encodeURIComponent('Голосовое.webm'), ...headers }, body })
+}
+async function conversionEvents (f) {
+  try { return (await readFile(join(f.home, 'convert.ndjson'), 'utf8')).trim().split('\n').map(JSON.parse) } catch (cause) { if (cause.code === 'ENOENT') return []; throw cause }
+}
+
+test('convert требует тот же токен и ограничивает неверные токены', async (t) => {
+  const f = await fixture(t)
+  for (let index = 0; index < 20; index++) {
+    const response = await convertRequest(f, 'sound', { authorization: 'Bearer wrong' })
+    assert.equal(response.status, index === 19 ? 429 : 401)
+    await response.json()
+  }
+  const blocked = await convertRequest(f)
+  assert.equal(blocked.status, 429)
+  assert.ok(Number(blocked.headers.get('retry-after')) > 0)
+  assert.equal((await conversionEvents(f)).length, 0)
+})
+
+test('convert возвращает M4A потоком, безопасные аргументы, 0700 и убирает временную папку', async (t) => {
+  const f = await fixture(t)
+  assert.equal((await f.request('/v1/health')).body.convert, true)
+  const response = await convertRequest(f, 'secret audio', { 'x-lori-filename': '../../secret;bad.WEBM' })
+  assert.equal(response.status, 200)
+  assert.equal(response.headers.get('content-type'), 'audio/mp4')
+  assert.equal(await response.text(), 'converted:secret audio')
+  const events = await conversionEvents(f)
+  const start = events.find((event) => event.event === 'start')
+  assert.equal(start.mode, 0o700)
+  assert.equal(start.input, join(start.directory, 'input.webm'))
+  assert.deepEqual(start.args.slice(0, 7), ['-nostdin', '-hide_banner', '-loglevel', 'error', '-protocol_whitelist', 'file', '-i'])
+  assert.ok(start.args.includes('0:a:0'))
+  await f.waitFor(async () => existsSync(start.directory), (exists) => !exists)
+  assert.ok(!JSON.stringify(f.logs).includes('secret'))
+  assert.ok(!JSON.stringify(f.logs).includes('WEBM'))
+  assert.equal((await f.events()).filter((event) => event.event === 'start').length, 0)
+})
+
+test('convert проверяет заявленный и фактический размер до ffmpeg', async (t) => {
+  const f = await fixture(t, {}, ({ config }) => { config.maxAudioBytes = 8 })
+  assert.equal((await declaredBody(f.base, '/v1/convert', 9)).status, 413)
+  const response = await convertRequest(f, 'too many bytes')
+  assert.equal(response.status, 413)
+  assert.equal((await response.json()).error.code, 'size')
+  // Без Content-Length: предел должен действовать и для chunked-загрузки.
+  const chunked = await new Promise((resolve, reject) => {
+    const req = httpRequest(f.base + '/v1/convert', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}` } }, (res) => {
+      res.resume(); res.on('end', () => resolve(res.statusCode))
+    })
+    req.on('error', reject); req.write('12345'); req.end('6789')
+  })
+  assert.equal(chunked, 413)
+  assert.deepEqual(await conversionEvents(f), [])
+})
+
+test('convert сообщает отсутствие звука, пустой файл и чистит следы после отказа', async (t) => {
+  const f = await fixture(t)
+  for (const content of ['bad', 'empty', '']) {
+    const response = await convertRequest(f, content)
+    assert.equal(response.status, 415)
+    assert.equal((await response.json()).error.code, 'audio')
+  }
+  const starts = (await conversionEvents(f)).filter((event) => event.event === 'start')
+  for (const { directory } of starts) await f.waitFor(async () => existsSync(directory), (exists) => !exists)
+})
+
+test('convert без ffmpeg — 503 и convert=false в health', async (t) => {
+  const f = await fixture(t, { LORI_FFMPEG: '/no-such-lori-ffmpeg' })
+  assert.equal((await f.request('/v1/health')).body.convert, false)
+  const response = await convertRequest(f)
+  assert.equal(response.status, 503)
+  assert.equal((await response.json()).error.code, 'unavailable')
+})
+
+test('convert таймаут убивает группу процессов и убирает временные файлы', async (t) => {
+  const f = await fixture(t, { LORI_GATEWAY_CONVERT_TIMEOUT_SECONDS: '0.2' })
+  const response = await convertRequest(f, 'hang')
+  assert.equal(response.status, 504)
+  assert.equal((await response.json()).error.code, 'timeout')
+  const events = await conversionEvents(f)
+  const child = events.find((event) => event.event === 'descendant')
+  assert.ok(child)
+  await f.waitFor(async () => alive(child.pid), (exists) => !exists)
+  const { directory } = events.find((event) => event.event === 'start')
+  await f.waitFor(async () => existsSync(directory), (exists) => !exists)
+})
+
+test('convert запускает один ffmpeg, двое ждут, четвёртый получает 429; agy независим', async (t) => {
+  const f = await fixture(t)
+  const first = convertRequest(f, 'slow')
+  await f.waitFor(() => conversionEvents(f), (events) => events.some((event) => event.event === 'start'))
+  const second = convertRequest(f, 'slow')
+  const third = convertRequest(f, 'slow')
+  await delay(70)
+  const fourth = await convertRequest(f)
+  assert.equal(fourth.status, 429)
+  assert.equal(fourth.headers.get('retry-after'), '10')
+  await fourth.json()
+  const job = await f.submit()
+  assert.equal((await f.done(job.id)).state, 'done')
+  for (const response of await Promise.all([first, second, third])) { assert.equal(response.status, 200); await response.text() }
+  assert.deepEqual((await conversionEvents(f)).map((event) => event.event), ['start', 'end', 'start', 'end', 'start', 'end'])
 })
