@@ -37,17 +37,22 @@ final class ImportFormatTests: XCTestCase {
 
     // MARK: - Какие форматы
 
-    /// Текст отказа называет форматы так, как их назвал бы человек, — и обязан совпадать с
-    /// тем, что приложение и правда принимает. Добавили расширение в `audioExtensions`, а
-    /// в тексте забыли — тест падает.
-    func testTheListedFormatsAreExactlyTheAcceptedExtensions() {
+    /// Текст отказа называет ходовые форматы так, как их назвал бы человек, — и каждый
+    /// названный обязан приниматься, причём своим путём: на телефоне или через шлюз.
+    /// Пообещали в тексте формат, которого нет в таблице, — тест падает.
+    func testNamedFormatsAreAcceptedByTheirRoute() {
         let title = ImportInbox.supportedFormatsTitle
-        let local = title.components(separatedBy: ". Через шлюз на Mac mini: ")[0].components(separatedBy: ": ").last!
-        let remote = title.components(separatedBy: ". Через шлюз на Mac mini: ").last!
-        let listed = Set((local + ", " + remote).components(separatedBy: ", ").map { $0.lowercased() })
-        XCTAssertEqual(listed, ImportFormats.allExtensions)
+        for name in ImportFormats.namedOnPhone {
+            XCTAssertTrue(title.contains(name), name)
+            XCTAssertTrue([.original, .phone].contains(ImportFormats.route(for: name.lowercased())), name)
+        }
+        for name in ImportFormats.namedViaGateway {
+            XCTAssertTrue(title.contains(name), name)
+            XCTAssertEqual(ImportFormats.route(for: name.lowercased()), .gateway, name)
+        }
         XCTAssertTrue(title.contains("Telegram и WhatsApp"))
         XCTAssertTrue(title.contains("видео"))
+        XCTAssertTrue(title.contains("через шлюз на Mac mini"))
     }
 
     func testEveryAcceptedExtensionPassesInAnyCase() {
@@ -95,7 +100,7 @@ final class ImportFormatTests: XCTestCase {
 
         XCTAssertTrue(text.contains("Документ.PDF"), text)
         XCTAssertTrue(text.contains(".pdf"), text)
-        for name in ["M4A", "MP3", "WAV", "AAC", "CAF", "AIFF", "MP4", "MOV"] {
+        for name in ImportFormats.namedOnPhone + ImportFormats.namedViaGateway {
             XCTAssertTrue(text.contains(name), "\(name) в: \(text)")
         }
         XCTAssertFalse(text.contains("\n"), "тексты для человека — одной строкой")

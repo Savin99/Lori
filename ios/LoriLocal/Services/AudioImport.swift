@@ -102,9 +102,10 @@ enum AudioImport {
         return duration
     }
 
+    /// `converting` зовётся, когда без перевода не обойтись; `true` — файл уходит на Mac mini.
     static func prepare(
         _ source: URL, in directory: URL, gateway: GatewayClient?,
-        converting: @Sendable () async -> Void = {}
+        converting: @Sendable (_ onMacMini: Bool) async -> Void = { _ in }
     ) async throws -> Prepared {
         let began = Date()
         let name = source.lastPathComponent
@@ -114,7 +115,7 @@ enum AudioImport {
         if route == .original, let info = try? readable(source) {
             return Prepared(url: source, suffix: source.pathExtension, branch: .original, duration: info.duration!, sourceDescription: info.description, elapsed: Date().timeIntervalSince(began))
         }
-        await converting()
+        await converting(route == .gateway)
         let partial = directory.appending(path: ".lori-import-\(UUID().uuidString).partial")
         var keep = false
         defer { if !keep { try? FileManager.default.removeItem(at: partial) } }
@@ -152,6 +153,7 @@ enum AudioImport {
             }
         }
         guard let gateway else { throw ImportError.unreadable(fileName: name) }
+        await converting(true)
         let downloaded = try await gateway.convert(file: source)
         defer { try? FileManager.default.removeItem(at: downloaded) }
         // Ответ шлюза проверяется так же, как результат местного кодера.

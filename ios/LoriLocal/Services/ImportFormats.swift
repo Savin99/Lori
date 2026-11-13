@@ -26,17 +26,20 @@ enum ImportFormats {
         guard let route = route(for: (name as NSString).pathExtension) else { return false }
         return route != .gateway || gatewayConfigured
     }
-    static let supportedFormatsTitle: String = {
-        let local = groups.filter { $0.route != .gateway }.flatMap(\.extensions).sorted().map { $0.uppercased() }.joined(separator: ", ")
-        let remote = groups.first { $0.route == .gateway }!.extensions.sorted().map { $0.uppercased() }.joined(separator: ", ")
-        return "Аудио, голосовые Telegram и WhatsApp, видео: " + local + ". Через шлюз на Mac mini: " + remote
-    }()
+    /// Для текста отказа — так, как назвал бы человек: ходовое, а не полсотни расширений
+    /// таблицы подряд. Что каждый названный формат принимается и своим путём, проверяет тест.
+    static let namedOnPhone = ["OGG", "OPUS", "M4A", "MP3", "WAV", "FLAC", "AAC", "AMR", "MP4", "MOV"]
+    static let namedViaGateway = ["WebM", "MKV", "WMA", "AVI"]
+    static let supportedFormatsTitle = "почти любое аудио и видео: голосовые Telegram и WhatsApp (OGG, OPUS), M4A, MP3, WAV, FLAC, AAC, AMR, MP4, MOV и другие; WebM, MKV, WMA и AVI — через шлюз на Mac mini"
+
+    /// Строка до нажатия — только когда Mac mini точно понадобится. Условную оговорку у
+    /// файлов, которые iPhone обычно читает сам (голосовые Telegram на iOS 27), не пишем: она
+    /// стояла бы под каждым голосовым. Запасной уход такого файла на Mac mini виден строкой
+    /// панели во время перевода — «Перевожу в M4A на Mac mini…».
     static func conversionNotice(for names: [String], gatewayConfigured: Bool) -> String? {
-        guard gatewayConfigured else { return nil }
-        let routes = names.compactMap { route(for: ($0 as NSString).pathExtension) }
-        if routes.contains(.gateway) { return "Перевод в M4A — на Mac mini. Расшифровка — выбранным движком." }
-        if routes.contains(.phone) { return "Если iPhone не откроет звук, перевод в M4A пройдёт на Mac mini." }
-        return nil
+        guard gatewayConfigured,
+              names.contains(where: { route(for: ($0 as NSString).pathExtension) == .gateway }) else { return nil }
+        return "Mac mini переведёт в M4A то, что iPhone не читает."
     }
     struct ImportedType: Sendable {
         let identifier: String

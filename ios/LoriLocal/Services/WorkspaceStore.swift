@@ -62,7 +62,10 @@ final class WorkspaceStore: ObservableObject {
     @Published private(set) var rootPath = ""
     @Published var lastError: String?
     @Published private(set) var convertingImports = 0
+    /// Сколько из них переводит Mac mini: формат только для шлюза или iPhone его не раскодировал.
+    @Published private(set) var convertingOnMacMini = 0
     private var convertingIDs = Set<UUID>()
+    private var macMiniIDs = Set<UUID>()
     private let importGateway: GatewayClient?
 
     private let root: URL
@@ -382,8 +385,24 @@ final class WorkspaceStore: ObservableObject {
         return importedPath(destination, in: relativeDirectory)
     }
 
-    /// Проверка кодека, перевод и запись идут вне главного актора. Имя выбирается
-    /// после перевода (теперь оно может оканчиваться на .m4a), с прежней бронью базы.
+    /// Большая запись копируется и переводится не на главном потоке. Иначе после нажатия
+    /// «Расшифровать» интерфейс замирал на всё время копирования из staging.
+    ///
+    /// Что делает импорт, и почему:
+    /// - **Формат проверяется до работы** (`ImportFormats`), а звук — пробой самого файла
+    ///   (`AudioImport`): расширение пускает на вход, но не обещает, что кодек раскодируется.
+    ///   Всё, кроме хранимых как есть форматов, переводится в M4A — на iPhone, а то, что он
+    ///   не читает, на Mac mini. Иначе запись не играла бы и не расшифровывалась.
+    /// - **Имя уникально по базе, а не по полному имени.** Расшифровка лежит в
+    ///   `Transcripts/<база>.md`, и `Совещание.m4a` рядом с `Совещание.mp3` — или такая же
+    ///   база в `Recordings/` и `Imported/` — делили бы один файл текста: вторая расшифровка
+    ///   затирала бы первую. Имя выбирается после перевода (оно может стать `.m4a`) с прежней
+    ///   бронью базы; занято — получает номер: «Совещание 2.m4a».
+    /// - **Дата изменения — момент импорта.** Список «новые сверху» сортируется по ней, а
+    ///   своей «даты записи» у приложения нет: у принесённой записи это день её принесения.
+    /// - **Файл целиком или никак.** Копия и перевод пишутся под скрытым именем и только потом
+    ///   переименовываются: оборванный посреди файл не должен лежать под настоящим именем и
+    ///   выглядеть записью.
     @discardableResult
     func importFileAsync(
         from externalURL: URL,
@@ -397,11 +416,13 @@ final class WorkspaceStore: ObservableObject {
         let id = UUID()
         defer {
             convertingIDs.remove(id)
+            macMiniIDs.remove(id)
             convertingImports = convertingIDs.count
+            convertingOnMacMini = macMiniIDs.count
         }
         let preparation = Task.detached(priority: .userInitiated) {
-            try await AudioImport.prepare(externalURL, in: directory, gateway: gateway) {
-                await self.markConverting(id)
+            try await AudioImport.prepare(externalURL, in: directory, gateway: gateway) { onMacMini in
+                await self.markConverting(id, onMacMini: onMacMini)
             }
         }
         let prepared = try await withTaskCancellationHandler {
@@ -427,9 +448,11 @@ final class WorkspaceStore: ObservableObject {
         return importedPath(destination, in: relativeDirectory)
     }
 
-    private func markConverting(_ id: UUID) {
+    private func markConverting(_ id: UUID, onMacMini: Bool) {
         convertingIDs.insert(id)
+        if onMacMini { macMiniIDs.insert(id) }
         convertingImports = convertingIDs.count
+        convertingOnMacMini = macMiniIDs.count
     }
 
     /// Откат импорта: убирает файл, который `importFileAsync` только что создал.

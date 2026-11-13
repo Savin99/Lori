@@ -580,7 +580,9 @@ struct ContentView: View {
             speed: speed,
             engine: engine,
             mode: TranscriptionSettings.mode(for: engine.kind),
-            status: workspace.convertingImports > 0 ? "Перевожу в M4A…" : importing > 0 ? "Добавляю \(HomeFormat.records(importing))…" : nil,
+            status: workspace.convertingOnMacMini > 0 ? "Перевожу в M4A на Mac mini…"
+                : workspace.convertingImports > 0 ? "Перевожу в M4A…"
+                : importing > 0 ? "Добавляю \(HomeFormat.records(importing))…" : nil,
             busy: importing > 0,
             actions: ComposerActions(
                 record: startRecording,

@@ -285,7 +285,7 @@ enum ImportError: LocalizedError, Equatable, Sendable {
             let what = suffix.isEmpty
                 ? "У файла «\(fileName)» нет расширения, и по нему не понять, что это за запись."
                 : "Формат «.\(suffix)» (файл «\(fileName)») Lori не расшифровывает."
-            return "\(what) Поддерживаются: \(ImportInbox.supportedFormatsTitle). Пересохрани запись в одном из них и добавь снова."
+            return "\(what) Lori принимает \(ImportInbox.supportedFormatsTitle). Пересохрани запись в одном из этих форматов и добавь снова."
         }
     }
 }

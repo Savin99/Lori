@@ -180,15 +180,36 @@ final class AudioImportTests: XCTestCase {
     }
     func testConversionProgressAndMacMiniNoticeAreHonest() async throws {
         var phases: [Int] = []
+        var macMini: [Int] = []
         let observer = workspace.$convertingImports.sink { phases.append($0) }
-        defer { observer.cancel() }
+        let macMiniObserver = workspace.$convertingOnMacMini.sink { macMini.append($0) }
+        defer { observer.cancel(); macMiniObserver.cancel() }
         _ = try await workspace.importFileAsync(from: FormatFixture.url("opus.ogg"))
         XCTAssertTrue(phases.contains(1))
         XCTAssertEqual(phases.last, 0)
+        XCTAssertFalse(macMini.contains(1), "Ogg Opus переводит сам iPhone")
         XCTAssertNil(ImportFormats.conversionNotice(for: ["voice.webm"], gatewayConfigured: false))
         XCTAssertNil(ImportFormats.conversionNotice(for: ["audio.flac"], gatewayConfigured: true))
-        XCTAssertTrue(ImportFormats.conversionNotice(for: ["voice.webm"], gatewayConfigured: true)?.contains("на Mac mini") == true)
-        XCTAssertTrue(ImportFormats.conversionNotice(for: ["voice.ogg"], gatewayConfigured: true)?.contains("Если iPhone") == true)
+        XCTAssertTrue(ImportFormats.conversionNotice(for: ["voice.webm"], gatewayConfigured: true)?.contains("Mac mini") == true)
+        // Голосовое Telegram iPhone читает сам: условной оговорки под каждым быть не должно.
+        XCTAssertNil(ImportFormats.conversionNotice(for: ["voice.ogg"], gatewayConfigured: true))
+    }
+
+    /// Уход файла на Mac mini виден, пока идёт: и у формата шлюза, и у файла, который
+    /// iPhone не раскодировал сам (MP2 на iOS 27).
+    func testGatewayConversionIsNamedWhileItRuns() async throws {
+        let store = WorkspaceStore(rootURL: directory.appending(path: "Workspace"), importGateway: try gateway())
+        store.start()
+        var macMini: [Int] = []
+        let observer = store.$convertingOnMacMini.sink { macMini.append($0) }
+        defer { observer.cancel() }
+        for name in ["voice.webm", "layer2.mp2"] {
+            macMini.removeAll()
+            _ = try await store.importFileAsync(from: FormatFixture.url(name))
+            XCTAssertTrue(macMini.contains(1), name)
+            XCTAssertEqual(macMini.last, 0, name)
+        }
+        XCTAssertEqual(store.convertingImports, 0)
     }
 
     func testRateAndBitrateSelection() {
