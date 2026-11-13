@@ -70,4 +70,47 @@ final class FormatImportUITests: XCTestCase {
             app.buttons["Записи"].tap()
         }
     }
+    func testShareFromFilesBringsOggAndVideoWithoutStartingAutomatically() throws {
+        let app = launch()
+        let files = XCUIApplication(bundleIdentifier: "com.apple.DocumentsApp")
+        for name in ["Telegram QA 13.11.2026", "Video QA 13.11.2026"] {
+            files.launch()
+            let browse = files.buttons["Обзор"]
+            if browse.waitForExistence(timeout: 5) { browse.tap() }
+            let file = files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", name + ",")).firstMatch
+            for _ in 0..<8 {
+                if file.exists { break }
+                if files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", "Formats,")).firstMatch.exists { folder("Formats", in: files) }
+                else if files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", "Models,")).firstMatch.exists { folder("Models", in: files) }
+                else if files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", "Lori,")).firstMatch.exists { folder("Lori", in: files) }
+                else if files.cells.matching(NSPredicate(format: "label BEGINSWITH %@", "Lori QA,")).firstMatch.exists { folder("Lori QA", in: files) }
+                else if files.cells.matching(NSPredicate(format: "label CONTAINS %@", "iPhone")).firstMatch.exists {
+                    files.cells.matching(NSPredicate(format: "label CONTAINS %@", "iPhone")).firstMatch.tap()
+                } else if files.buttons["DOC.navBarButton.backInHistory"].exists { files.buttons["DOC.navBarButton.backInHistory"].tap() }
+                else { XCTFail(files.debugDescription); return }
+            }
+            XCTAssertTrue(file.waitForExistence(timeout: 5), files.debugDescription)
+            file.coordinate(withNormalizedOffset: CGVector(dx: 0.5, dy: 0.2)).press(forDuration: 1)
+            let share = files.buttons["Поделиться"]
+            XCTAssertTrue(share.waitForExistence(timeout: 5), files.debugDescription)
+            share.tap()
+            let target = files.descendants(matching: .any).matching(NSPredicate(format: "label CONTAINS %@", "Lori QA")).firstMatch
+            if !target.waitForExistence(timeout: 3) {
+                let more = files.buttons.matching(NSPredicate(format: "label BEGINSWITH %@ OR label BEGINSWITH %@", "Еще", "Ещё")).firstMatch
+                XCTAssertTrue(more.waitForExistence(timeout: 5), files.debugDescription)
+                more.tap()
+            }
+            XCTAssertTrue(target.waitForExistence(timeout: 5), files.debugDescription)
+            target.tap()
+            XCTAssertTrue(app.wait(for: .runningForeground, timeout: 10))
+            let transcribe = app.buttons["transcribeButton"]
+            XCTAssertTrue(transcribe.waitForExistence(timeout: 8), app.debugDescription)
+            XCTAssertTrue(app.staticTexts[name].exists)
+            XCTAssertTrue(transcribe.isEnabled, "Поделиться только прикрепляет, не запускает расшифровку")
+            snapshot("format-share-" + name)
+            // Снимаем именно прикреплённое, сохраняя оригинал в Files.
+            app.buttons["detachButton"].tap()
+        }
+    }
+
 }
