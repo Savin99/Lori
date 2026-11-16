@@ -129,7 +129,6 @@ struct ContentView: View {
     /// `id` — путь, и после переименования с экрана записи `sheet(item:)` закрыл бы
     /// лист и открыл заново. Здесь меняется только `entry`, и лист остаётся.
     @State private var opened: OpenedRecord?
-    @State private var showFileImporter = false
     @State private var query = ""
     @State private var isSearching = false
     @State private var startError: String?
@@ -165,12 +164,6 @@ struct ContentView: View {
 
     var body: some View {
         dialogs(sheets(screen))
-            .fileImporter(
-                isPresented: $showFileImporter,
-                allowedContentTypes: ImportFormats.contentTypes,
-                allowsMultipleSelection: true,
-                onCompletion: attachFiles
-            )
             // Только снаружи всех `.sheet`: объект окружения достаётся лишь тому,
             // что лежит внутри обёртки, иначе плашка записи в листе роняет приложение.
             // Сам диктофон приходит из `LoriLocalApp` — выше всех листов.
@@ -591,7 +584,7 @@ struct ContentView: View {
                 cancelRecording: {
                     Task { await recorder.discard() }
                 },
-                pickFile: { showFileImporter = true },
+                pickFile: { FilePicker.present(types: ImportFormats.contentTypes, onPick: attachFiles) },
                 paste: pasteAudio,
                 chooseEngine: { showEnginePicker = true },
                 setMode: { mode in
@@ -761,17 +754,13 @@ struct ContentView: View {
     /// Выбранные файлы прикрепляются к панели, а не уходят в работу сами.
     /// Человек должен увидеть движок и цену до запуска, а не после. Негодный
     /// файл не отменяет остальные: они прикрепляются, а о нём — одно сообщение.
-    private func attachFiles(_ result: Result<[URL], Error>) {
-        switch result {
-        case let .success(urls):
-            // Копия снимается сразу: доступ к чужому файлу живёт, пока держат
-            // security scope, а до нажатия «Расшифровать» проходит сколько угодно.
-            let report = ImportInbox.stageAll(urls)
-            composer.attach(report.staged)
-            notice = ImportNotice.rejected(report.rejected.map(\.message))
-        case let .failure(error):
-            workspace.lastError = error.localizedDescription
-        }
+    private func attachFiles(_ urls: [URL]) {
+        // Копия снимается сразу: та, что сделало окно выбора, лежит во временной
+        // папке, которую система вправе чистить, пока файл ждёт «Расшифровать».
+        let report = ImportInbox.stageAll(urls)
+        ImportInbox.discardPickerCopies(urls)
+        composer.attach(report.staged)
+        notice = ImportNotice.rejected(report.rejected.map(\.message))
     }
 
     /// «Поделиться» → Lori и Быстрые команды: файл уже лежит в промежуточной

@@ -3533,3 +3533,35 @@ ZIP и обе версии 1.0 (15) проверены; owner-ресурс кл�
 
 Проверено: модульный LoriQA, **942 теста, 5 пропусков, 0 ошибок** (iPhone 18 Pro, iOS 27.0,
 без `WhisperKitIntegrationTests`). На телефоне не проверялось.
+
+## «Открыть» в окне выбора файлов ничего не делало (16 ноября 2026, вечер)
+
+Владелец: файл в «Загрузках» (скачан Safari, то есть iCloud Drive → Downloads) отмечается, «Открыть»
+нажимается, окно выбора остаётся открытым — ни ошибки, ни файла. Журнал Lori пуст: до приложения
+выбор не дошёл. В симуляторе (iOS 27.0, файл в контейнере Lori QA) всё работало.
+
+Системный журнал телефона (`log collect --device-udid … --last 5m`, нужен root — через
+`osascript … with administrator privileges`; перед этим `devicectl manage pair`: новый Мак с
+телефоном сопряжён не был) показал причину:
+
+```
+LoriLocal  [FileProvider] Could not resolve bookmark. Error: NSError: Cocoa 257
+LoriLocal  [DocumentManager] Tried to call delegate -documentBrowser:didPickDocumentURLs: with an
+           empty array of items. This indicates the items failed to be prepared and materialized on disk
+```
+
+`.fileImporter` открывает файл **на месте**: Lori получает закладку на чужой файл и разрешает её
+сама. Здесь не хватило прав (257 — `NSFileReadNoPermissionError`), система отдала пустой список
+и не вызвала обработчик, окно так и осталось висеть. Почему прав нет именно на этом телефоне
+(подпись IPA Shelf, iOS 27.2.1, iCloud Drive) — не выяснено и для лечения не нужно.
+
+Сделано: `FilePicker` — `UIDocumentPickerViewController(forOpeningContentTypes:asCopy: true)`,
+показанный через UIKit (не `.sheet`: окно закрывается само, и обёртка SwiftUI осталась бы висеть
+пустой). В режиме копии файл копирует само окно выбора, у него доступ есть. Lori делала копию и
+раньше (`ImportInbox.stage`), так что поведение не меняется; копии окна выбора
+(`tmp/<bundle id>-Inbox`) убирает `ImportInbox.discardPickerCopies`.
+
+Проверено: временный UI-тест в симуляторе — «Отменить» закрывает окно, два файла через «Открыть»
+прикрепляются к панели («Расшифровать 2 файла»), `tmp/…-Inbox` после приёма пуст; модульный LoriQA
+**944 теста, 5 пропусков, 0 ошибок**. Сам случай «нет прав на закладку» в симуляторе не
+воспроизводится — подтверждение только на телефоне.

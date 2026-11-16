@@ -209,6 +209,17 @@ enum ImportInbox {
         try? FileManager.default.removeItem(at: url)
     }
 
+    /// Окно выбора в режиме копии кладёт файлы во временную папку Lori
+    /// (`tmp/<bundle id>-Inbox`). После приёма они не нужны: принятое уже в промежуточной
+    /// папке, отвергнутое — тем более. Убирается только своё, во временной папке и вне
+    /// промежуточной.
+    static func discardPickerCopies(_ urls: [URL]) {
+        let temporary = comparablePath(FileManager.default.temporaryDirectory) + "/"
+        for url in urls where comparablePath(url).hasPrefix(temporary) && !isStaged(url) {
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     static func isStaged(_ url: URL) -> Bool {
         url.path.hasPrefix(staging.path)
     }

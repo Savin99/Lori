@@ -121,6 +121,31 @@ final class ImportInboxTests: XCTestCase {
         XCTAssertEqual(ImportInbox.waiting().count, 1)
     }
 
+    /// Окно выбора в режиме копии оставляет файл во временной папке Lori: после приёма
+    /// его копия уходит, а принятое лежит в промежуточной.
+    func testPickerCopyIsDiscardedAfterStaging() throws {
+        let pickerCopy = try outsideFile(named: "audio.m4a")
+
+        let report = ImportInbox.stageAll([pickerCopy])
+        ImportInbox.discardPickerCopies([pickerCopy] + report.staged)
+
+        XCTAssertFalse(manager.fileExists(atPath: pickerCopy.path))
+        XCTAssertEqual(report.staged.count, 1)
+        XCTAssertTrue(manager.fileExists(atPath: report.staged[0].path), "принятое не трогается")
+    }
+
+    /// Файл вне временной папки — чужой, даже если его передали как копию окна выбора.
+    func testDiscardingPickerCopiesLeavesForeignFilesAlone() throws {
+        let documents = manager.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        let foreign = documents.appending(path: "\(UUID().uuidString).m4a")
+        try Data([7]).write(to: foreign)
+        defer { try? manager.removeItem(at: foreign) }
+
+        ImportInbox.discardPickerCopies([foreign])
+
+        XCTAssertTrue(manager.fileExists(atPath: foreign.path))
+    }
+
     // MARK: - Подготовка
 
     private func inboxFile(named name: String) throws -> URL {
