@@ -787,7 +787,7 @@ struct ContentView: View {
         // «Расшифровать» из островка при движке на телефоне открывает Lori ссылкой:
         // это не файл, а просьба закончить запись.
         guard !recorder.open(url) else { return }
-        let report = ImportInbox.stageAll([url])
+        let report = ImportInbox.receive(url)
         composer.attach(report.staged)
         if let message = ImportNotice.rejected(report.rejected.map(\.message)) { notice = message }
     }

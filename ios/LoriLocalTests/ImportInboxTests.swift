@@ -84,6 +84,43 @@ final class ImportInboxTests: XCTestCase {
         XCTAssertEqual(ImportInbox.drainSystemInbox(), [])
     }
 
+    /// «Поделиться» из Диктофона: разбор Inbox на возвращении в приложение успел раньше
+    /// `onOpenURL`, и тот пришёл с адресом уже перенесённого файла. Раньше это давало
+    /// «Файл не добавлен … такого файла не существует» над прикреплённым файлом.
+    func testOpenURLAfterInboxWasCollectedIsNotARefusal() throws {
+        let source = try inboxFile(named: "Новая запись 150.m4a")
+        let collected = ImportInbox.collectSystemInbox()
+
+        let report = ImportInbox.receive(source)
+
+        XCTAssertEqual(collected.staged.count, 1)
+        XCTAssertEqual(report, ImportInbox.StagingReport(), "файл уже прикреплён, отказа быть не должно")
+        XCTAssertEqual(ImportInbox.waiting().count, 1, "второй копии быть не должно")
+    }
+
+    /// Тот же адрес, но с `/private` впереди — так его отдаёт система на телефоне.
+    func testOpenURLWithPrivatePrefixIsStillTheInbox() throws {
+        let source = try inboxFile(named: "Совещание.m4a")
+        let systemForm = URL(filePath: "/private" + source.path)
+        _ = ImportInbox.collectSystemInbox()
+
+        XCTAssertEqual(ImportInbox.receive(systemForm), ImportInbox.StagingReport())
+    }
+
+    /// `onOpenURL` пришёл первым: файл принимается, и разбор Inbox после него
+    /// не находит ничего второй раз.
+    func testOpenURLBeforeInboxCollectionStagesOnce() throws {
+        let source = try inboxFile(named: "Новая запись 151.m4a")
+
+        let report = ImportInbox.receive(source)
+        let collected = ImportInbox.collectSystemInbox()
+
+        XCTAssertEqual(report.staged.count, 1)
+        XCTAssertEqual(report.rejected, [])
+        XCTAssertEqual(collected, ImportInbox.StagingReport())
+        XCTAssertEqual(ImportInbox.waiting().count, 1)
+    }
+
     // MARK: - Подготовка
 
     private func inboxFile(named name: String) throws -> URL {

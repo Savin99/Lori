@@ -134,6 +134,21 @@ enum ImportInbox {
         return report
     }
 
+    /// Адрес из `onOpenURL`.
+    ///
+    /// Система будит приложение двумя сигналами сразу — сменой `scenePhase` на `active` и
+    /// `onOpenURL`, — и порядок между ними не задан. Если первым успел разбор
+    /// `Documents/Inbox`, файл уже перенесён в промежуточную папку и прикреплён, а адрес из
+    /// `onOpenURL` указывает в пустоту. Это не отказ: показывать «Файл не добавлен» над
+    /// прикреплённым файлом нельзя.
+    static func receive(_ url: URL) -> StagingReport {
+        guard isInSystemInbox(url), !FileManager.default.fileExists(atPath: url.path) else {
+            return stageAll([url])
+        }
+        Diagnostics.note("импорт: «\(url.lastPathComponent)» уже забран из Inbox при возвращении в приложение")
+        return StagingReport()
+    }
+
     /// Всё, что система успела положить в `Documents/Inbox` мимо `onOpenURL` —
     /// например, пока приложение было закрыто, — вместе с тем, что пришлось отвергнуть.
     ///
@@ -199,7 +214,16 @@ enum ImportInbox {
     }
 
     private static func isInSystemInbox(_ url: URL) -> Bool {
-        url.path.hasPrefix(systemInbox.path)
+        comparablePath(url).hasPrefix(comparablePath(systemInbox) + "/")
+    }
+
+    /// На телефоне `onOpenURL` отдаёт адрес из Inbox как `/private/var/mobile/…`, а
+    /// `FileManager` называет ту же папку `/var/mobile/…`: `/var` там ссылка на
+    /// `/private/var`. Без выравнивания файл из Inbox принимался за чужой — его копировали,
+    /// а не переносили.
+    private static func comparablePath(_ url: URL) -> String {
+        let path = url.standardizedFileURL.path
+        return path.hasPrefix("/private/") ? String(path.dropFirst("/private".count)) : path
     }
 
     /// Чистый старт для UI-тестов. Принесённый файл намеренно переживает
