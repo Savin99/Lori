@@ -25,7 +25,10 @@ struct RecordingTranscriptLine: View {
                     replica
                 }
             } else {
-                HStack(alignment: .top, spacing: 12) {
+                // По базовой линии, а не по верху: подпись в кружке, время и первая строка
+                // (имя или реплика) встают на одну линию. Кружок 28 pt, прижатый к верху,
+                // висел ниже строки 16 pt (владелец, 16 ноября 2026).
+                HStack(alignment: .firstTextBaseline, spacing: 12) {
                     if timeColumn != nil { time }
                     avatar
                     VStack(alignment: .leading, spacing: 3) { speakerName; replica }
