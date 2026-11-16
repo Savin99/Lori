@@ -57,13 +57,10 @@ final class TranscriptScreenUITests: XCTestCase {
             app.staticTexts.matching(NSPredicate(format: "label BEGINSWITH %@", "Расшифровано")).firstMatch.exists,
             "пока «…» закрыта, движка на экране нет"
         )
-        // Дата с длительностью и тема — одной строкой, раз вместе влезают.
-        let chip = app.buttons["topicChip"]
-        XCTAssertEqual(
-            app.descendants(matching: .any).matching(identifier: "topicChip").count, 1,
-            "тема назначается прямо с экрана записи"
-        )
-        XCTAssertLessThanOrEqual(chip.frame.maxX, app.frame.maxX, "чипы переносятся без обрезки")
+        // Метаданные — одной строкой текста, без чипов; тема назначается из «…»
+        // (владелец, 16 ноября 2026).
+        XCTAssertFalse(app.buttons["topicChip"].exists, "чипа темы в шапке нет")
+        XCTAssertLessThanOrEqual(meta.frame.maxX, app.frame.maxX, "строка метаданных переносится без обрезки")
         XCTAssertFalse(
             app.descendants(matching: .any)["transcriptionStatus"].exists,
             "у расшифрованной записи блока состояния нет"
@@ -544,9 +541,10 @@ final class TranscriptScreenUITests: XCTestCase {
     }
 
     private func assignTopic(_ topic: String, in app: XCUIApplication) {
-        let chip = app.buttons["topicChip"]
-        guard chip.waitForExistence(timeout: 3), !chip.label.contains(topic) else { return }
-        tap(chip)
+        let meta = app.descendants(matching: .any)["recordingMeta"]
+        guard meta.waitForExistence(timeout: 3), !meta.label.contains(topic) else { return }
+        tap(app.navigationBars.firstMatch.buttons["transcriptMenu"])
+        tap(app.buttons["Тема"])
         let existing = app.buttons[topic]
         if existing.waitForExistence(timeout: 3) {
             tap(existing)
@@ -557,7 +555,7 @@ final class TranscriptScreenUITests: XCTestCase {
             field.typeText(topic + "\n")
         }
         XCTAssertTrue(app.descendants(matching: .any)["newTopicField"].waitForNonExistence(timeout: 5))
-        _ = chip.waitForExistence(timeout: 3)
+        _ = meta.waitForExistence(timeout: 3)
     }
 
     private func nameFirstSpeaker(_ name: String, in app: XCUIApplication) {

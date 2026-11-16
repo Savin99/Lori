@@ -79,7 +79,7 @@ enum LoriPalette {
 /// иначе интерфейс не реагирует на системный размер текста.
 enum LoriFont {
     static let display = Font.custom("Georgia", size: 30, relativeTo: .largeTitle)
-    static let recordingTitle = Font.custom("Georgia", size: 32, relativeTo: .title)
+    static let recordingTitle = Font.custom("Georgia", size: 26, relativeTo: .title)
     static let reportTitle = Font.custom("Georgia", size: 24, relativeTo: .title2)
     static let reportSection = Font.custom("Georgia", size: 20, relativeTo: .title3)
     static let noteSection = Font.custom("Georgia", size: 21, relativeTo: .title3)

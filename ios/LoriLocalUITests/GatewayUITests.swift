@@ -182,10 +182,10 @@ final class GatewayUITests: XCTestCase {
         XCTAssertEqual(restored.value as? String, "Выполнено")
         reloaded.swipeDown()
         let transcript = reloaded.buttons["recordingTab.transcript"]
-        XCTAssertEqual(reloaded.buttons["recordingTab.summary"].value as? String, "Выбрана")
+        XCTAssertTrue(reloaded.buttons["recordingTab.summary"].isSelected, "системный сегмент сообщает выбор признаком isSelected")
         XCTAssertFalse(reloaded.descendants(matching: .any)["transcriptLines"].exists)
         transcript.tap()
-        XCTAssertEqual(transcript.value as? String, "Выбрана")
+        XCTAssertTrue(transcript.isSelected, "системный сегмент сообщает выбор признаком isSelected")
         XCTAssertTrue(reloaded.descendants(matching: .any)["transcriptLines"].waitForExistence(timeout: 5))
         XCTAssertFalse(reloaded.buttons["summaryTask.0"].exists)
         save("note-transcript-tab-light")

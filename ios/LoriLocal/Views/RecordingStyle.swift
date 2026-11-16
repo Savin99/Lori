@@ -54,21 +54,6 @@ struct RecordingFlow: Layout {
     }
 }
 
-struct RecordingChip: View {
-    let text: String
-    var icon: String? = nil
-    var body: some View {
-        HStack(spacing: 6) {
-            if let icon { Image(systemName: icon).recordingFont(14, relativeTo: .footnote).accessibilityHidden(true) }
-            Text(text).recordingFont(13, relativeTo: .footnote).fixedSize(horizontal: false, vertical: true)
-        }
-        .foregroundStyle(LoriPalette.chipText)
-        .padding(.horizontal, 11)
-        .frame(minHeight: 30)
-        .padding(.vertical, 0)
-        .background(LoriPalette.chip, in: Capsule())
-    }
-}
 
 /// Цвет привязан к метке, инициал — к назначенному имени.
 struct RecordingAvatar: View {

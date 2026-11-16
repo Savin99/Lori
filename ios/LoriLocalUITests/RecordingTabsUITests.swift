@@ -33,7 +33,7 @@ final class RecordingTabsUITests: XCTestCase {
         top(app)
         let tab = app.buttons["recordingTab." + name]
         tab.tap()
-        XCTAssertEqual(tab.value as? String, "Выбрана")
+        XCTAssertTrue(tab.isSelected, "системный сегмент сообщает выбор признаком isSelected")
         XCTAssertGreaterThanOrEqual(tab.frame.height, 44)
     }
     private func reveal(_ element: XCUIElement, _ app: XCUIApplication) {
@@ -46,7 +46,7 @@ final class RecordingTabsUITests: XCTestCase {
     }
     func testCardsTasksAndPersistentCompletion() {
         let app = launch()
-        XCTAssertEqual(app.buttons["recordingTab.summary"].value as? String, "Выбрана")
+        XCTAssertTrue(app.buttons["recordingTab.summary"].isSelected, "системный сегмент сообщает выбор признаком isSelected")
         XCTAssertTrue(app.staticTexts["Суть записи"].exists)
         XCTAssertFalse(app.staticTexts["Главное"].exists)
         XCTAssertTrue(app.staticTexts["Решения"].exists)
@@ -84,8 +84,8 @@ final class RecordingTabsUITests: XCTestCase {
         XCTAssertTrue(reportPosition.hasPrefix("0:4"), "фактическая позиция после чипа: \(reportPosition)")
         select("transcript", app)
         XCTAssertFalse(app.textFields["Найти в расшифровке"].exists)
-        XCTAssertEqual(app.descendants(matching: .any)["speakerShare.S1"].label, "Анна · 62%")
-        XCTAssertEqual(app.descendants(matching: .any)["speakerShare.S2"].label, "Борис · 38%")
+        // Ряд чипов говорящих убран: он повторял кружки у реплик (владелец, 16 ноября 2026).
+        XCTAssertFalse(app.descendants(matching: .any)["speakerShare.S1"].exists)
         let stamp = app.buttons.matching(identifier: "lineTime").element(boundBy: 2)
         reveal(stamp, app)
         XCTAssertEqual(stamp.label, "4:12")

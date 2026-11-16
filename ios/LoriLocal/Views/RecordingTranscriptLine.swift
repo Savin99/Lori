@@ -69,8 +69,10 @@ struct RecordingTranscriptLine: View {
                 .accessibilityIdentifier("speakerDot")
         }
     }
+    /// Имя над репликой — только назначенное: «S1» уже стоит в кружке рядом, и
+    /// подпись повторяла бы его у каждой реплики (владелец, 16 ноября 2026).
     @ViewBuilder private var speakerName: some View {
-        if let name {
+        if let name, name != label {
             Text(name + (active ? " · сейчас звучит" : ""))
                 .recordingFont(13, weight: .semibold, relativeTo: .footnote)
                 .foregroundStyle(active ? LoriPalette.lime : LoriPalette.muted)

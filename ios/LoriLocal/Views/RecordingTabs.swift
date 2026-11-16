@@ -13,16 +13,36 @@ enum RecordingTab: String, CaseIterable {
     }
 }
 
+/// Системный сегмент: на iOS 26+ это Liquid Glass с родной «линзой» выбора и её
+/// анимацией. Прежние самодельные сегменты (макет Granola, 9 ноября) владелец
+/// 16 ноября забраковал — «ни анимации, ни внешнего вида».
+///
+/// С XXL системный сегмент режет «Расшифровку» до многоточия, поэтому на крупном
+/// шрифте вкладки встают столбцом кнопок с целыми подписями.
 struct RecordingTabs: View {
     @Binding var selection: RecordingTab
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
-        let layout = typeSize >= .xxLarge
-            ? AnyLayout(VStackLayout(spacing: 4))
-            : AnyLayout(HStackLayout(spacing: 4))
-        layout {
+        if typeSize >= .xxLarge { stacked } else { segmented }
+    }
+
+    private var segmented: some View {
+        Picker("Содержание записи", selection: $selection) {
+            ForEach(RecordingTab.allCases, id: \.self) { tab in
+                Text(tab.title)
+                    .tag(tab)
+                    .accessibilityIdentifier("recordingTab.\(tab.rawValue)")
+            }
+        }
+        .pickerStyle(.segmented)
+        .controlSize(.large)
+        .accessibilityIdentifier("recordingTabs")
+    }
+
+    private var stacked: some View {
+        VStack(spacing: 4) {
             ForEach(Array(RecordingTab.allCases.enumerated()), id: \.element) { index, tab in
                 Button {
                     withAnimation(reduceMotion ? nil : .easeInOut(duration: 0.2)) { selection = tab }
@@ -33,15 +53,9 @@ struct RecordingTabs: View {
                         .multilineTextAlignment(.center)
                         .fixedSize(horizontal: false, vertical: true)
                         .frame(maxWidth: .infinity, minHeight: 44)
-                        .padding(.vertical, typeSize >= .xxLarge ? 4 : 0)
+                        .padding(.vertical, 4)
                         .background {
-                            if selection == tab {
-                                RoundedRectangle(cornerRadius: 12).fill(LoriPalette.raised)
-                                    .overlay(alignment: .top) {
-                                        Capsule().fill(.white.opacity(0.08)).frame(height: 1).padding(.horizontal, 12)
-                                    }
-                                    .shadow(color: .black.opacity(0.35), radius: 4, y: 2)
-                            }
+                            if selection == tab { RoundedRectangle(cornerRadius: 12).fill(LoriPalette.raised) }
                         }
                         .contentShape(Rectangle())
                 }

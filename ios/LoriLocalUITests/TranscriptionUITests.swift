@@ -113,8 +113,8 @@ final class TranscriptionUITests: XCTestCase {
         )
         XCTAssertTrue(app.buttons["Записи"].exists, "видно, куда возвращает кнопка")
         XCTAssertTrue(
-            app.descendants(matching: .any)["topicChip"].exists,
-            "тема назначается прямо с экрана записи"
+            app.navigationBars.firstMatch.buttons["transcriptMenu"].exists,
+            "тема назначается из «…» экрана записи"
         )
         save(XCUIScreen.main.screenshot(), named: "transcript-screen")
 

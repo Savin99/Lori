@@ -17,6 +17,7 @@ struct TranscriptScreen: View {
     @Environment(\.dismiss) private var dismiss
     @Environment(\.openURL) private var openURL
     @Environment(\.dynamicTypeSize) private var typeSize
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// Плеер лежит в `@State`, а не в `@StateObject`: позиция публикуется каждые
     /// 60 мс, и экран, подписанный на неё целиком, пересобирал бы шапку, блок
     /// состояния и сотни реплик на каждом тике. На плеер подписана только его
@@ -116,12 +117,15 @@ struct TranscriptScreen: View {
                 VStack(alignment: .leading, spacing: 0) {
                     header
                     RecordingTabs(selection: tabSelection)
-                        .padding(.top, 20)
+                        .padding(.top, 18)
                     tabContent
-                        .padding(.top, activeTab == .transcript ? 0 : 16)
+                        .id(activeTab)
+                        .transition(.opacity)
+                        .padding(.top, activeTab == .transcript ? 8 : 16)
                 }
+                .animation(reduceMotion ? nil : .smooth(duration: 0.25), value: activeTab)
                 .padding(.horizontal, 18)
-                .padding(.top, 22)
+                .padding(.top, 12)
                 .padding(.bottom, 32)
             }
             .accessibilityIdentifier("recordingScroll")
@@ -238,7 +242,6 @@ struct TranscriptScreen: View {
             VStack(alignment: .leading, spacing: 0) {
                 if let status { statusBlock(status).padding(.bottom, 16) }
                 notices
-                speakerChips
                 transcriptText.padding(.top, 6)
             }
         }
@@ -405,19 +408,31 @@ struct TranscriptScreen: View {
 
     private var header: some View {
         let resolved = recordTitle
-        return VStack(alignment: .leading, spacing: 0) {
-            titleView(resolved.title).padding(.horizontal, 2)
-
-            RecordingFlow(spacing: 6) {
-                RecordingChip(text: titleActivity ?? RecordClock.chipDate(entry.modifiedAt), icon: "calendar")
-                    .accessibilityLabel(titleActivity ?? "Записано \(RecordClock.date(entry.modifiedAt))")
-                    .accessibilityIdentifier("recordingMeta")
-                if audioDuration > 0 { RecordingChip(text: RecordClock.time(audioDuration), icon: "clock") }
-                if !speakerLabels.isEmpty { RecordingChip(text: participantTitle, icon: "person.2") }
-                topicChip
-            }.padding(.top, 14)
-
+        return VStack(alignment: .leading, spacing: 6) {
+            titleView(resolved.title)
+            metaLine
         }
+        .padding(.horizontal, 2)
+    }
+
+    /// Дата, длительность, говорящие и тема — одной тихой строкой под заголовком.
+    /// Чипами (владелец, 16 ноября 2026) они занимали две строки и спорили с заголовком
+    /// за внимание; назначают тему теперь из «…», здесь она только названа.
+    private var metaLine: some View {
+        let topic = topics.topic(for: path)
+        let parts = [titleActivity ?? RecordClock.chipDate(entry.modifiedAt)]
+            + (audioDuration > 0 ? [RecordClock.time(audioDuration)] : [])
+            + (speakerLabels.isEmpty ? [] : [participantTitle])
+            + (topic.map { [$0] } ?? [])
+        return Text(parts.joined(separator: " · "))
+            .recordingFont(15, relativeTo: .subheadline)
+            .foregroundStyle(LoriPalette.muted)
+            .fixedSize(horizontal: false, vertical: true)
+            .accessibilityLabel(
+                ([titleActivity ?? "Записано \(RecordClock.date(entry.modifiedAt))"] + Array(parts.dropFirst()))
+                    .joined(separator: ", ")
+            )
+            .accessibilityIdentifier("recordingMeta")
     }
 
     /// Georgia связывает имя записи с заголовками итога/отчёта; основной текст
@@ -472,17 +487,6 @@ struct TranscriptScreen: View {
         return "Расшифровано\(place): \(name)"
     }
 
-    private var topicChip: some View {
-        let topic = topics.topic(for: path)
-        return Button { sheet = .topics } label: {
-            RecordingChip(text: topic ?? "+ Тема", icon: "folder")
-                .frame(minHeight: 44).contentShape(Rectangle()).padding(.vertical, -7)
-        }
-        .buttonStyle(.plain)
-        .accessibilityLabel(topic.map { "Тема: \($0)" } ?? "Тема не выбрана")
-        .accessibilityHint("Выбрать тему записи")
-        .accessibilityIdentifier("topicChip")
-    }
 
     private var speakerLabels: [String] {
         Array(Set(document.lines.compactMap(\.speaker))).sorted { $0.localizedStandardCompare($1) == .orderedAscending }
@@ -496,27 +500,6 @@ struct TranscriptScreen: View {
         return "\(count) \(word)"
     }
 
-    @ViewBuilder private var speakerChips: some View {
-        if !speakerLabels.isEmpty {
-            RecordingFlow(spacing: 6) {
-                ForEach(speakerLabels, id: \.self) { label in
-                    let name = speakers.name(of: label, in: path)
-                    HStack(spacing: 6) {
-                        Circle().fill((Int(label.filter(\.isNumber)) ?? 1).isMultiple(of: 2) ? LoriPalette.accentAlt : LoriPalette.lime)
-                            .frame(width: 8, height: 8).accessibilityHidden(true)
-                        Text(name + (document.speechShares[label].map { " · \(Int(($0 * 100).rounded()))%" } ?? ""))
-                            .recordingFont(13, relativeTo: .footnote).foregroundStyle(LoriPalette.chipText)
-                    }
-                    .padding(.horizontal, 11).frame(minHeight: 28)
-                    .background(LoriPalette.chip, in: Capsule())
-                    .onLongPressGesture { beginNaming(label) }
-                    .accessibilityAction(named: "Назвать говорящего") { beginNaming(label) }
-                    .accessibilityElement(children: .combine)
-                    .accessibilityIdentifier("speakerShare.\(label)")
-                }
-            }.padding(.horizontal, 2).padding(.top, 14)
-        }
-    }
 
     // MARK: - Поделиться и скопировать
 
