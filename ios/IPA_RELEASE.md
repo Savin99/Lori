@@ -1,12 +1,16 @@
 # Выпуск IPA для IPA Shelf
 
-Общая папка: `~/Library/Mobile Documents/com~apple~CloudDocs/IPA Shelf` (iCloud Drive → **IPA Shelf**).
+С 16.11.2026 сборки идут на **полку IPA на старом Маке** через `ipa-shelf publish`
+(`~/Projects/IPAShelf/shelf/README.md`); телефон забирает их дома по Wi-Fi и вне дома через VPS.
+Папка iCloud Drive → **IPA Shelf** — только по явному `--cloud` (или `IPA_SHELF_DIR`), либо если
+`ipa-shelf` не установлен. На время «Установить» в IPA Shelf на телефоне выключите VPN:
+иначе «A TLS error caused the secure connection to fail».
 
-После обычных проверок проекта и повышения номера сборки запускайте `tools/release-ipa.sh`. Команда собирает Release для iPhone, сохраняет локальную IPA и публикует её в общей папке. Для уже готовой IPA: `python3 tools/ipa-release.py --publish-only /полный/путь/приложение.ipa`.
+После обычных проверок проекта и повышения номера сборки запускайте `tools/release-ipa.sh`. Команда собирает Release для iPhone, сохраняет локальную IPA и публикует её на полку. Для уже готовой IPA: `python3 tools/ipa-release.py --publish-only /полный/путь/приложение.ipa` или `ipa-shelf publish <файл>`.
 
-- `--no-cloud`: только сборка и локальная упаковка.
+- `--no-cloud`: только сборка и локальная упаковка, без публикации.
 - `--force`: явно разрешить замену той же version/build другим содержимым или откат.
-- `IPA_SHELF_DIR`: переопределить общую папку, например для проверки без iCloud.
+- `--cloud` / `IPA_SHELF_DIR`: публиковать в папку iCloud (или указанную), а не на полку.
 - Имя в общей папке: `<BundleID>--<version>--<build>.ipa`, все поля читаются из настоящего Info.plist архива.
 - **«Ошибка выпуска: File is not a zip file» при готовой локальной IPA** — прошлая сборка в iCloud выгружена с Mac (`ls -lO` показывает `dataless`), и скрипт не может прочитать её версию для проверки отката. Так было 24 октября 2026 со сборкой 9. Лечение: `brctl download "<папка IPA Shelf>/<BundleID>--<version>--<build>.ipa"`, дождаться, пока из `ls -lO` уйдёт `dataless`, затем `python3 tools/ipa-release.py --project-root <ios> --publish-only build/dist/LoriLocal-unsigned.ipa` — без пересборки.
 - Системный диск почти полон: каталог сборки выпуска передаётся абсолютным путём на внешний диск — `tools/release-ipa.sh --derived-data /Volumes/Movis/Mac-data/LoriWork/dd-release` (последний `--derived-data` побеждает).

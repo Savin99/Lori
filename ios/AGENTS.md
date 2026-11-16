@@ -2,7 +2,7 @@
 
 ## IPA release destination
 
-Owner configuration (2026-09-22): release IPA files go to iCloud Drive → **IPA Shelf** via `tools/release-ipa.sh`; see [IPA_RELEASE.md](IPA_RELEASE.md). For an existing IPA use `python3 tools/ipa-release.py --publish-only <path>`. Publish atomically and replace only previous managed files with the same Bundle ID. Never delete other apps from the shared folder. These are unsigned artifacts for later signing, not proof of installability.
+Owner configuration (2026-11-16): release IPA files go to the **IPA shelf on the old Mac** via `tools/release-ipa.sh` (it calls `ipa-shelf publish`; iCloud Drive → IPA Shelf only with explicit `--cloud`); see [IPA_RELEASE.md](IPA_RELEASE.md). For an existing IPA use `python3 tools/ipa-release.py --publish-only <path>`. Publish atomically and replace only previous managed files with the same Bundle ID. Never delete other apps from the shared folder. These are unsigned artifacts for later signing, not proof of installability.
 
 ## Scope
 
