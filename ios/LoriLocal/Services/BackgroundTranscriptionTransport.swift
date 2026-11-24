@@ -95,6 +95,12 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     /// несколько килобайт, а экрану и полосе хватает целых процентов.
     private var reporters: [String: @Sendable (TransferPhase) -> Void] = [:]
     private var lastMark: [String: Int] = [:]
+    /// Отслеживает зависшие загрузки тела: в фоновой сессии `nsurlsessiond` при
+    /// обрыве канала может держать задачу на 2% часами без ошибки.
+    private var sendingTasks: [String: UploadStallTracker] = [:]
+    private var stalledTaskIDs: Set<Int> = []
+    private var stallTimer: DispatchSourceTimer?
+    private static let stallTickSeconds = 15
     /// То, что читают с главного потока, — под своим замком, а не на `queue`.
     ///
     /// Очередь транспорта пишет на диск тело запроса (запись в десятки мегабайт), и
@@ -225,8 +231,23 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                             }
                             if let live = tasks.first(where: { $0.taskDescription == id && $0.state != .completed }) {
                                 self.visible.withLock { _ = $0.inSystem.insert(id) }
-                                self.publish(id, TransferPhase.from(sent: live.countOfBytesSent, expected: live.countOfBytesExpectedToSend))
-                                Journal.append("передача: запрос задания уже у системы — жду его ответ, новый не отправляю")
+                                let sent = live.countOfBytesSent
+                                let expected = live.countOfBytesExpectedToSend
+                                let endpoint = Self.describeEndpoint(live.originalRequest?.url ?? request.url)
+                                self.publish(id, TransferPhase.from(sent: sent, expected: expected))
+                                if expected > 0, sent < expected {
+                                    self.sendingTasks[id] = UploadStallTracker(
+                                        taskIdentifier: live.taskIdentifier,
+                                        endpoint: endpoint,
+                                        expected: expected,
+                                        lastSent: max(0, sent)
+                                    )
+                                    self.ensureStallTimerLocked()
+                                }
+                                Journal.append(
+                                    "передача: запрос задания уже у системы (\(endpoint), задача #\(live.taskIdentifier), "
+                                    + "state=\(Self.stateName(live.state)), \(sent / 1024)/\(expected / 1024) КБ) — жду его ответ, новый не отправляю"
+                                )
                                 return
                             }
                             // Между getAllTasks и его callback мог прийти готовый ответ.
@@ -246,12 +267,24 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                                 var outgoing = request
                                 let task: URLSessionTask
                                 let phase: TransferPhase
+                                let endpoint = Self.describeEndpoint(outgoing.url)
                                 if let body = request.httpBody {
                                     let path = Self.file(id, "body")
                                     try body.write(to: path, options: [.atomic, .completeFileProtectionUntilFirstUserAuthentication])
                                     outgoing.httpBody = nil
                                     task = self.session.uploadTask(with: outgoing, fromFile: path)
                                     phase = .sending(sent: 0, expected: Int64(body.count))
+                                    self.sendingTasks[id] = UploadStallTracker(
+                                        taskIdentifier: task.taskIdentifier,
+                                        endpoint: endpoint,
+                                        expected: Int64(body.count),
+                                        lastSent: 0
+                                    )
+                                    self.ensureStallTimerLocked()
+                                    Journal.append(
+                                        "передача: старт \(outgoing.httpMethod ?? "POST") \(endpoint), "
+                                        + "\(body.count / 1024) КБ, задача #\(task.taskIdentifier)"
+                                    )
                                 } else {
                                     task = self.session.downloadTask(with: outgoing)
                                     phase = .awaiting
@@ -305,6 +338,10 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
         guard UUID(uuidString: jobID) != nil else { return }
         queue.async {
             self.cancelledJobs.insert(jobID)
+            for id in Array(self.sendingTasks.keys) where id.hasPrefix(jobID + "_") {
+                self.sendingTasks.removeValue(forKey: id)
+            }
+            self.stopStallTimerIfIdleLocked()
             self.visible.withLock { state in
                 state.deferredJobs.remove(jobID)
                 state.inSystem = state.inSystem.filter { !$0.hasPrefix(jobID + "_") }
@@ -354,7 +391,256 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
         }
     }
 
+    // MARK: - Сторож зависшей отправки
+
+    /// Чистая логика обнаружения зависшей отправки тела запроса.
+    ///
+    /// Считает именно активные тики процесса, а не настенное время: если iOS
+    /// усыпила приложение на 20 минут, пробуждение добавит не больше одного тика и
+    /// не сбросит живую фоновую передачу.
+    struct UploadStallTracker: Equatable, Sendable {
+        static let warnTicks = 2
+        static let abortTicks = 6
+
+        enum ProgressEvent: Equatable, Sendable {
+            case none
+            case restarted(fromPercent: Int, toPercent: Int)
+            case milestone(Int)
+            case finishedSending
+        }
+
+        enum TickAction: Equatable, Sendable {
+            case none
+            case warn(percent: Int, sentKB: Int64, expectedKB: Int64)
+            case abort(percent: Int, sentKB: Int64, expectedKB: Int64)
+        }
+
+        let taskIdentifier: Int
+        let endpoint: String
+        var expected: Int64
+        var lastSent: Int64
+        var highestSent: Int64
+        var stalledTicks = 0
+        var warnedStall = false
+        var lastMilestone = 0
+
+        init(taskIdentifier: Int, endpoint: String, expected: Int64, lastSent: Int64) {
+            self.taskIdentifier = taskIdentifier
+            self.endpoint = endpoint
+            self.expected = expected
+            self.lastSent = max(0, lastSent)
+            self.highestSent = max(0, lastSent)
+            self.lastMilestone = Self.milestoneBucket(sent: self.lastSent, expected: expected)
+        }
+
+        static func percent(sent: Int64, expected: Int64) -> Int {
+            guard expected > 0 else { return 0 }
+            return Int((min(1, max(0, Double(sent) / Double(expected))) * 100).rounded(.down))
+        }
+
+        private static func milestoneBucket(sent: Int64, expected: Int64) -> Int {
+            guard expected >= 512 * 1024 else { return 0 }
+            let pct = percent(sent: sent, expected: expected)
+            return min(75, (pct / 25) * 25)
+        }
+
+        mutating func recordProgress(sent: Int64, expected newExpected: Int64) -> ProgressEvent {
+            if newExpected > 0 { expected = newExpected }
+            let clamped = max(0, sent)
+            if expected > 0, clamped >= expected {
+                lastSent = clamped
+                highestSent = max(highestSent, clamped)
+                stalledTicks = 0
+                return .finishedSending
+            }
+            if highestSent > 0, clamped < highestSent {
+                let fromPct = Self.percent(sent: highestSent, expected: expected)
+                let toPct = Self.percent(sent: clamped, expected: expected)
+                lastSent = clamped
+                highestSent = clamped
+                stalledTicks = 0
+                warnedStall = false
+                lastMilestone = Self.milestoneBucket(sent: clamped, expected: expected)
+                return .restarted(fromPercent: fromPct, toPercent: toPct)
+            }
+            if clamped > lastSent {
+                lastSent = clamped
+                highestSent = max(highestSent, clamped)
+                stalledTicks = 0
+                warnedStall = false
+                let bucket = Self.milestoneBucket(sent: clamped, expected: expected)
+                if bucket > lastMilestone {
+                    lastMilestone = bucket
+                    return .milestone(bucket)
+                }
+            }
+            return .none
+        }
+
+        mutating func recordTick(liveSent: Int64, isRunning: Bool) -> TickAction {
+            guard isRunning, expected > 0, lastSent < expected, liveSent < expected else { return .none }
+            if liveSent > lastSent {
+                lastSent = liveSent
+                highestSent = max(highestSent, liveSent)
+                stalledTicks = 0
+                warnedStall = false
+                return .none
+            }
+            stalledTicks += 1
+            let pct = Self.percent(sent: lastSent, expected: expected)
+            let sentKB = lastSent / 1024
+            let expectedKB = expected / 1024
+            if stalledTicks >= Self.abortTicks {
+                return .abort(percent: pct, sentKB: sentKB, expectedKB: expectedKB)
+            }
+            if stalledTicks >= Self.warnTicks, !warnedStall {
+                warnedStall = true
+                return .warn(percent: pct, sentKB: sentKB, expectedKB: expectedKB)
+            }
+            return .none
+        }
+    }
+
+    static func describeEndpoint(_ url: URL?) -> String {
+        guard let url else { return "—" }
+        let host = url.host() ?? ""
+        let path = url.path
+        return host.isEmpty ? (path.isEmpty ? "—" : path) : host + path
+    }
+
+    private static func stateName(_ state: URLSessionTask.State) -> String {
+        switch state {
+        case .running: "running"
+        case .suspended: "suspended"
+        case .canceling: "canceling"
+        case .completed: "completed"
+        @unknown default: "unknown"
+        }
+    }
+
+    private func ensureStallTimerLocked() {
+        guard stallTimer == nil else { return }
+        let source = DispatchSource.makeTimerSource(queue: queue)
+        source.schedule(
+            deadline: .now() + .seconds(Self.stallTickSeconds),
+            repeating: .seconds(Self.stallTickSeconds)
+        )
+        source.setEventHandler { [weak self] in
+            self?.checkStalledUploadsLocked()
+        }
+        stallTimer = source
+        source.resume()
+    }
+
+    private func stopStallTimerIfIdleLocked() {
+        guard sendingTasks.isEmpty else { return }
+        stallTimer?.cancel()
+        stallTimer = nil
+    }
+
+    private func checkStalledUploadsLocked() {
+        guard !sendingTasks.isEmpty else {
+            stopStallTimerIfIdleLocked()
+            return
+        }
+        session.getAllTasks { tasks in
+            self.queue.async {
+                guard !self.sendingTasks.isEmpty else {
+                    self.stopStallTimerIfIdleLocked()
+                    return
+                }
+                for id in Array(self.sendingTasks.keys) {
+                    guard var tracker = self.sendingTasks[id] else { continue }
+                    guard let live = tasks.first(where: { $0.taskIdentifier == tracker.taskIdentifier })
+                        ?? tasks.first(where: { $0.taskDescription == id && $0.state != .completed }) else {
+                        self.sendingTasks.removeValue(forKey: id)
+                        continue
+                    }
+                    if live.countOfBytesExpectedToSend > 0, live.countOfBytesSent >= live.countOfBytesExpectedToSend {
+                        self.sendingTasks.removeValue(forKey: id)
+                        continue
+                    }
+                    let action = tracker.recordTick(liveSent: live.countOfBytesSent, isRunning: live.state == .running)
+                    switch action {
+                    case .none:
+                        self.sendingTasks[id] = tracker
+                    case let .warn(percent, sentKB, expectedKB):
+                        self.sendingTasks[id] = tracker
+                        let seconds = tracker.stalledTicks * Self.stallTickSeconds
+                        Journal.append(
+                            "передача: отправка стоит без движения ~\(seconds) с на \(percent)% "
+                            + "(\(sentKB)/\(expectedKB) КБ) — \(tracker.endpoint), задача #\(live.taskIdentifier)"
+                        )
+                    case let .abort(percent, sentKB, expectedKB):
+                        let seconds = tracker.stalledTicks * Self.stallTickSeconds
+                        Journal.append(
+                            "передача: отправка зависла без движения ~\(seconds) с на \(percent)% "
+                            + "(\(sentKB)/\(expectedKB) КБ) — сбрасываю задачу #\(live.taskIdentifier) (\(tracker.endpoint))"
+                        )
+                        self.sendingTasks.removeValue(forKey: id)
+                        self.stalledTaskIDs.insert(live.taskIdentifier)
+                        live.cancel()
+                    }
+                }
+                self.stopStallTimerIfIdleLocked()
+            }
+        }
+    }
+
     // MARK: - Делегат сессии
+
+    func urlSession(_ session: URLSession, taskIsWaitingForConnectivity task: URLSessionTask) {
+        let endpoint = Self.describeEndpoint(task.originalRequest?.url)
+        let id = task.taskIdentifier
+        Journal.append("передача: ждёт сеть (taskIsWaitingForConnectivity) — \(endpoint), задача #\(id)")
+    }
+
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willBeginDelayedRequest request: URLRequest,
+        completionHandler: @escaping (URLSession.DelayedRequestDisposition, URLRequest?) -> Void
+    ) {
+        let endpoint = Self.describeEndpoint(request.url ?? task.originalRequest?.url)
+        let id = task.taskIdentifier
+        completionHandler(.continueLoading, nil)
+        Journal.append("передача: система отложила запуск передачи — \(endpoint), задача #\(id)")
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didFinishCollecting metrics: URLSessionTaskMetrics) {
+        guard task.originalRequest?.httpMethod != "GET" else { return }
+        let endpoint = Self.describeEndpoint(task.originalRequest?.url)
+        let totalMs = Int((metrics.taskInterval.duration * 1000).rounded())
+        let attempts = metrics.transactionMetrics.count
+        var parts = ["передача: метрики \(endpoint) — \(totalMs) мс, попыток \(attempts)"]
+        if let last = metrics.transactionMetrics.last {
+            let proto = last.networkProtocolName ?? "?"
+            let ms: (Date?, Date?) -> String = { start, end in
+                guard let start, let end else { return "—" }
+                return "\(max(0, Int((end.timeIntervalSince(start) * 1000).rounded())))"
+            }
+            parts.append("proto=\(proto)")
+            parts.append("dns=\(ms(last.domainLookupStartDate, last.domainLookupEndDate))")
+            parts.append("tcp=\(ms(last.connectStartDate, last.connectEndDate))")
+            parts.append("tls=\(ms(last.secureConnectionStartDate, last.secureConnectionEndDate))")
+            parts.append("send=\(ms(last.requestStartDate, last.requestEndDate))")
+            parts.append("wait=\(ms(last.requestEndDate, last.responseStartDate))")
+            var flags: [String] = []
+            if last.isCellular { flags.append("cell") }
+            if last.isExpensive { flags.append("exp") }
+            if last.isConstrained { flags.append("constrained") }
+            if last.isProxyConnection { flags.append("proxy") }
+            if last.isReusedConnection { flags.append("reused") }
+            if !flags.isEmpty { parts.append("[\(flags.joined(separator: ","))]") }
+        }
+        Journal.append(parts.joined(separator: ", "))
+    }
+
+    func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) {
+        guard let error else { return }
+        let raw = error as NSError
+        Journal.append("передача: фоновая сессия стала недействительной — \(raw.domain) \(raw.code)")
+    }
 
     func urlSession(
         _ session: URLSession,
@@ -365,6 +651,26 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     ) {
         queue.async {
             guard let id = task.taskDescription else { return }
+            if var tracker = self.sendingTasks[id] {
+                switch tracker.recordProgress(sent: totalBytesSent, expected: totalBytesExpectedToSend) {
+                case .none:
+                    self.sendingTasks[id] = tracker
+                case let .restarted(fromPercent, toPercent):
+                    self.sendingTasks[id] = tracker
+                    Journal.append(
+                        "передача: система перезапустила отправку \(tracker.endpoint) "
+                        + "(было \(fromPercent)%, стало \(toPercent)%, \(totalBytesSent / 1024)/\(totalBytesExpectedToSend / 1024) КБ)"
+                    )
+                case let .milestone(percent):
+                    self.sendingTasks[id] = tracker
+                    Journal.append(
+                        "передача: отправлено \(percent)% (\(totalBytesSent / 1024)/\(totalBytesExpectedToSend / 1024) КБ) — \(tracker.endpoint)"
+                    )
+                case .finishedSending:
+                    self.sendingTasks.removeValue(forKey: id)
+                    self.stopStallTimerIfIdleLocked()
+                }
+            }
             self.publish(id, TransferPhase.from(sent: totalBytesSent, expected: totalBytesExpectedToSend))
         }
     }
@@ -387,7 +693,10 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         queue.async {
             let body = self.buffers.removeValue(forKey: task.taskIdentifier) ?? Data()
+            let wasStalled = self.stalledTaskIDs.remove(task.taskIdentifier) != nil
             guard let id = task.taskDescription else { return }
+            self.sendingTasks.removeValue(forKey: id)
+            self.stopStallTimerIfIdleLocked()
             self.visible.withLock { _ = $0.inSystem.remove(id) }
             defer { try? FileManager.default.removeItem(at: Self.file(id, "body")) }
             let readError = self.downloadErrors.removeValue(forKey: task.taskIdentifier)
@@ -400,14 +709,18 @@ final class BackgroundTranscriptionTransport: NSObject, URLSessionDataDelegate, 
                     let raw = error as NSError
                     return ", сбой \(raw.domain) \(raw.code)"
                 } ?? ""
+                let stallNote = wasStalled ? ", сброшена по зависанию отправки" : ""
                 Journal.append(
                     "передача: запрос кончился — \(status.map { "ответ \($0)" } ?? "без ответа"), "
-                    + "\(body.count / 1024) КБ, ждут \(self.waiters[id]?.count ?? 0)\(failure)"
+                    + "\(body.count / 1024) КБ, ждут \(self.waiters[id]?.count ?? 0)\(failure)\(stallNote)"
                 )
             }
             self.publish(id, .answered)
             if self.cancelledJobs.contains(String(id.split(separator: "_", maxSplits: 1)[0])) {
                 self.resolve(id, .failure(CancellationError())); return
+            }
+            if wasStalled {
+                self.resolve(id, .failure(URLError(.timedOut))); return
             }
             if let error = error ?? readError { self.resolve(id, .failure(error)); return }
             guard let response = task.response as? HTTPURLResponse, let url = response.url else {

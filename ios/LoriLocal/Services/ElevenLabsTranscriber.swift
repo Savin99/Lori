@@ -30,10 +30,17 @@ struct ElevenLabsTranscriber: Transcribing {
     /// прежний синхронный запрос: он проверен на живых записях.
     static let defaultAsyncFrom: TimeInterval = 30 * 60
 
+    struct GatewayRoute: Sendable {
+        let baseURL: URL
+        let token: String
+    }
+
     let session: URLSession
     let splitter: AudioSplitter
     /// Ключ приходит извне: так движок проверяется тестами без Keychain и без сети.
     let keyProvider: @Sendable () throws -> String?
+    /// Шлюз Mac mini для обхода блокировки по региону и зависаний HTTP/3 (QUIC).
+    let gatewayProvider: @Sendable () -> GatewayRoute?
     /// Порог асинхронной отправки и пауза между опросами — подставляются тестами.
     let asyncFrom: TimeInterval
     let pollEvery: Duration
@@ -42,14 +49,38 @@ struct ElevenLabsTranscriber: Transcribing {
         session: URLSession = CloudSession.patient,
         splitter: AudioSplitter = AudioSplitter(),
         keyProvider: @escaping @Sendable () throws -> String? = { try KeychainStore.key(for: .elevenLabs) },
+        gatewayProvider: @escaping @Sendable () -> GatewayRoute? = ElevenLabsTranscriber.defaultGatewayRoute,
         asyncFrom: TimeInterval = ElevenLabsTranscriber.defaultAsyncFrom,
         pollEvery: Duration = .seconds(10)
     ) {
         self.session = session
         self.splitter = splitter
         self.keyProvider = keyProvider
+        self.gatewayProvider = gatewayProvider
         self.asyncFrom = asyncFrom
         self.pollEvery = pollEvery
+    }
+
+    static func defaultGatewayRoute() -> GatewayRoute? {
+        guard !TranscriptionSettings.hasCustomElevenLabsBaseURL,
+              let baseURL = GatewaySettings.baseURL,
+              let token = try? KeychainStore.key(for: .gateway),
+              !token.isEmpty else { return nil }
+        return GatewayRoute(baseURL: baseURL, token: token)
+    }
+
+    private func makeRequest(path: String, key: String, method: String = "GET", timeout: TimeInterval) -> (request: URLRequest, viaGateway: Bool) {
+        let route = TranscriptionSettings.hasCustomElevenLabsBaseURL ? nil : gatewayProvider()
+        let url = route.map { $0.baseURL.appending(path: "v1/elevenlabs/v1/\(path)") }
+            ?? TranscriptionSettings.elevenLabsBaseURL.appending(path: path)
+        var request = URLRequest(url: url)
+        request.httpMethod = method
+        request.timeoutInterval = timeout
+        request.setValue(key, forHTTPHeaderField: "xi-api-key")
+        if let route {
+            request.setValue("Bearer \(route.token)", forHTTPHeaderField: "Authorization")
+        }
+        return (request, route != nil)
     }
 
     var name: String { "ElevenLabs · \(TranscriptionSettings.elevenLabsModel)" }
@@ -162,25 +193,22 @@ struct ElevenLabsTranscriber: Transcribing {
             data: try Data(contentsOf: prepared.url)
         )
 
+        let built = makeRequest(path: "speech-to-text", key: key, method: "POST", timeout: 1800)
+        var request = built.request
+        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
+        request.httpBody = body.finish()
+
         let megabytes = max(1, body.size / 1024 / 1024)
         Diagnostics.note(
             "ElevenLabs → \(model) вся запись \(Int(duration)) с, режим \(ask.mode.rawValue), "
             + "таймкоды \(ask.timestamps ? "вкл" : "выкл"), говорящие \(ask.speakers ? "вкл" : "выкл"), "
             + "\(prepared.mime), \(megabytes) МБ, словарь \(keyterms.count)"
             + (asynchronously ? ", асинхронно" : "")
+            + (built.viaGateway ? ", через шлюз Mac mini" : "")
         )
         // Запрос один и долгий, поэтому о нём говорится словами: иначе на экране
         // минуты пустой полосы без единого признака жизни.
         note("отправляю запись целиком, \(megabytes) МБ")
-
-        var request = URLRequest(url: TranscriptionSettings.elevenLabsTranscriptionsURL)
-        request.httpMethod = "POST"
-        request.setValue(key, forHTTPHeaderField: "xi-api-key")
-        request.setValue(body.contentType, forHTTPHeaderField: "Content-Type")
-        // Вся запись одним запросом: полтора часа звука на медленном канале —
-        // это выгрузка плюс счёт на стороне сервиса.
-        request.timeoutInterval = 1800
-        request.httpBody = body.finish()
 
         let (data, response): (Data, URLResponse)
         do {
@@ -193,6 +221,7 @@ struct ElevenLabsTranscriber: Transcribing {
         }
         do {
             try APICheck.ensureSuccess(response: response, data: data)
+            try Self.ensureNotGeoRestricted(response: response)
         } catch {
             // Webhook в кабинете не заведён — асинхронно сервис не примет. Отправляем
             // по-старому: на записях, которые сервис считает меньше минуты, это
@@ -222,6 +251,12 @@ struct ElevenLabsTranscriber: Transcribing {
             return answer(from: decoded, ask: ask)
         }
         guard asynchronously, let accepted = try? JSONDecoder().decode(Accepted.self, from: data) else {
+            let http = response as? HTTPURLResponse
+            let contentType = http?.value(forHTTPHeaderField: "Content-Type") ?? "—"
+            Diagnostics.fault(
+                "ElevenLabs: нераспознанный ответ (\(http?.statusCode ?? 0), \(contentType), "
+                + "\(data.count) Б, \(BackgroundTranscriptionTransport.describeEndpoint(response.url)))"
+            )
             throw TranscriptionError.badResponse("ElevenLabs вернул ответ, который не удалось разобрать.")
         }
         guard let id = accepted.transcriptionID, !id.isEmpty else {
@@ -251,20 +286,18 @@ struct ElevenLabsTranscriber: Transcribing {
     /// скорости сервиса (час звука считается около минуты): полчаса плюс половина
     /// длины записи.
     private func poll(_ id: String, key: String, duration: TimeInterval) async throws -> Response {
-        let url = TranscriptionSettings.elevenLabsBaseURL.appending(path: "speech-to-text/transcripts/\(id)")
         let started = ContinuousClock.now
         let deadline = started + .seconds(30 * 60 + duration / 2)
         var polls = 0
         while true {
             try await Task.sleep(for: pollEvery)
             polls += 1
-            var request = URLRequest(url: url)
-            request.setValue(key, forHTTPHeaderField: "xi-api-key")
-            request.timeoutInterval = 60
+            let request = makeRequest(path: "speech-to-text/transcripts/\(id)", key: key, timeout: 60).request
             let (data, response) = try await BackgroundTranscriptionTransport.data(for: request, session: session)
             let status = (response as? HTTPURLResponse)?.statusCode
             if status != 404 {
                 try APICheck.ensureSuccess(response: response, data: data)
+                try Self.ensureNotGeoRestricted(response: response)
                 guard let decoded = try? JSONDecoder().decode(Response.self, from: data) else {
                     throw TranscriptionError.badResponse("ElevenLabs отдал расшифровку \(id), которую не удалось разобрать.")
                 }
@@ -279,6 +312,15 @@ struct ElevenLabsTranscriber: Transcribing {
                 )
             }
         }
+    }
+
+    private static func ensureNotGeoRestricted(response: URLResponse) throws {
+        guard let host = response.url?.host(),
+              host.localizedCaseInsensitiveContains("geo-restriction") else { return }
+        Diagnostics.fault("ElevenLabs: редирект на \(host) — сервис недоступен из региона запроса")
+        throw TranscriptionError.api(
+            "ElevenLabs не принимает запросы из этого региона. Настрой шлюз Mac mini или включи VPN."
+        )
     }
 
     /// Слова из ответа. `spacing` — это пробелы между словами, они нужны только
@@ -473,11 +515,10 @@ struct ElevenLabsTranscriber: Transcribing {
         guard let key = try keyProvider(), !key.isEmpty else {
             throw TranscriptionError.missingKey(.elevenLabs)
         }
-        var request = URLRequest(url: TranscriptionSettings.elevenLabsUserURL)
-        request.setValue(key, forHTTPHeaderField: "xi-api-key")
-        request.timeoutInterval = 30
+        let request = makeRequest(path: "user", key: key, timeout: 30).request
         let (data, response) = try await BackgroundTranscriptionTransport.data(for: request, session: session)
         try APICheck.ensureSuccess(response: response, data: data)
+        try Self.ensureNotGeoRestricted(response: response)
         return TranscriptionSettings.describedTarget(for: .elevenLabs)
     }
 }

@@ -278,6 +278,10 @@ enum TranscriptionSettings {
             ?? URL(string: defaultElevenLabsBaseURL)!
     }
 
+    static var hasCustomElevenLabsBaseURL: Bool {
+        elevenLabsBaseURL.absoluteString != defaultElevenLabsBaseURL
+    }
+
     static var elevenLabsTranscriptionsURL: URL {
         elevenLabsBaseURL.appending(path: "speech-to-text")
     }
@@ -453,7 +457,12 @@ enum TranscriptionSettings {
         case .openAI: "\(openAIBaseURL.host() ?? "OpenAI") · \(openAIModel)"
         case .gemini: "\(geminiHost.host() ?? "Gemini") · \(geminiModel)"
         case .geminiSubscription: "Подписка Gemini"
-        case .elevenLabs: "\(elevenLabsBaseURL.host() ?? "ElevenLabs") · \(elevenLabsModel)"
+        case .elevenLabs:
+            if !hasCustomElevenLabsBaseURL, GatewaySettings.isConfigured {
+                "через Mac mini → api.elevenlabs.io · \(elevenLabsModel)"
+            } else {
+                "\(elevenLabsBaseURL.host() ?? "ElevenLabs") · \(elevenLabsModel)"
+            }
         }
     }
 

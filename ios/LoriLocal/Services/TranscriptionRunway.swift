@@ -206,6 +206,7 @@ final class TranscriptionRunway: ObservableObject {
         Self.current = self
         network.pathUpdateHandler = { @Sendable [weak self] path in
             guard path.status == .satisfied else { return }
+            JournalSync.shared.flushNow()
             Task { @MainActor in self?.service.connectionBecameAvailable() }
         }
         network.start(queue: DispatchQueue(label: "Lori.connectivity"))

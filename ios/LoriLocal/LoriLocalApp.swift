@@ -27,6 +27,9 @@ struct LoriLocalApp: App {
     init() {
         let workspace = WorkspaceStore(rootURL: RecoveryProbe.enabled ? RecoveryProbe.root : nil)
         _workspace = StateObject(wrappedValue: workspace)
+        // Подхватываем прошлый хвост журнала до записи о новом запуске, чтобы
+        // сбои прошлой сборки дошли до Mac mini без ручной пересылки.
+        JournalSync.shared.start()
         // Самой первой строкой — какая сборка работает. Дальше по журналу
         // разбирают поведение на телефоне, и начинать разбор надо с этого.
         Journal.noteLaunch()
@@ -161,6 +164,7 @@ struct LoriLocalApp: App {
                     // Заголовки, отложенные на время фона, считаются здесь: в фоне
                     // графического процессора нет, и модель там убивает процесс.
                     summaryRunner.applicationDidBecomeActive()
+                    JournalSync.shared.flushNow()
                 }
                 // Уход в фон обрывает счёт заголовка до того, как система заберёт
                 // графический процессор. `willResignActive`, а не
@@ -175,6 +179,7 @@ struct LoriLocalApp: App {
                     RecoveryProbe.note("didEnterBackground")
                     transcription.applicationDidEnterBackground()
                     runway.applicationDidEnterBackground()
+                    JournalSync.shared.flushNow(backgroundTask: true)
                 }
                 .task {
                     workspace.start()

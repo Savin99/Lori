@@ -46,7 +46,9 @@ struct TranscriptionJob: Codable, Sendable, Equatable {
         }
         // Адрес фиксируем целиком, включая встроенное умолчание. Иначе продолжение
         // после смены настроек могло бы отправить аудио уже на другой сервер.
-        if kind == .geminiSubscription { values[GatewaySettings.baseURLKey] = GatewaySettings.baseURL?.absoluteString ?? "" }
+        if kind == .geminiSubscription || kind == .elevenLabs {
+            values[GatewaySettings.baseURLKey] = GatewaySettings.baseURL?.absoluteString ?? ""
+        }
         values[TranscriptionSettings.engineKey] = kind.rawValue
         return Self(id: UUID().uuidString, kind: kind, values: values, created: .now)
     }

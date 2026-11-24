@@ -10,6 +10,7 @@ final class StubURLProtocol: URLProtocol {
         var status = 200
         var headers: [String: String] = ["Content-Type": "application/json"]
         var body = Data()
+        var url: URL? = nil
 
         static func json(_ text: String, status: Int = 200) -> Reply {
             Reply(status: status, body: Data(text.utf8))
@@ -83,7 +84,7 @@ final class StubURLProtocol: URLProtocol {
             return Self.handler?(request, body) ?? Reply()
         }
         let response = HTTPURLResponse(
-            url: request.url ?? URL(string: "https://stub.invalid")!,
+            url: reply.url ?? request.url ?? URL(string: "https://stub.invalid")!,
             statusCode: reply.status,
             httpVersion: "HTTP/1.1",
             headerFields: reply.headers

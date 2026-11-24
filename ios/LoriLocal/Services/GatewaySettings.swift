@@ -23,7 +23,9 @@ enum GatewaySettings {
 
     static var baseURL: URL? {
         // Пустой или неправильный ручной адрес — «не настроено», а не откат.
-        if let job = TranscriptionJob.current, job.kind == .geminiSubscription { return job.values[baseURLKey].flatMap(validatedURL) }
+        if let job = TranscriptionJob.current, job.kind == .geminiSubscription || job.kind == .elevenLabs {
+            return job.values[baseURLKey].flatMap(validatedURL)
+        }
         if let value = UserDefaults.standard.string(forKey: baseURLKey) { return validatedURL(value) }
         return BundledAPIKeys.gatewayURL
     }

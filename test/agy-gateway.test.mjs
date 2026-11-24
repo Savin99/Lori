@@ -1,7 +1,7 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { once } from 'node:events'
-import { request as httpRequest } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, rename, rm, symlink, writeFile } from 'node:fs/promises'
@@ -154,8 +154,10 @@ async function fixture (t, settings = {}, prepare) {
   // Как у настоящего agy — режим WAL. После выхода процесса -wal и -shm удаляются,
   // и открыть такую базу только на чтение нельзя: на Mac mini чистка падала именно так.
   await executeFile('/usr/bin/sqlite3', [join(root, 'conversation_summaries.db'), 'PRAGMA journal_mode=WAL; CREATE TABLE conversation_summaries (conversation_id TEXT PRIMARY KEY, title TEXT); CREATE VIRTUAL TABLE conversations_fts USING fts5(conversation_id UNINDEXED, body);'])
+  const clientLogFile = join(directory, 'lori-ios.log')
   const config = gatewayConfig({ ...process.env,
     LORI_AGY_BIN: bin, LORI_FFMPEG: ffmpeg, LORI_AGY_HOME: home, LORI_GATEWAY_TOKEN_FILE: tokenFile,
+    LORI_CLIENT_LOG_FILE: clientLogFile,
     LORI_GATEWAY_PORT: '0', LORI_AGY_CLEANUP: '1',
     LORI_GATEWAY_ANNOTATE_TIMEOUT_SECONDS: '5', LORI_GATEWAY_REPORT_TIMEOUT_SECONDS: '5', LORI_GATEWAY_TRANSCRIBE_TIMEOUT_SECONDS: '5',
     ...(typeof settings === 'function' ? await settings({ directory, home, root }) : settings)
@@ -908,4 +910,117 @@ test('convert запускает один ffmpeg, двое ждут, четвё�
   assert.equal((await f.done(job.id)).state, 'done')
   for (const response of await Promise.all([first, second, third])) { assert.equal(response.status, 200); await response.text() }
   assert.deepEqual((await conversionEvents(f)).map((event) => event.event), ['start', 'end', 'start', 'end', 'start', 'end'])
+})
+
+test('logs требует токен, text/plain, проверяет предел и сохраняет журнал клиента с правами 0600', async (t) => {
+  const f = await fixture(t, {}, ({ config }) => { config.maxLogBytes = 256 })
+  const unauth = await fetch(f.base + '/v1/logs', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'строка\n' })
+  assert.equal(unauth.status, 401)
+  const wrongType = await fetch(f.base + '/v1/logs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'application/json' }, body: '{}' })
+  assert.equal(wrongType.status, 415)
+  const tooLarge = await fetch(f.base + '/v1/logs', { method: 'POST', headers: { authorization: `Bearer ${TOKEN}`, 'content-type': 'text/plain' }, body: 'x'.repeat(300) })
+  assert.equal(tooLarge.status, 413)
+
+  const ok = await f.request('/v1/logs', {
+    method: 'POST',
+    headers: { 'content-type': 'text/plain; charset=utf-8', 'x-lori-build': '21', 'x-lori-ios': '27.2.1', 'x-lori-device': 'iPhone17,2;bad/name[]' },
+    body: '23.11 15:40:01 передача: старт POST\r\n23.11 15:40:31 передача: стоит на 2%\r\n'
+  })
+  assert.equal(ok.status, 200)
+  assert.equal(ok.body.ok, true)
+  const saved = await readFile(f.config.clientLogFile, 'utf8')
+  assert.match(saved, /\[build=21 ios=27\.2\.1 device=iPhone17,2badname\]/)
+  assert.ok(saved.includes('23.11 15:40:01 передача: старт POST\n23.11 15:40:31 передача: стоит на 2%\n'))
+  assert.equal((await lstat(f.config.clientLogFile)).mode & 0o777, 0o600)
+  // Текст журнала клиента не должен попадать в лог самого шлюза.
+  assert.ok(!JSON.stringify(f.logs).includes('стоит на 2%'))
+  assert.ok(f.logs.some((entry) => entry.type === 'request' && entry.kind === 'logs' && entry.state === 'done'))
+})
+
+test('logs обрезает переросший файл по границе строки и отвергает символическую ссылку', async (t) => {
+  const f = await fixture(t, {}, ({ config }) => { config.maxClientLogFileBytes = 2048 })
+  for (let i = 0; i < 40; i++) {
+    const res = await f.request('/v1/logs', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: `строка-${String(i).padStart(2, '0')} ${'а'.repeat(40)}\n`
+    })
+    assert.equal(res.status, 200)
+  }
+  const saved = await readFile(f.config.clientLogFile, 'utf8')
+  assert.ok(Buffer.byteLength(saved, 'utf8') <= 2048)
+  assert.ok(saved.includes('строка-39'))
+  assert.ok(!saved.includes('строка-00'))
+
+  const target = join(f.directory, 'victim.txt')
+  await writeFile(target, 'untouched')
+  await rm(f.config.clientLogFile)
+  await symlink(target, f.config.clientLogFile)
+  const bad = await f.request('/v1/logs', { method: 'POST', headers: { 'content-type': 'text/plain' }, body: 'попытка\n' })
+  assert.equal(bad.status, 400)
+  assert.equal(await readFile(target, 'utf8'), 'untouched')
+})
+
+test('elevenlabs проксирует speech-to-text, poll и user потоком, снимает Bearer и Alt-Svc', async (t) => {
+  const seen = []
+  const upstream = createServer(async (req, res) => {
+    const chunks = []
+    for await (const chunk of req) chunks.push(chunk)
+    seen.push({ method: req.method, url: req.url, headers: req.headers, body: Buffer.concat(chunks).toString('utf8') })
+    res.writeHead(200, {
+      'content-type': 'application/json',
+      'alt-svc': 'h3=":443"; ma=2592000',
+      'set-cookie': 'secret=1'
+    })
+    res.end(JSON.stringify({ text: 'Привет из ElevenLabs', path: req.url }))
+  })
+  upstream.listen(0, '127.0.0.1')
+  await once(upstream, 'listening')
+  t.after(() => new Promise((done) => upstream.close(done)))
+  const upstreamBase = `http://127.0.0.1:${upstream.address().port}`
+
+  const f = await fixture(t, { LORI_ELEVENLABS_UPSTREAM: upstreamBase }, ({ config }) => { config.maxElevenLabsBytes = 200 })
+  assert.equal((await f.request('/v1/health')).body.elevenLabsProxy, true)
+
+  // Без токена шлюза прокси не пускает.
+  const unauth = await fetch(f.base + '/v1/elevenlabs/v1/user', { headers: { 'xi-api-key': 'el-secret' } })
+  assert.equal(unauth.status, 401)
+  assert.equal(seen.length, 0)
+
+  // POST speech-to-text с multipart.
+  const post = await fetch(f.base + '/v1/elevenlabs/v1/speech-to-text', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'xi-api-key': 'el-secret-key', 'content-type': 'multipart/form-data; boundary=abc' },
+    body: '--abc\r\ncontent\r\n--abc--'
+  })
+  assert.equal(post.status, 200)
+  assert.equal(post.headers.get('alt-svc'), null, 'Alt-Svc обязан сниматься, чтобы iOS не уходила в HTTP/3')
+  assert.equal(post.headers.get('set-cookie'), null)
+  assert.equal((await post.json()).text, 'Привет из ElevenLabs')
+  assert.equal(seen[0].method, 'POST')
+  assert.equal(seen[0].url, '/v1/speech-to-text')
+  assert.equal(seen[0].headers['xi-api-key'], 'el-secret-key')
+  assert.equal(seen[0].headers.authorization, undefined, 'Bearer-токен шлюза не должен утекать в ElevenLabs')
+  assert.equal(seen[0].body, '--abc\r\ncontent\r\n--abc--')
+
+  // GET user и GET transcripts/<id>.
+  assert.equal((await f.request('/v1/elevenlabs/v1/user', { headers: { 'xi-api-key': 'el-secret-key' } })).status, 200)
+  assert.equal((await f.request('/v1/elevenlabs/v1/speech-to-text/transcripts/tr_123-abc', { headers: { 'xi-api-key': 'el-secret-key' } })).status, 200)
+  assert.equal(seen[1].url, '/v1/user')
+  assert.equal(seen[2].url, '/v1/speech-to-text/transcripts/tr_123-abc')
+
+  // Посторонние пути и методы запрещены.
+  assert.equal((await f.request('/v1/elevenlabs/v1/models')).status, 404)
+  assert.equal((await f.request('/v1/elevenlabs/v1/speech-to-text/transcripts/..%2Fuser')).status, 404)
+  assert.equal((await f.request('/v1/elevenlabs/v1/speech-to-text', { method: 'GET' })).status, 404)
+
+  // Превышение размера отбивается 413 до отправки.
+  const huge = await fetch(f.base + '/v1/elevenlabs/v1/speech-to-text', {
+    method: 'POST',
+    headers: { authorization: `Bearer ${TOKEN}`, 'xi-api-key': 'el-secret-key', 'content-type': 'application/octet-stream' },
+    body: 'x'.repeat(250)
+  })
+  assert.equal(huge.status, 413)
+  assert.ok(!JSON.stringify(f.logs).includes('el-secret-key'))
+  assert.ok(!JSON.stringify(f.logs).includes('Привет из ElevenLabs'))
 })

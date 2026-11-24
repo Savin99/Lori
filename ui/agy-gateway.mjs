@@ -1,15 +1,16 @@
 #!/usr/bin/env node
 // Шлюз сериализует штатные headless-запуски agy: подписка не рассчитана на
 // параллельные обращения, а запись не должна становиться инструкцией для машины.
-import { createServer } from 'node:http'
+import { createServer, request as httpRequest } from 'node:http'
+import { request as httpsRequest } from 'node:https'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import { spawn, execFile } from 'node:child_process'
 import { promisify } from 'node:util'
 import { homedir, tmpdir } from 'node:os'
-import { chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, writeFile } from 'node:fs/promises'
+import { appendFile, chmod, lstat, mkdir, mkdtemp, open, readFile, readdir, realpath, rename, rm, stat, writeFile } from 'node:fs/promises'
 import { createReadStream, existsSync } from 'node:fs'
 import { pipeline } from 'node:stream/promises'
-import { join, resolve, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const executeFile = promisify(execFile)
@@ -84,7 +85,13 @@ export function gatewayConfig (env = process.env) {
     resultTtlMs: positiveNumber(env, 'LORI_GATEWAY_RESULT_TTL_SECONDS', 7200) * 1000,
     cleanup: (env.LORI_AGY_CLEANUP ?? '1') === '1',
     maxJsonBytes: 4 * 1024 * 1024, maxAudioBytes: 95 * 1024 * 1024,
-    maxTranscriptChars: 1000000
+    maxTranscriptChars: 1000000,
+    clientLogFile: expand(env.LORI_CLIENT_LOG_FILE || '~/Services/logs/lori-ios.log'),
+    maxLogBytes: 512 * 1024,
+    maxClientLogFileBytes: 10 * 1024 * 1024,
+    elevenLabsUpstream: (env.LORI_ELEVENLABS_UPSTREAM || 'https://api.elevenlabs.io').replace(/\/+$/, ''),
+    elevenLabsTimeout: positiveNumber(env, 'LORI_GATEWAY_ELEVENLABS_TIMEOUT_SECONDS', 1800),
+    maxElevenLabsBytes: 512 * 1024 * 1024
   }
 }
 
@@ -517,6 +524,120 @@ function convertAudio (config, directory, suffix, signal) {
   })
 }
 
+// Метаданные из заголовков клиента в журнале — только безопасные ASCII-знаки.
+function sanitizeLogMeta (value) {
+  if (typeof value !== 'string') return ''
+  return value.replace(/[^A-Za-z0-9.,_+-]/g, '').slice(0, 64)
+}
+
+async function appendClientLog (config, text, meta) {
+  const path = config.clientLogFile
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 })
+  try {
+    const info = await lstat(path)
+    if (info.isSymbolicLink() || !info.isFile()) throw invalid('Некорректный файл журнала клиента.')
+  } catch (cause) {
+    if (cause.code !== 'ENOENT') throw cause
+  }
+  const stamp = new Date().toISOString()
+  const header = meta ? `--- ${stamp} [${meta}] ---\n` : `--- ${stamp} ---\n`
+  await appendFile(path, `${header}${text}\n`, { encoding: 'utf8', mode: 0o600 })
+  await chmod(path, 0o600)
+  const info = await stat(path)
+  if (info.size > config.maxClientLogFileBytes) {
+    const content = await readFile(path, 'utf8')
+    const kept = content.slice(-Math.max(1024, Math.floor(config.maxClientLogFileBytes / 2)))
+    const boundary = kept.indexOf('\n')
+    const trimmed = boundary !== -1 ? kept.slice(boundary + 1) : kept
+    const temporary = join(dirname(path), `.lori-ios-${randomUUID()}.log`)
+    try {
+      await writeFile(temporary, trimmed, { encoding: 'utf8', mode: 0o600, flag: 'wx' })
+      await rename(temporary, path)
+    } finally { await rm(temporary, { force: true }) }
+  }
+}
+
+const ELEVENLABS_SKIP_RESPONSE = new Set(['connection', 'keep-alive', 'proxy-authenticate', 'proxy-authorization', 'te', 'trailer', 'transfer-encoding', 'upgrade', 'alt-svc', 'set-cookie'])
+
+function elevenLabsTargetPath (method, pathname) {
+  if (method === 'POST' && pathname === '/v1/elevenlabs/v1/speech-to-text') return '/v1/speech-to-text'
+  if (method === 'GET' && pathname === '/v1/elevenlabs/v1/user') return '/v1/user'
+  if (method === 'GET') {
+    const match = /^\/v1\/elevenlabs\/v1\/speech-to-text\/transcripts\/([A-Za-z0-9._-]{1,128})$/.exec(pathname)
+    if (match) return `/v1/speech-to-text/transcripts/${match[1]}`
+  }
+  return undefined
+}
+
+// Потоковое проксирование ElevenLabs по чистому TCP: без буферизации аудио в RAM,
+// без утечки Bearer-токена шлюза и без заголовка Alt-Svc (который переводил iOS на HTTP/3).
+function proxyElevenLabs (config, request, response, upstreamPath, signal) {
+  return new Promise((resolveProxy, rejectProxy) => {
+    const declared = Number(request.headers['content-length'])
+    if (Number.isFinite(declared) && declared > config.maxElevenLabsBytes) {
+      request.resume()
+      rejectProxy(new GatewayError(413, 'size', 'Файл превышает предел загрузки через шлюз.'))
+      return
+    }
+    const target = new URL(upstreamPath, config.elevenLabsUpstream + '/')
+    const transport = target.protocol === 'http:' ? httpRequest : httpsRequest
+    const headers = {}
+    for (const name of ['xi-api-key', 'content-type', 'content-length', 'accept']) {
+      if (typeof request.headers[name] === 'string') headers[name] = request.headers[name]
+    }
+    let settled = false
+    let receivedBytes = 0
+    let upstreamRes
+    const finish = (error, value) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      signal.removeEventListener('abort', onAbort)
+      response.off('close', onClientClose)
+      if (error) rejectProxy(error)
+      else resolveProxy(value)
+    }
+    const upstreamReq = transport(target, { method: request.method, headers }, (res) => {
+      upstreamRes = res
+      const forwarded = {}
+      for (const [name, value] of Object.entries(res.headers)) {
+        if (value === undefined || ELEVENLABS_SKIP_RESPONSE.has(name.toLowerCase())) continue
+        forwarded[name] = value
+      }
+      if (!response.headersSent) response.writeHead(res.statusCode || 502, forwarded)
+      res.on('error', () => {
+        if (!response.writableEnded) response.destroy()
+        finish(new GatewayError(502, 'agent', 'Обрыв при чтении ответа ElevenLabs.'))
+      })
+      res.on('end', () => finish(null, { status: res.statusCode || 502, bytes: receivedBytes }))
+      res.pipe(response)
+    })
+    const abortUpstream = (cause) => {
+      upstreamReq.destroy()
+      upstreamRes?.destroy()
+      finish(cause)
+    }
+    const onAbort = () => abortUpstream(new GatewayError(503, 'cancelled', 'Шлюз остановлен.'))
+    const onClientClose = () => { if (!response.writableFinished) abortUpstream(invalid('Загрузка прервана клиентом.')) }
+    const timer = setTimeout(() => abortUpstream(new GatewayError(504, 'timeout', 'ElevenLabs не успел ответить.')), config.elevenLabsTimeout * 1000)
+    signal.addEventListener('abort', onAbort, { once: true })
+    response.once('close', onClientClose)
+    upstreamReq.on('error', () => finish(new GatewayError(502, 'agent', 'Не удалось связаться с ElevenLabs через Mac mini.')))
+    request.on('data', (chunk) => {
+      receivedBytes += chunk.length
+      request.loriBytes = receivedBytes
+      if (receivedBytes > config.maxElevenLabsBytes) {
+        request.unpipe(upstreamReq)
+        request.resume()
+        abortUpstream(new GatewayError(413, 'size', 'Файл превышает предел загрузки через шлюз.'))
+      }
+    })
+    request.on('aborted', () => abortUpstream(invalid('Загрузка прервана клиентом.')))
+    request.on('error', () => abortUpstream(invalid('Ошибка чтения тела запроса.')))
+    request.pipe(upstreamReq)
+  })
+}
+
 export async function createGateway (config = gatewayConfig(), { logger = (entry) => console.log(JSON.stringify(entry)) } = {}) {
   let token
   try { token = (await readFile(config.tokenFile, 'utf8')).trim() } catch { throw new Error('Не удалось прочитать файл токена шлюза. Создайте LORI_GATEWAY_TOKEN_FILE с токеном не короче 32 знаков.') }
@@ -540,6 +661,13 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
   let conversionCount = 0
   let conversionTail = Promise.resolve()
   const conversions = new Set()
+  // Запись клиентских журналов сериализуется отдельно от очереди agy и конвертации.
+  let logWriteTail = Promise.resolve()
+  const writeClientLog = (text, meta) => {
+    const task = logWriteTail.catch(() => {}).then(() => appendClientLog(config, text, meta))
+    logWriteTail = task.catch(() => {})
+    return task
+  }
   const reserveConversion = () => {
     if (conversionCount >= 3) throw new GatewayError(429, 'rate', 'Mac mini переводит другие записи. Повторите позже.', 10)
     conversionCount += 1
@@ -719,7 +847,36 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
       if (closing) throw new GatewayError(503, 'queue', 'Шлюз останавливается. Повторите позже.')
       const url = new URL(request.url, 'http://localhost')
       if (request.method === 'GET' && url.pathname === '/v1/health') {
-        kind = 'health'; reply(200, { ok: true, convert: await ffmpegAvailable(config), agy: { path: config.agyBin, version } }); state = 'done'
+        kind = 'health'; reply(200, { ok: true, convert: await ffmpegAvailable(config), elevenLabsProxy: true, agy: { path: config.agyBin, version } }); state = 'done'
+      } else if (url.pathname.startsWith('/v1/elevenlabs/')) {
+        kind = 'elevenlabs'
+        const upstreamPath = elevenLabsTargetPath(request.method, url.pathname)
+        if (!upstreamPath) throw new GatewayError(404, 'missing', 'Шлюз не обслуживает этот путь ElevenLabs.')
+        const controller = new AbortController()
+        controllers.add(controller)
+        try {
+          const outcome = await proxyElevenLabs(config, request, response, upstreamPath, controller.signal)
+          bytes = outcome.bytes
+          state = outcome.status >= 200 && outcome.status < 300 ? 'done' : 'failed'
+        } finally {
+          controllers.delete(controller)
+        }
+      } else if (request.method === 'POST' && url.pathname === '/v1/logs') {
+        kind = 'logs'
+        const type = (request.headers['content-type'] || '').split(';')[0].trim().toLowerCase()
+        if (type !== 'text/plain') throw new GatewayError(415, 'type', 'Для журнала нужен Content-Type text/plain.')
+        const body = await readBody(request, config.maxLogBytes)
+        bytes = body.size
+        const clean = body.body.replace(/\r\n?/g, '\n').trim()
+        if (clean) {
+          const meta = [
+            ['build', sanitizeLogMeta(request.headers['x-lori-build'])],
+            ['ios', sanitizeLogMeta(request.headers['x-lori-ios'])],
+            ['device', sanitizeLogMeta(request.headers['x-lori-device'])]
+          ].filter(([, value]) => value).map(([name, value]) => `${name}=${value}`).join(' ')
+          await writeClientLog(clean, meta)
+        }
+        reply(200, { ok: true, bytes }); state = 'done'
       } else if (request.method === 'POST' && url.pathname === '/v1/convert') {
         kind = 'convert'
         if (!await ffmpegAvailable(config)) throw new GatewayError(503, 'unavailable', 'На Mac mini недоступен ffmpeg.')
@@ -832,7 +989,7 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
     } finally {
       request.resume()
       bytes = request.loriBytes ?? bytes
-      log({ type: 'request', method: request.method, kind: ['health', 'usage', 'transcribe', 'annotate', 'report', 'convert', 'json'].includes(kind) ? kind : 'unknown', bytes, chars, durationSeconds: (Date.now() - started) / 1000, state, ...(errorCode && { errorCode }) })
+      log({ type: 'request', method: request.method, kind: ['health', 'usage', 'transcribe', 'annotate', 'report', 'convert', 'logs', 'elevenlabs', 'json'].includes(kind) ? kind : 'unknown', bytes, chars, durationSeconds: (Date.now() - started) / 1000, state, ...(errorCode && { errorCode }) })
     }
   })
   server.requestTimeout = config.uploadTimeout * 1000
@@ -856,7 +1013,7 @@ export async function createGateway (config = gatewayConfig(), { logger = (entry
         work.job.state = 'cancelled'; finish(work.job); work.resolveDone()
       } else work.reject(new GatewayError(503, 'queue', 'Шлюз останавливается.'))
     }
-    await Promise.allSettled([...conversions])
+    await Promise.allSettled([...conversions, logWriteTail])
     if (pumping) await pumping
     for (const timer of expirations) clearTimeout(timer)
     expirations.clear()

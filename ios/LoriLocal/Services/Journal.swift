@@ -47,19 +47,23 @@ enum Journal {
     }
 
     static func append(_ line: String) {
-        lock.withLock {
+        let text = lock.withLock { () -> String? in
             let text = "\(stamp.string(from: Date())) \(line)\n"
-            guard let data = text.data(using: .utf8) else { return }
+            guard let data = text.data(using: .utf8) else { return nil }
             let file = url
             guard let handle = try? FileHandle(forWritingTo: file) else {
                 try? data.write(to: file, options: .atomic)
-                return
+                return text
             }
             defer { try? handle.close() }
             try? handle.seekToEnd()
             try? handle.write(contentsOf: data)
+            return text
         }
         trim()
+        if let text {
+            JournalSync.shared.enqueue(text)
+        }
     }
 
     /// Обрезает журнал по границе строки, чтобы файл не рос без конца.

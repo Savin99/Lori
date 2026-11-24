@@ -469,6 +469,84 @@ final class ElevenLabsTranscriberTests: XCTestCase {
         XCTAssertEqual(sent.request.value(forHTTPHeaderField: "xi-api-key"), "тест-ключ")
         XCTAssertTrue(target.contains("scribe_v2"))
     }
+
+    func testGatewayRouteProxiesUploadPollAndValidationWithBothHeaders() async throws {
+        let gateway = ElevenLabsTranscriber.GatewayRoute(
+            baseURL: URL(string: "https://lori.example/gateway")!,
+            token: "gw-secret"
+        )
+        let counter = Counter()
+        let session = StubURLProtocol.session { request, _ in
+            if request.url?.path.hasSuffix("/user") == true {
+                return .json(#"{"subscription":{"tier":"pro"}}"#)
+            }
+            if request.httpMethod == "POST" {
+                return .json(#"{"transcription_id":"tr_99"}"#, status: 202)
+            }
+            return counter.next() == 1 ? .json(#"{"detail":"not ready"}"#, status: 404) : .json(Self.plain)
+        }
+        let transcriber = ElevenLabsTranscriber(
+            session: session,
+            keyProvider: { "el-secret" },
+            gatewayProvider: { gateway },
+            asyncFrom: 0,
+            pollEvery: .milliseconds(1)
+        )
+        let transcript = try await transcriber.transcribe(audioURL: audio)
+        XCTAssertEqual(transcript.text, "Привет мир.")
+        _ = try await transcriber.validate()
+
+        let urls = StubURLProtocol.requests.compactMap { $0.request.url?.absoluteString }
+        XCTAssertEqual(urls, [
+            "https://lori.example/gateway/v1/elevenlabs/v1/speech-to-text",
+            "https://lori.example/gateway/v1/elevenlabs/v1/speech-to-text/transcripts/tr_99",
+            "https://lori.example/gateway/v1/elevenlabs/v1/speech-to-text/transcripts/tr_99",
+            "https://lori.example/gateway/v1/elevenlabs/v1/user",
+        ])
+        for item in StubURLProtocol.requests {
+            XCTAssertEqual(item.request.value(forHTTPHeaderField: "xi-api-key"), "el-secret")
+            XCTAssertEqual(item.request.value(forHTTPHeaderField: "Authorization"), "Bearer gw-secret")
+        }
+    }
+
+    func testCustomBaseURLBypassesGatewayAndDropsGatewayBearer() async throws {
+        UserDefaults.standard.set("https://custom-proxy.example/v1", forKey: TranscriptionSettings.elevenLabsBaseURLKey)
+        let gateway = ElevenLabsTranscriber.GatewayRoute(
+            baseURL: URL(string: "https://lori.example/gateway")!,
+            token: "gw-secret"
+        )
+        let session = StubURLProtocol.session { _, _ in .json(Self.plain) }
+        let transcriber = ElevenLabsTranscriber(
+            session: session,
+            keyProvider: { "el-secret" },
+            gatewayProvider: { gateway }
+        )
+        _ = try await transcriber.transcribe(audioURL: audio)
+
+        let sent = try XCTUnwrap(StubURLProtocol.requests.first)
+        XCTAssertEqual(sent.request.url?.absoluteString, "https://custom-proxy.example/v1/speech-to-text")
+        XCTAssertEqual(sent.request.value(forHTTPHeaderField: "xi-api-key"), "el-secret")
+        XCTAssertNil(sent.request.value(forHTTPHeaderField: "Authorization"), "токен шлюза не уходит на сторонний адрес")
+    }
+
+    func testGeoRestrictionRedirectProducesClearRegionError() async {
+        let session = StubURLProtocol.session { _, _ in
+            StubURLProtocol.Reply(
+                status: 200,
+                headers: ["Content-Type": "text/html"],
+                body: Data("<html>blocked</html>".utf8),
+                url: URL(string: "https://geo-restriction.elevenlabs.io/")
+            )
+        }
+        let transcriber = ElevenLabsTranscriber(
+            session: session,
+            keyProvider: { "el-secret" },
+            gatewayProvider: { nil }
+        )
+        await XCTAssertThrowsErrorAsync(try await transcriber.transcribe(audioURL: audio)) { error in
+            XCTAssertTrue(error.localizedDescription.contains("региона"), error.localizedDescription)
+        }
+    }
 }
 
 /// Счётчик шагов полосы: замыкание прогресса `@Sendable`, и копить в локальную
